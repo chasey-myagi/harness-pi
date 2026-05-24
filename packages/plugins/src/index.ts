@@ -1,4 +1,4 @@
-// 11 standard plugins
+// 12 standard plugins
 export { watchdog } from "./watchdog.js";
 export type { WatchdogOptions } from "./watchdog.js";
 
@@ -60,3 +60,6 @@ export type { CostTrackerOptions, CostStats } from "./cost-tracker.js";
 
 export { tokenBudget } from "./token-budget.js";
 export type { TokenBudgetOptions } from "./token-budget.js";
+
+export { repeatedCallGuard } from "./repeated-call-guard.js";
+export type { RepeatedCallGuardOptions } from "./repeated-call-guard.js";

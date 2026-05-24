@@ -21,11 +21,11 @@ import {
   type Api,
   type ToolCall,
   type ToolResultMessage,
-  validateToolCall,
 } from "@mariozechner/pi-ai";
 import { HookContextImpl } from "./context.js";
 import { HookDispatcher, type HookFailureSink } from "./dispatcher.js";
 import type { Hook, ToolExecResult } from "./hook.js";
+import { ToolExecutor, findToolByName } from "./tool-executor.js";
 import { createAttachmentMessage } from "./types.js";
 import type { HarnessTool } from "./types.js";
 import { randomUUID } from "node:crypto";
@@ -462,7 +462,15 @@ export class AgentSession {
         const toolResultsForTurn: ToolExecResult[] = [];
 
         if (toolCalls.length > 0) {
-          const results = await this._executeToolCalls(toolCalls);
+          const executor = new ToolExecutor({
+            tools: this.tools,
+            dispatcher: this._dispatcher,
+            ctx: this._ctx,
+            abortCtrl: this._abortCtrl,
+            pushAttachment: (c, e) => this._pushAttachment(c, e),
+            flushSystemMessages: (m) => this._flushSystemMessages(m),
+          });
+          const results = await executor.executeBatch(toolCalls);
           for (const call of toolCalls) {
             const result = results.get(call.id);
             if (!result) continue;
@@ -535,182 +543,6 @@ export class AgentSession {
     return "continue";
   }
 
-  /**
-   * 把 tool calls 按 isConcurrencySafe 分批并执行。
-   * 返回 Map<toolCallId, ToolExecResult>。
-   * 注意：依赖 Node.js 单线程语义——`Promise.all(safeBatch.map(...))` 并发触发 hook，
-   * `ctx.state` 写竞态由 plugin 自己负责（约定走 push-to-queue 不直接 mutate 共享 key）。
-   */
-  private async _executeToolCalls(
-    toolCalls: ToolCall[],
-  ): Promise<Map<string, ToolExecResult>> {
-    const safeBatch: ToolCall[] = [];
-    const sequential: ToolCall[] = [];
-
-    for (const call of toolCalls) {
-      const tool = findToolByName(this.tools, call.name);
-      let safe = false;
-      try {
-        safe = !!tool?.isConcurrencySafe?.(call.arguments);
-      } catch {
-        safe = false;
-      }
-      (safe ? safeBatch : sequential).push(call);
-    }
-
-    const results = new Map<string, ToolExecResult>();
-    const executeOne = (call: ToolCall): Promise<void> =>
-      this._executeOneToolCall(call).then((res) => {
-        results.set(call.id, res);
-      });
-
-    await Promise.all(safeBatch.map(executeOne));
-    for (const call of sequential) {
-      if (this._abortCtrl.signal.aborted) break;
-      await executeOne(call);
-    }
-
-    return results;
-  }
-
-  private async _executeOneToolCall(call: ToolCall): Promise<ToolExecResult> {
-    if (this._abortCtrl.signal.aborted) {
-      return {
-        content: [{ type: "text", text: "aborted before execution" }],
-        isError: true,
-      };
-    }
-
-    const tool = findToolByName(this.tools, call.name);
-    if (!tool) {
-      return {
-        content: [{ type: "text", text: `tool not found: ${call.name}` }],
-        isError: true,
-      };
-    }
-
-    // PreToolUse decision
-    const ptOut = await this._dispatcher.fireDecision(
-      "onPreToolUse",
-      { call, tool },
-      this._ctx,
-    );
-
-    if (ptOut?.continue === false) {
-      // 终止 session：flush systemMessage 让 operator 看到 halt 原因。
-      // 不 push additionalContext —— turn 后会立刻 abort 退出，_pendingAttachments
-      // 在 _runInternal 入口被清空（line ~213），push 进去是 dead write。
-      if (ptOut.systemMessage) {
-        this._flushSystemMessages([ptOut.systemMessage]);
-      }
-      this._abortCtrl.abort(
-        new Error(ptOut.stopReason ?? "onPreToolUse continue=false"),
-      );
-      return {
-        content: [
-          { type: "text", text: ptOut.stopReason ?? "halted by hook" },
-        ],
-        isError: true,
-      };
-    }
-
-    if (ptOut?.decision === "deny") {
-      // 对称地保留 dispatcher 聚合的 context 和 systemMessage（跟 continue=false 路径一致）
-      if (ptOut.additionalContext) {
-        this._pushAttachment(ptOut.additionalContext, "onPreToolUse");
-      }
-      if (ptOut.systemMessage) {
-        this._flushSystemMessages([ptOut.systemMessage]);
-      }
-      return {
-        content: [{ type: "text", text: ptOut.reason ?? "denied by hook" }],
-        isError: true,
-      };
-    }
-
-    // additionalContext 可以在 allow 路径也被聚合（dispatcher 已聚合多 hook）
-    if (ptOut?.additionalContext) {
-      this._pushAttachment(ptOut.additionalContext, "onPreToolUse");
-    }
-
-    const args = ptOut?.updatedInput ?? call.arguments;
-
-    // validate (pi-ai 用 canonical name，alias 路由由 kernel 负责)
-    const piTools = this.tools.map((t) => ({
-      name: t.name,
-      description: t.description,
-      parameters: t.parameters,
-    }));
-    try {
-      validateToolCall(piTools, {
-        ...call,
-        name: tool.name,
-        arguments: args,
-      });
-    } catch (err) {
-      await this._dispatcher.fireError(
-        {
-          phase: "tool",
-          err: err instanceof Error ? err : new Error(String(err)),
-          call,
-        },
-        this._ctx,
-      );
-      return {
-        content: [
-          {
-            type: "text",
-            text: err instanceof Error ? err.message : String(err),
-          },
-        ],
-        isError: true,
-      };
-    }
-
-    // execute (around chain)
-    const t0 = Date.now();
-    let rawResult: ToolExecResult;
-    try {
-      const wrapped = this._dispatcher.buildWrapToolExec(
-        call,
-        this._ctx,
-        () => tool.execute(args, this._ctx, this._abortCtrl.signal),
-      );
-      rawResult = await wrapped();
-    } catch (err) {
-      rawResult = {
-        content: [
-          {
-            type: "text",
-            text: err instanceof Error ? err.message : String(err),
-          },
-        ],
-        isError: true,
-      };
-      await this._dispatcher.fireError(
-        {
-          phase: "tool",
-          err: err instanceof Error ? err : new Error(String(err)),
-          call,
-        },
-        this._ctx,
-      );
-    }
-    const durationMs = Date.now() - t0;
-
-    // PostToolUse
-    const postOut = await this._dispatcher.fireEvent(
-      "onPostToolUse",
-      { call, result: rawResult, durationMs },
-      this._ctx,
-    );
-    this._flushSystemMessages(postOut.systemMessages);
-    for (const c of postOut.additionalContexts) {
-      this._pushAttachment(c, "onPostToolUse");
-    }
-
-    return postOut.updatedToolOutput ?? rawResult;
-  }
 
   /* ────────────── Helpers ────────────── */
 
@@ -737,16 +569,8 @@ export class AgentSession {
 
 /* ────────────── 模块级 helpers ────────────── */
 
-export function findToolByName(
-  tools: ReadonlyArray<HarnessTool>,
-  name: string,
-): HarnessTool | undefined {
-  for (const t of tools) {
-    if (t.name === name) return t;
-    if (t.aliases?.includes(name)) return t;
-  }
-  return undefined;
-}
+// findToolByName 移到 tool-executor.ts，从这里 re-export 保持向后兼容
+export { findToolByName } from "./tool-executor.js";
 
 /**
  * 把 attachment message 的 `_meta` 字段去掉再发给 pi-ai。

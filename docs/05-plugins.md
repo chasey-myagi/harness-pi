@@ -8,7 +8,7 @@
 2. [Plugin 工厂模式](#2-plugin-工厂模式)
 3. [`ctx.state` 约定](#3-ctxstate-约定)
 4. [文件组织](#4-文件组织)
-5. 标准库 11 个 plugin（每个独立小节）
+5. 标准库 12 个 plugin（每个独立小节）
    - [5.1 watchdog](#51-watchdog)
    - [5.2 trim-history](#52-trim-history)
    - [5.3 empty-run-guard](#53-empty-run-guard)
@@ -18,8 +18,9 @@
    - [5.7 batch-counter](#57-batch-counter)
    - [5.8 lease-decision](#58-lease-decision)
    - [5.9 metrics](#59-metrics)
-   - [5.10 cost-tracker](#510-cost-tracker) **新增**
-   - [5.11 token-budget](#511-token-budget) **新增（advanced）**
+   - [5.10 cost-tracker](#510-cost-tracker)
+   - [5.11 token-budget](#511-token-budget) **advanced**
+   - [5.12 repeated-call-guard](#512-repeated-call-guard) **v0.0.2 新增**
 6. [测试规约](#6-测试规约)
 
 ## 1. Plugin 是什么
@@ -94,6 +95,9 @@ ctx.state.set("sink", sink);
 
 **类型不安全**：`ctx.state` 是 `Map<string, unknown>`，读出来需要 cast。建议每个 plugin 在自己的代码里包一层 typed helper：
 
+> **输出共存约定**：多个 plugin 可以同时挂同一个 hook 方法，输出（`additionalContext` / `systemMessage` / etc.）会按注册顺序聚合。你的 reminder 可能跟别人的 reminder **共存**——同 turn LLM 看到 N 段 `<system-reminder>`。写 plugin 时假设别人也在写：用清晰的 tag 区分来源，不要把 `additionalContext` 当 plugin 间通信渠道（用 `ctx.state` 协作）。完整合并规则见 [03-hook-system §5.2 输出共存约定](03-hook-system.md#52-输出共存约定plugin-作者必读)。
+
+
 ```ts
 // watchdog.ts 内部
 const K_LAST_ACTIVITY = "watchdog.lastActivityTs";
@@ -164,7 +168,7 @@ export function _resetForTests(): void { ... }
 
 ---
 
-## 5. 标准库 11 个 plugin
+## 5. 标准库 12 个 plugin
 
 ### 5.1 watchdog
 
@@ -1233,6 +1237,52 @@ function readCumulativeTokens(ctx: HookContext): number {
 - diminishing 检测：连续 3 turn delta 都 < 500 → continue: false
 - nudge 在 50%/70% 等中段 turn 注入
 - 跟 cost-tracker 联动：先挂 cost-tracker 再挂 token-budget，读得到累计
+
+---
+
+### 5.12 repeated-call-guard
+
+#### 目的
+
+检测 LLM 反复用同 args 调同一 tool（"原地打转" semantic 信号）。token-budget 的 diminishing returns 是 token-delta 信号，跟语义无关；本 plugin 补上语义维度——窗口内同 `(tool, args)` 重复达阈值就触发回调。
+
+典型用例：
+- bidding-agent 反复 grep 同一关键词
+- research agent 反复搜索同一 query
+- 任何"agent 卡在某个想法上"的场景
+
+#### Hook 形态
+
+Event (`onPostToolUse` 滑动窗口记录 + 触发回调)
+
+#### 完整设计
+
+详见 [`packages/plugins/src/repeated-call-guard.ts`](../packages/plugins/src/repeated-call-guard.ts)。
+
+签名：
+```ts
+export function repeatedCallGuard(opts: {
+  threshold: number;           // ≥ threshold 次同 (tool, args) 触发
+  windowSize?: number;          // 默认 20
+  onRepeat: (ctx, pattern) => void;  // 典型：ctx.abort / 注 reminder / 记 metric
+  watchTools?: string[];        // 白名单，undefined = 全部
+  argsEqual?: (a, b) => boolean;  // 默认 JSON.stringify 比较
+  resetOnTrigger?: boolean;     // 默认 true，避免连续触发
+}): Hook;
+```
+
+#### 配置选项 / 失败模式
+
+- `threshold` 推荐 3-5（太小误报，太大错过 stuck pattern）
+- `windowSize` 推荐 10-30（覆盖 2-3 turn 的 tool 密度）
+- `argsEqual` 默认 JSON.stringify 对 key order 敏感——绝大多数 LLM tool call 同语义会同 order；真有需求传 callback 自定义
+- `error` 结果不计数（避免反复 retry 失败 tool 触发误报）
+
+#### 跟其他 plugin 配合
+
+- **跟 token-budget 互补**：token-budget 是定量（token 量），repeated-call-guard 是定性（pattern 重复）
+- **跟 metrics 配合**：`onRepeat` 里 `getMetricsSink(ctx)?.enqueue({ kind: "stuck.detected", ... })` 上报
+- **跟 system-reminder 配合**：`onRepeat` 里 `ctx.state.set("stuck.flag", true)`，system-reminder trigger 读 flag 注 "尝试不同的角度" 提醒
 
 ---
 

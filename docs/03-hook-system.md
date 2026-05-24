@@ -282,6 +282,31 @@ export interface HookResult {
 }
 ```
 
+### 5.2 输出共存约定（plugin 作者必读）
+
+**多个 plugin 可以同时挂同一个 hook 方法，输出会按注册顺序聚合**。这意味着：
+
+- 你的 `additionalContext` 不是独家——别的 plugin 可能也在同一 turn 注 reminder
+- 你的 `systemMessage` 不是独家——别的 plugin 也会写 console
+- 你的 `decision: "deny"` **可能不是第一个**——但 Decision 路径短路语义保证第一个决断的赢
+- 你的 `updatedInput` / `updatedToolOutput` 走 **last-writer-wins**——别的 plugin 后注册会覆盖你
+
+具体到几种典型 event：
+
+| Hook 形态 | 你写 `additionalContext: "X"` 时的行为 |
+|---|---|
+| `onContinuationCheck`（event 并行） | 跟其他 hook 的 additionalContext 拼成 `string[]`，kernel 逐个 push 成独立 attachment message |
+| `onTurnStart` / `onTurnEnd` / `onSessionStart` / `onPostToolUse`（event 并行） | 同上 —— LLM 同 turn 看到 N 段独立 `<system-reminder>` |
+| `onPreToolUse`（decision 短路） | dispatcher 把所有 hook 的累积值 `join("\n")` 成**一条** additionalContext 跟着决策返回 |
+
+实操建议：
+
+1. **写 reminder 时假设别人也在写**：用清晰的 tag（`<system-reminder>`, `<perf-warning>`）让 LLM 能区分来源
+2. **不要假设你的 attachment 紧邻 user prompt**：可能前后被夹其他 plugin 的内容
+3. **别把 additionalContext 当 plugin 间通信渠道**：协作走 `ctx.state.set/get`（约定带 plugin 前缀的 key）
+
+详见 [05-plugins.md §3 ctx.state 约定](05-plugins.md#3-ctxstate-约定).
+
 ## 6. Per-hook timeout
 
 每个 hook 自己声明 timeout，kernel 用 `Promise.race([hookFn(), timeoutPromise])` 兜底。
@@ -637,5 +662,5 @@ wrapToolExec(call, ctx, next) {
 ## 13. 下一步
 
 - [04-context-injection](04-context-injection.md) —— Context 注入的四种机制详解
-- [05-plugins](05-plugins.md) —— 11 个标准 plugin 如何用 hook 接口实现
+- [05-plugins](05-plugins.md) —— 12 个标准 plugin 如何用 hook 接口实现
 - [02-kernel](02-kernel.md) —— kernel 的 loop 怎么调用 dispatcher

@@ -608,10 +608,202 @@ describe("token-budget edge", () => {
   });
 });
 
+/* ──────────────── repeated-call-guard ──────────────── */
+
+describe("repeated-call-guard", () => {
+  it("triggers onRepeat when same (tool, args) hits threshold", async () => {
+    const model = createFakeModel([
+      {
+        content: [
+          { type: "toolCall", name: "echo", arguments: { msg: "stuck" } },
+          { type: "toolCall", name: "echo", arguments: { msg: "stuck" } },
+          { type: "toolCall", name: "echo", arguments: { msg: "stuck" } },
+        ],
+      },
+      { content: [{ type: "text", text: "done" }] },
+    ]);
+    const repeats: any[] = [];
+    const session = new AgentSession({
+      model,
+      tools: [echoTool],
+      hooks: [
+        repeatedCallGuard({
+          threshold: 3,
+          onRepeat: (_ctx, pattern) => repeats.push(pattern),
+        }),
+      ],
+    });
+    await session.run("loop");
+    expect(repeats).toHaveLength(1);
+    expect(repeats[0].tool).toBe("echo");
+    expect(repeats[0].count).toBe(3);
+    expect(repeats[0].args.msg).toBe("stuck");
+  });
+
+  it("different args don't accumulate", async () => {
+    const model = createFakeModel([
+      {
+        content: [
+          { type: "toolCall", name: "echo", arguments: { msg: "a" } },
+          { type: "toolCall", name: "echo", arguments: { msg: "b" } },
+          { type: "toolCall", name: "echo", arguments: { msg: "c" } },
+        ],
+      },
+      { content: [{ type: "text", text: "done" }] },
+    ]);
+    const repeats: any[] = [];
+    const session = new AgentSession({
+      model,
+      tools: [echoTool],
+      hooks: [
+        repeatedCallGuard({
+          threshold: 2,
+          onRepeat: (_ctx, p) => repeats.push(p),
+        }),
+      ],
+    });
+    await session.run("vary");
+    expect(repeats).toHaveLength(0);
+  });
+
+  it("watchTools filter: untracked tools don't count", async () => {
+    const otherTool: HarnessTool = {
+      name: "other",
+      description: "x",
+      parameters: Type.Object({ x: Type.String() }),
+      async execute() {
+        return { content: [{ type: "text", text: "ok" }] };
+      },
+    };
+    const model = createFakeModel([
+      {
+        content: [
+          { type: "toolCall", name: "other", arguments: { x: "1" } },
+          { type: "toolCall", name: "other", arguments: { x: "1" } },
+        ],
+      },
+      { content: [{ type: "text", text: "done" }] },
+    ]);
+    const repeats: any[] = [];
+    const session = new AgentSession({
+      model,
+      tools: [otherTool],
+      hooks: [
+        repeatedCallGuard({
+          threshold: 2,
+          watchTools: ["echo"], // 不监控 other
+          onRepeat: (_ctx, p) => repeats.push(p),
+        }),
+      ],
+    });
+    await session.run("go");
+    expect(repeats).toHaveLength(0);
+  });
+
+  it("error results don't count toward repeats", async () => {
+    const failTool: HarnessTool = {
+      name: "fail",
+      description: "x",
+      parameters: Type.Object({}),
+      async execute() {
+        throw new Error("boom");
+      },
+    };
+    const model = createFakeModel([
+      {
+        content: [
+          { type: "toolCall", name: "fail", arguments: {} },
+          { type: "toolCall", name: "fail", arguments: {} },
+          { type: "toolCall", name: "fail", arguments: {} },
+        ],
+      },
+      { content: [{ type: "text", text: "done" }] },
+    ]);
+    const repeats: any[] = [];
+    const session = new AgentSession({
+      model,
+      tools: [failTool],
+      hooks: [
+        repeatedCallGuard({
+          threshold: 2,
+          onRepeat: (_ctx, p) => repeats.push(p),
+        }),
+      ],
+    });
+    await session.run("go");
+    expect(repeats).toHaveLength(0);
+  });
+
+  it("resetOnTrigger=true: doesn't re-fire next call same pattern", async () => {
+    const model = createFakeModel([
+      {
+        content: [
+          { type: "toolCall", name: "echo", arguments: { msg: "x" } },
+          { type: "toolCall", name: "echo", arguments: { msg: "x" } },
+        ],
+      },
+      {
+        content: [
+          { type: "toolCall", name: "echo", arguments: { msg: "x" } },
+        ],
+      },
+      { content: [{ type: "text", text: "done" }] },
+    ]);
+    const repeats: any[] = [];
+    const session = new AgentSession({
+      model,
+      tools: [echoTool],
+      hooks: [
+        repeatedCallGuard({
+          threshold: 2,
+          resetOnTrigger: true,
+          onRepeat: (_ctx, p) => repeats.push(p),
+        }),
+      ],
+    });
+    await session.run("go");
+    // 2 个 echo("x") 触发一次；第 3 个 echo("x") 不应该再触发（pattern 已 reset）
+    expect(repeats).toHaveLength(1);
+  });
+
+  it("threshold <= 1 throws", () => {
+    expect(() =>
+      repeatedCallGuard({ threshold: 1, onRepeat: () => {} }),
+    ).toThrow();
+  });
+
+  it("onRepeat can ctx.abort to stop session", async () => {
+    const model = createFakeModel([
+      {
+        content: [
+          { type: "toolCall", name: "echo", arguments: { msg: "x" } },
+          { type: "toolCall", name: "echo", arguments: { msg: "x" } },
+        ],
+      },
+      // 这条不应被消费——abort 后退出
+      { content: [{ type: "text", text: "shouldn't see" }] },
+    ]);
+    const session = new AgentSession({
+      model,
+      tools: [echoTool],
+      hooks: [
+        repeatedCallGuard({
+          threshold: 2,
+          onRepeat: (ctx) => ctx.abort("stuck in loop"),
+        }),
+      ],
+    });
+    const summary = await session.run("go");
+    expect(summary.reason).toBe("aborted");
+    expect(summary.abortReason).toContain("stuck in loop");
+  });
+});
+
 /* ──────────────── BatchingSink close drain ──────────────── */
 
 import { BatchingSink } from "../metrics/batching-sink.js";
 import type { MetricEvent } from "../metrics/types.js";
+import { repeatedCallGuard } from "../repeated-call-guard.js";
 
 describe("BatchingSink close drain", () => {
   it("drains buffer + in-flight enqueues before resolving", async () => {

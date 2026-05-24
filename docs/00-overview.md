@@ -78,7 +78,7 @@ LOC 预算：**< 800 行**。超过就是设计在膨胀，回头审。
 
 ### 5.3 Plugin 自带电池
 
-`@harness-pi/plugins` 提供"production agent 几乎一定需要"的 11 个标准 plugin：
+`@harness-pi/plugins` 提供"production agent 几乎一定需要"的 12 个标准 plugin：
 
 watchdog · trim-history · empty-run-guard · tool-output-buffer · session-log · metrics · system-reminder · batch-counter · lease-decision · cost-tracker · token-budget
 
@@ -145,5 +145,5 @@ Hot path 上的 plugin **只允许同步操作或 push-to-queue**。需要持久
 如果你是来 review 设计：
 
 1. 看 [03-hook-system](03-hook-system.md)（核心 API 表面）
-2. 看 [05-plugins](05-plugins.md) §标准库（11 个 plugin 的形态——这是 API 的反向验证）
+2. 看 [05-plugins](05-plugins.md) §标准库（12 个 plugin 的形态——这是 API 的反向验证）
 3. 看 [02-kernel](02-kernel.md) §loop 算法（确保实现路径清晰）

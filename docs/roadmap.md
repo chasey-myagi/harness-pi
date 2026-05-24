@@ -17,7 +17,7 @@
   - [x] [02-kernel](02-kernel.md)
   - [x] [03-hook-system](03-hook-system.md)
   - [x] [04-context-injection](04-context-injection.md)
-  - [x] [05-plugins](05-plugins.md) —— 11 个标准 plugin
+  - [x] [05-plugins](05-plugins.md) —— 12 个标准 plugin
   - [x] [06-controllers](06-controllers.md)
   - [x] [07-adapters](07-adapters.md)
   - [x] [08-claude-code-lessons](08-claude-code-lessons.md) —— prior art 调研 + 借鉴清单
@@ -64,7 +64,7 @@
 
 ## Phase 2 — 标准库第一批 plugin
 
-**目标**：把 [05-plugins](05-plugins.md) 的 11 个 plugin 实现，每个 ≤100 LOC（cost-tracker / token-budget 可能略多）。
+**目标**：把 [05-plugins](05-plugins.md) 的 12 个 plugin 实现，每个 ≤100 LOC（cost-tracker / token-budget 可能略多）。
 
 - [ ] 建 `packages/plugins/`
 - [ ] [`watchdog`](05-plugins.md#51-watchdog)（around）
@@ -144,8 +144,66 @@
 
 ---
 
+## Phase 7 候选（v0.0.x 增量；按需求 pull）
+
+**做完才进 Phase 5**（bidding-agent 反向消费）。下面是按必要性排：
+
+### A. 已实现（v0.0.2）
+
+- [x] `repeatedCallGuard` plugin —— 检测 (tool, args) 重复 N 次的"原地打转" pattern，补 token-budget 的 semantic 盲点
+- [x] `ToolExecutor` 抽出 —— session.ts 789 → 613 LOC，单独可测
+
+### B. Plugin 候选（按需求）
+
+- [ ] `@harness-pi/plugins-goal` —— goal 抽象 scaffolding（不限定 domain）：
+  ```ts
+  goal<TGoal, TStatus>({
+    initial: TGoal,
+    getStatus: (ctx) => TStatus,
+    isComplete: (status) => boolean,
+    buildReminder: (goal, status) => string,
+    onIncomplete?: (status) => "continue" | "stop",
+  }): Hook
+  ```
+  注 reminder to onTurnStart + 续跑决策 to onContinuationCheck。
+  **触发条件**：第 2 个 agent（非 bidding-agent）需要 goal 模式 → 抽这个包；否则保留在 application 侧。
+
+- [ ] `permissionGate` plugin —— `onPreToolUse decision` + 配置化 rules（pattern matching），跟 Claude Code Permission 等价的轻量版。
+  **触发条件**：用户反馈需要"哪些 tool 允许哪些不允许"的声明式 API（vs 自己写 hook）。
+
+- [ ] `progressVerifier` plugin —— 跟 repeatedCallGuard 互补：检测"N turn 无新 tool / 无新 file 触达 / 无 questionId 推进" 等 semantic 不进展。**比 repeatedCallGuard 更激进**。
+  **触发条件**：repeatedCallGuard 在真实场景下证明不够用，需要更细粒度 progress 信号。
+
+### C. Controller 候选
+
+- [ ] `sideQuestion` controller —— 真正实现 docs 里的草图（CacheSafeParams + fork）。
+  **触发条件**：用户真有"一次性副问题"需求（如 debug / review parent's last decision）。
+
+- [ ] `subAgent` tool factory —— 让一个 tool 触发 sub-agent 跑子任务（隔离 context）。
+  **触发条件**：bidding-agent 或新 agent 真用 sub-agent 模式。
+
+### D. Adapter 候选
+
+- [ ] `PostgresSink`（metrics）—— peerDep on `pg`。
+  **触发条件**：v0.0.x 部署需要 dashboard 查询。
+
+- [ ] `OtelSink`（metrics）—— peerDep on `@opentelemetry/api`。
+  **触发条件**：用户用 OTel 栈做可观测。
+
+### E. Cleanup
+
+- [ ] hook.ts API 文档化 onContinuationCheck（当前只在 03-hook-system §4.1，docstring 更详尽）
+- [ ] `examples/03-pool` —— 用 `WorkPool` + 多 plugin 跑并行
+- [ ] `examples/04-lease-queue` —— 用 `LeaseQueue` 跑可重试的 task pipeline
+- [ ] CI（GitHub Actions：typecheck + test + build）
+
+---
+
 ## 当前位置
 
-**Phase 0 进行中 —— 等用户 review 9 份 doc + types.ts + hook.ts v1 签字。**
+**v0.0.1 已发布到 github.com/chasey-myagi/harness-pi。**
+**v0.0.2 开发中（已完成：ToolExecutor 抽出 + repeatedCallGuard plugin + 文档对齐）。**
 
-下一步触发条件：用户对 hook.ts 形状 + 文档设计满意（或提出需要改的地方，改完再签字），方进入 Phase 1。
+下一步看用户优先级：
+- 进 Phase 4（写第 2 个 agent 反向验证 API） → 暴露真实需求驱动 Phase 7 plugin 候选
+- 或先做 Phase 5（bidding-agent 反向消费）→ 验证 plugin 抽象在存量代码上够不够
