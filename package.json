@@ -1,0 +1,12 @@
+{
+  "name": "harness-pi",
+  "private": true,
+  "version": "0.0.0",
+  "description": "Production harness for pi-ai-based agents — kernel + plugins",
+  "type": "module",
+  "packageManager": "pnpm@10.15.0",
+  "scripts": {
+    "typecheck": "pnpm -r typecheck",
+    "build": "pnpm -r build"
+  }
+}

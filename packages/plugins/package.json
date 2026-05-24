@@ -1,0 +1,42 @@
+{
+  "name": "@harness-pi/plugins",
+  "version": "0.0.0",
+  "description": "Standard library of harness-pi plugins + controllers + sinks",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./controllers": {
+      "types": "./dist/controllers/index.d.ts",
+      "default": "./dist/controllers/index.js"
+    },
+    "./metrics/sinks/memory": {
+      "types": "./dist/metrics/sinks/memory.d.ts",
+      "default": "./dist/metrics/sinks/memory.js"
+    },
+    "./metrics/sinks/ndjson-file": {
+      "types": "./dist/metrics/sinks/ndjson-file.d.ts",
+      "default": "./dist/metrics/sinks/ndjson-file.js"
+    }
+  },
+  "files": ["dist", "src", "README.md"],
+  "scripts": {
+    "build": "tsc -p .",
+    "typecheck": "tsc -p . --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "dependencies": {
+    "@harness-pi/core": "workspace:*",
+    "@mariozechner/pi-ai": "^0.53.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.6.0",
+    "vitest": "^2.1.0",
+    "@types/node": "^22.0.0"
+  }
+}

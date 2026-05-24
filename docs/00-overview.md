@@ -1,0 +1,149 @@
+# 00 · Overview
+
+> 项目定位、目标用户、跟 pi-mono 的关系、设计哲学。
+
+## 1. 一句话定位
+
+**harness-pi 是给后端 / 服务端 / headless agent 的运行时基础设施**，建立在 [`@mariozechner/pi-ai`](https://github.com/badlogic/pi-mono/tree/main/packages/ai) 之上，提供 hook 系统、生命周期管理、metrics、Context 注入、并行编排等"驾驭 agent 所必需的东西"——而把 agent 内核保持最小。
+
+## 2. 谁该用 harness-pi
+
+- 把 agent 部署成 **后端 HTTP / WebSocket 服务**
+- 跑 **批处理 / scheduled worker** 处理大量任务
+- 嵌入到 **业务系统**（CRM / 工单 / RFP / 合规 / 审核）做特定领域 agent
+- 需要 **production observability**（metrics / trace / 配额 / 错误归因）
+- 需要 **并行多 worker**（pool / queue / lease）
+- 需要 **可定制的拦截/注入**（lease 冲突拦截、动态 system prompt、staleness reminder）
+
+典型场景：bidding-agent 这种"上传文件 → agent 处理 → 用户审核"流程；研究助手；PR review agent；客服路由 agent；多租户 SaaS agent 后台。
+
+## 3. 谁不该用 harness-pi
+
+- 想要 **终端交互式编码 agent**——用 [pi-coding-agent](https://github.com/badlogic/pi-mono/tree/main/packages/coding-agent) 现成的，那个跟 IDE/Shell 集成、有 `/login`、`/resume`、skill / extension / theme 系统。
+- 已经全栈用 **LangChain / LangGraph / LlamaIndex**——他们覆盖了 RAG / chain / graph 等更高层抽象，本项目不重复。
+- 只是想 **一次性写个 demo 跑通 LLM 调用**——直接用 `pi-ai`，30 行搞定，连 kernel 都不需要。
+
+## 4. 跟 pi-mono 的关系
+
+pi-mono 是三层独立的 package。我们消费 L1，**不**消费 L2，跟 L3 平级。
+
+```
+┌─────────────────────────────────────────────────────────┐
+│   @mariozechner/pi-ai —— unified LLM API + tool spec    │  L1  ← 我们 100% 依赖
+├──────────────────────────┬──────────────────────────────┤
+│  @mariozechner/          │  @harness-pi/core            │  L2
+│    pi-agent-core         │  (我们自己写 kernel，hook 一  │
+│  (Mario 的 agent 内核，   │   等公民)                     │
+│   observer pattern)      │                               │
+├──────────────────────────┼──────────────────────────────┤
+│  @mariozechner/          │  @harness-pi/plugins         │  L3
+│    pi-coding-agent       │  (watchdog / metrics / ...)  │
+│  (终端编码 agent)         │                               │
+└──────────────────────────┴──────────────────────────────┘
+        目标：终端程序员             目标：后端 / 服务 / 嵌入
+```
+
+**详细的"为什么不基于 pi-agent-core"**：见 [01-architecture.md §4](01-architecture.md#4-为什么不依赖-pi-agent-core)。
+
+**社交契约**：
+
+- 不动 pi-mono 一行代码
+- README 写明 "Built on `@mariozechner/pi-ai`. Inspired by pi-coding-agent's philosophy. Not affiliated."
+- 类比：**LangGraph 之于 LangChain Core / Remix 之于 React Router**——下游应用框架，明确站在上游肩膀上，不挑战上游
+
+## 5. 设计哲学（按重要性排序）
+
+### 5.1 最小内核
+
+Kernel（`@harness-pi/core`）只做三件事：
+
+1. **agent loop**（LLM call → tool exec → tool result → 再 call → 直到 done / max_turns / abort）
+2. **hook 派发**（按 hook 形态用不同执行策略）
+3. **生命周期**（`run` / `continue` / `abort` 的协议）
+
+不做：metrics、persistence、observability、orchestration、UI、CLI、provider 适配、auth 流程。**任何 domain 概念都不许漏进 core**（grep 不到 `question` / `evidence` / `judgment`）。
+
+LOC 预算：**< 800 行**。超过就是设计在膨胀，回头审。
+
+### 5.2 Hook 一等公民
+
+跟 pi-agent-core 的**核心区别**：pi-agent-core 给观察者（subscribe），harness-pi 给拦截器（hook）。
+
+- 我们的 hook 可以 **deny / modify / inject context / abort**
+- pi-agent-core 的 `subscribe` 只能看，看完事情已经发生了
+
+为什么这个差异关键：bidding-agent 一年踩出来的 lease 冲突、per-tool timeout、动态 system prompt、staleness reminder——这些都需要"在 LLM 调用前/工具执行前真正介入"，observer pattern 做不到。
+
+详见 [03-hook-system.md](03-hook-system.md)。
+
+### 5.3 Plugin 自带电池
+
+`@harness-pi/plugins` 提供"production agent 几乎一定需要"的 11 个标准 plugin：
+
+watchdog · trim-history · empty-run-guard · tool-output-buffer · session-log · metrics · system-reminder · batch-counter · lease-decision · cost-tracker · token-budget
+
+每个 plugin **≤100 LOC**，**纯 hook 实现**，**零互相依赖**（通过 `ctx.state` 协作）。详见 [05-plugins.md](05-plugins.md)。
+
+### 5.4 Controller 解决高阶模式
+
+pool / queue / lifecycle-restart 这类"编排多个 session"的能力不是 hook，是 **Controller**——它们调用 kernel 而不是包裹 kernel。
+
+详见 [06-controllers.md](06-controllers.md)。
+
+### 5.5 Adapter 走 peerDep
+
+Postgres sink、OTel sink、其他外部系统集成都走 peerDep——你不装 `pg`、`@opentelemetry/*` 等就不引入。`@harness-pi/plugins` 本身只带 in-memory 和 NDJSON file 这种零依赖 sink。
+
+详见 [07-adapters.md](07-adapters.md)。
+
+### 5.6 性能契约：plugin 不做阻塞 I/O
+
+Hot path 上的 plugin **只允许同步操作或 push-to-queue**。需要持久化走 Sink 异步批 flush。10 个标准 plugin 同时挂，hook overhead < 100μs。
+
+详见 [03-hook-system.md §性能契约](03-hook-system.md#9-性能契约)。
+
+## 6. 明确不做的（anti-positioning）
+
+| 不做 | 理由 |
+|---|---|
+| Verify-then-Commit 工具协议 | RAG/citation 类 agent 的 application pattern，不是 harness 该背的 |
+| Work item lock 状态机 | HITL 特定；用 hook 组合出来即可 |
+| Question / Evidence / Judgment 等任何 domain 概念 | bidding-agent 自己的领域 |
+| 内置 DB schema | Sink 走接口 + peerDep；core 只有 in-memory sink |
+| 内置 metric kinds 字典 | 只给 generic 几个；用户走 module augmentation 扩 |
+| Frontend / dashboard | 独立 repo，将来再说 |
+| pi-coding-agent 的 extension API 兼容 | 方向完全不同（终端 UX vs 服务端运行时） |
+| MCP 集成 | Mario 不做，我们也不做；要用 plugin 自己接 |
+| 多 agent orchestration | 单 agent 内核先做扎实，多 agent 是 Controller 层 |
+| 替 pi-ai 做任何事 | Provider 接入、OAuth、cross-provider handoff——pi-ai 已经做了 |
+| 内置 RAG / vector store | 那是 langchain/llamaindex 的事，不是 harness |
+| 内置 compaction 策略 | 用户用 `transformMessagesBeforeLlm` 自己做 |
+
+## 7. 项目状态
+
+| Phase | 状态 |
+|---|---|
+| 0 设计签字 | **进行中**（hook 接口 v1 → v2 修订中） |
+| 1 Kernel 跑通 | 未开始 |
+| 2 标准库 plugin | 未开始 |
+| 3 Controller 层 | 未开始 |
+| 4 第三方 agent 反向验证 | 未开始 |
+| 5 bidding-agent 反向消费 | 未开始 |
+| 6 公开 / 冻结 v0.1 | 未开始 |
+
+详见 [roadmap](roadmap.md)。
+
+## 8. 下一步
+
+如果你是第一次读这份文档：
+
+1. 现在读完 → 读 [01-architecture](01-architecture.md) 看全貌
+2. 关心 hook 接口 → 跳 [03-hook-system](03-hook-system.md)
+3. 关心 plugin 怎么写 → 跳 [05-plugins](05-plugins.md)
+4. 关心怎么并行跑 → 跳 [06-controllers](06-controllers.md)
+
+如果你是来 review 设计：
+
+1. 看 [03-hook-system](03-hook-system.md)（核心 API 表面）
+2. 看 [05-plugins](05-plugins.md) §标准库（11 个 plugin 的形态——这是 API 的反向验证）
+3. 看 [02-kernel](02-kernel.md) §loop 算法（确保实现路径清晰）
