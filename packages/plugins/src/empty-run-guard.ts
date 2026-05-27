@@ -9,6 +9,12 @@
 
 import type { Hook, TurnEndInput, HookContext } from "@harness-pi/core";
 
+declare module "@harness-pi/core" {
+  interface HookStateRegistry {
+    "empty-run.consecutive": number;
+  }
+}
+
 export interface EmptyRunGuardOptions {
   /** 连续 N turn toolResults.length === 0 即触发 abort。 */
   maxEmptyTurns: number;
@@ -16,7 +22,7 @@ export interface EmptyRunGuardOptions {
   considerEmpty?: (input: TurnEndInput) => boolean;
 }
 
-const KEY = "empty-run.consecutive";
+const KEY = "empty-run.consecutive" as const;
 
 export function emptyRunGuard(opts: EmptyRunGuardOptions): Hook {
   if (opts.maxEmptyTurns <= 0) {
@@ -35,7 +41,7 @@ export function emptyRunGuard(opts: EmptyRunGuardOptions): Hook {
     },
 
     onTurnEnd(input, ctx: HookContext) {
-      const prev = (ctx.state.get(KEY) as number | undefined) ?? 0;
+      const prev = ctx.state.get(KEY) ?? 0;
       const isEmpty = considerEmpty(input);
       const now = isEmpty ? prev + 1 : 0;
       ctx.state.set(KEY, now);

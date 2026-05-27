@@ -9,6 +9,12 @@
 
 import type { Hook, HookContext } from "@harness-pi/core";
 
+declare module "@harness-pi/core" {
+  interface HookStateRegistry {
+    "tool-output-buffer.ring": RingBuffer;
+  }
+}
+
 export interface ToolOutputBufferOptions {
   /** 白名单工具名（其他工具的输出不入 buffer）。 */
   track: string[];
@@ -27,7 +33,7 @@ export interface BufferEntry {
   ts: number;
 }
 
-const KEY = "tool-output-buffer.ring";
+const KEY = "tool-output-buffer.ring" as const;
 
 const DEFAULT_MAX_ENTRIES = 200;
 const DEFAULT_MAX_BYTES = 20 * 1024 * 1024;
@@ -52,7 +58,7 @@ export function toolOutputBuffer(opts: ToolOutputBufferOptions): Hook {
 
     onPostToolUse(input, ctx) {
       if (!trackSet.has(input.call.name)) return;
-      const buf = ctx.state.get(KEY) as RingBuffer | undefined;
+      const buf = ctx.state.get(KEY);
       if (!buf) return;
       const text = input.result.content
         .filter((c): c is { type: "text"; text: string } => c.type === "text")
@@ -67,7 +73,7 @@ export function toolOutputBuffer(opts: ToolOutputBufferOptions): Hook {
     },
 
     onSessionEnd(_input, ctx) {
-      const buf = ctx.state.get(KEY) as RingBuffer | undefined;
+      const buf = ctx.state.get(KEY);
       buf?.clear();
       ctx.state.delete(KEY);
     },
@@ -75,7 +81,7 @@ export function toolOutputBuffer(opts: ToolOutputBufferOptions): Hook {
 }
 
 export function getToolOutputBuffer(ctx: HookContext): RingBuffer | undefined {
-  return ctx.state.get(KEY) as RingBuffer | undefined;
+  return ctx.state.get(KEY);
 }
 
 export class RingBuffer {

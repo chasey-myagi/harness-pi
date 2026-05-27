@@ -43,7 +43,13 @@ interface CallRecord {
   args: Record<string, unknown>;
 }
 
-const KEY = "repeated-call-guard.window";
+declare module "@harness-pi/core" {
+  interface HookStateRegistry {
+    "repeated-call-guard.window": CallRecord[];
+  }
+}
+
+const KEY = "repeated-call-guard.window" as const;
 
 function defaultArgsEqual(
   a: Record<string, unknown>,
@@ -75,7 +81,7 @@ export function repeatedCallGuard(opts: RepeatedCallGuardOptions): Hook {
       if (watchSet && !watchSet.has(input.call.name)) return;
       if (input.result.isError) return; // 失败的 call 不计
 
-      const window = ctx.state.get(KEY) as CallRecord[] | undefined;
+      const window = ctx.state.get(KEY);
       if (!window) return;
 
       const argsKey = safeStringify(input.call.arguments);

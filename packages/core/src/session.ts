@@ -22,9 +22,9 @@ import {
   type ToolCall,
   type ToolResultMessage,
 } from "@mariozechner/pi-ai";
-import { HookContextImpl } from "./context.js";
+import { HookContextImpl, KERNEL_INTERNALS } from "./context.js";
 import { HookDispatcher, type HookFailureSink } from "./dispatcher.js";
-import type { Hook, ToolExecResult } from "./hook.js";
+import type { Hook, LogLevel, SessionConfigView, ToolExecResult } from "./hook.js";
 import { ToolExecutor, findToolByName } from "./tool-executor.js";
 import { createAttachmentMessage } from "./types.js";
 import type { HarnessTool } from "./types.js";
@@ -50,6 +50,17 @@ export interface AgentSessionOptions {
   consoleSink?: (
     msg: string,
     ctx: { sessionId: string; turnIdx: number },
+  ) => void;
+  /**
+   * `ctx.log.<level>(msg, fields?)` 的后端 sink。默认走 console.{log,warn,error,debug}
+   * 带 `[harness-pi <sessionId> turn=N]` 前缀。生产环境通常注入 pino / winston / 业务 logger。
+   *
+   * sink 永远在 hot path 上同步调用；如果要 ship 远端，先 buffer 再 batch flush。
+   */
+  logSink?: (
+    level: LogLevel,
+    msg: string,
+    fields: Record<string, unknown>,
   ) => void;
 }
 
@@ -116,13 +127,24 @@ export class AgentSession {
       });
 
     this._abortCtrl = new AbortController();
-    this._ctx = new HookContextImpl({
+    const configView: SessionConfigView = {
+      sessionId: this.id,
+      model: { id: this.model.id, provider: this.model.provider },
+      // 真实 tool 列表会随 `use()` 改变？暂不会——hooks 只能在 idle 加。tools 是构造期固定。
+      toolNames: Object.freeze(this.tools.map((t) => t.name)),
+      maxTurns: this.maxTurns,
+      maxContinuations: this.maxContinuations,
+    };
+    const ctxDeps: import("./context.js").HookContextDeps = {
       sessionId: this.id,
       initialSignal: this._abortCtrl.signal,
       messages: this._messages,
+      config: configView,
       onAppendMessage: (msg) => this._messages.push(msg),
       onAbort: (reason) => this._abortCtrl.abort(new Error(reason)),
-    });
+    };
+    if (opts.logSink) ctxDeps.logSink = opts.logSink;
+    this._ctx = new HookContextImpl(ctxDeps);
   }
 
   get messages(): ReadonlyArray<Message> {
@@ -209,7 +231,7 @@ export class AgentSession {
   }): Promise<RunSummary> {
     // 每次 run/continue 重建 AbortController；上次的 abort 状态不污染本次
     this._abortCtrl = new AbortController();
-    this._ctx._setSignal(this._abortCtrl.signal);
+    this._ctx[KERNEL_INTERNALS].setSignal(this._abortCtrl.signal);
     this._pendingAttachments = [];
     this._lastTurnError = null;
 
@@ -373,7 +395,7 @@ export class AgentSession {
         return { turnIdx, reason: "aborted" };
       }
 
-      this._ctx._setTurnIdx(turnIdx);
+      this._ctx[KERNEL_INTERNALS].setTurnIdx(turnIdx);
       const outcome = await this._runOneTurn(turnIdx);
       turnIdx++;
 

@@ -18,10 +18,15 @@ export type {
   BufferEntry,
 } from "./tool-output-buffer.js";
 
-export { sessionLog, getSessionLogDropped } from "./session-log.js";
+export {
+  sessionLog,
+  getSessionLogDropped,
+  getSessionLogStatus,
+} from "./session-log.js";
 export type {
   SessionLogOptions,
   SessionLogEventName,
+  SessionLogStatus,
 } from "./session-log.js";
 
 export { systemReminder } from "./system-reminder.js";

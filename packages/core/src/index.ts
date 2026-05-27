@@ -16,6 +16,12 @@ export type {
   PostToolUseInput,
   UserPromptSubmitInput,
   ErrorInput,
+  // ─── Phase 1: state typing / structured log / config view ───
+  HookStateRegistry,
+  TypedStateMap,
+  HookLogger,
+  LogLevel,
+  SessionConfigView,
 } from "./hook.js";
 
 // ─────────── Dispatcher (advanced; plugin authors usually don't need) ───────────

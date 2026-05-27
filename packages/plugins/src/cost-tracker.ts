@@ -7,6 +7,14 @@
 
 import type { Hook, HookContext } from "@harness-pi/core";
 
+/* ── 在 core 的 HookStateRegistry 上 augment 本 plugin 用到的 key ── */
+declare module "@harness-pi/core" {
+  interface HookStateRegistry {
+    "cost-tracker.stats": CostStats;
+    "cost-tracker.startTs": number;
+  }
+}
+
 export interface CostTrackerOptions {
   /** 自定义 USD 计算（null 则只统计 token 不算 cost）。 */
   costModel?: (
@@ -36,8 +44,9 @@ export interface CostStats {
   >;
 }
 
-const KEY = "cost-tracker.stats";
-const KEY_START = "cost-tracker.startTs";
+// `as const` 保留字面类型，让 TypedStateMap 走 typed overload 而不是 string fallback
+const KEY = "cost-tracker.stats" as const;
+const KEY_START = "cost-tracker.startTs" as const;
 
 function newStats(): CostStats {
   return {
@@ -76,7 +85,7 @@ export function costTracker(opts: CostTrackerOptions = {}): Hook {
     },
 
     onLlmEnd(input, ctx) {
-      const stats = ctx.state.get(KEY) as CostStats | undefined;
+      const stats = ctx.state.get(KEY);
       if (!stats) return;
       const usage = input.msg.usage;
       const modelId = input.msg.model || "unknown";
@@ -118,8 +127,8 @@ export function costTracker(opts: CostTrackerOptions = {}): Hook {
     },
 
     onSessionEnd(_input, ctx) {
-      const stats = ctx.state.get(KEY) as CostStats | undefined;
-      const startTs = ctx.state.get(KEY_START) as number | undefined;
+      const stats = ctx.state.get(KEY);
+      const startTs = ctx.state.get(KEY_START);
       if (!stats || startTs === undefined) return;
       stats.durationMs = Date.now() - startTs;
       opts.onSessionFinalized?.(ctx, stats);
@@ -128,5 +137,5 @@ export function costTracker(opts: CostTrackerOptions = {}): Hook {
 }
 
 export function getCostStats(ctx: HookContext): CostStats | undefined {
-  return ctx.state.get(KEY) as CostStats | undefined;
+  return ctx.state.get(KEY);
 }

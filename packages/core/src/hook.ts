@@ -164,6 +164,81 @@ export interface MergedHookResult {
 /* ──────────────────── HookContext ──────────────────── */
 
 /**
+ * Plugin 在 `ctx.state` 里写入的 key → 值类型映射表。Plugin 用 module augmentation 注册自己的 key：
+ *
+ * @example
+ *   // 在你的 plugin 文件顶部：
+ *   declare module "@harness-pi/core" {
+ *     interface HookStateRegistry {
+ *       "cost-tracker.stats": CostStats;
+ *       "cost-tracker.startTs": number;
+ *     }
+ *   }
+ *
+ * 之后 `ctx.state.get("cost-tracker.stats")` 直接拿到 `CostStats | undefined`，无需 `as` 强转。
+ *
+ * 未注册的 key 走 fallback：`get/set` 接受 `string` 并退回 `unknown`，跟当前调用点行为一致。
+ */
+// eslint-disable-next-line @typescript-eslint/no-empty-interface
+export interface HookStateRegistry {}
+
+type RegistryKey = keyof HookStateRegistry & string;
+
+/**
+ * 已注册 key K 对应的值类型；未注册 key 回退 `unknown`。用单个 conditional type 而不是
+ * overload，避免 TS 在字面类型匹配时退到 string fallback。
+ */
+type StateValueFor<K extends string> = K extends RegistryKey
+  ? HookStateRegistry[K]
+  : unknown;
+
+/**
+ * 类型化 state map。已注册 key 自动推断值类型，未注册 key 仍可用 string 但值是 `unknown`。
+ *
+ * 物理上是同一个 Map<string, unknown>，TypedStateMap 是它的 typed view。
+ */
+export interface TypedStateMap {
+  get<K extends string>(key: K): StateValueFor<K> | undefined;
+  set<K extends string>(key: K, value: StateValueFor<K>): void;
+  has<K extends string>(key: K): boolean;
+  delete<K extends string>(key: K): boolean;
+
+  readonly size: number;
+  clear(): void;
+}
+
+/**
+ * 结构化 logger —— plugin 用 `ctx.log.info(...)` 替代 `console.log`。
+ * sessionId / turnIdx 由 kernel 自动注入到每条 log 的 fields。
+ *
+ * 默认实现走 `console`（带 `[harness-pi sessionId turn=N]` 前缀）；
+ * `AgentSessionOptions.logSink` 可换成结构化 sink（pino / winston / 业务自管）。
+ */
+export type LogLevel = "debug" | "info" | "warn" | "error";
+
+export interface HookLogger {
+  debug(msg: string, fields?: Record<string, unknown>): void;
+  info(msg: string, fields?: Record<string, unknown>): void;
+  warn(msg: string, fields?: Record<string, unknown>): void;
+  error(msg: string, fields?: Record<string, unknown>): void;
+}
+
+/**
+ * Session 级 config 的只读视图。Plugin 想问"当前 model 是什么 / 有哪些 tool / maxTurns 多少"
+ * 时通过 `ctx.config` 拿，不要从 closure 里捕获——后者一旦 `session.use()` 改了 hooks
+ * 就过期。
+ *
+ * 借鉴 Claude Code QueryConfig（[08-claude-code-lessons](docs/08-claude-code-lessons.md) §2.1）。
+ */
+export interface SessionConfigView {
+  readonly sessionId: string;
+  readonly model: { id: string; provider: string };
+  readonly toolNames: ReadonlyArray<string>;
+  readonly maxTurns: number;
+  readonly maxContinuations: number;
+}
+
+/**
  * 整个 session 共享一个 HookContext 实例。turnIdx 等运行时字段由 kernel 在 turn 切换时更新。
  *
  * 详见 docs/02-kernel.md §7。
@@ -174,10 +249,14 @@ export interface HookContext {
   readonly turnIdx: number;
   /** session 级 abort signal。任何 hook / tool 应该尊重它。 */
   readonly signal: AbortSignal;
-  /** Plugin 之间协作的共享 map。约定 key 带 plugin 前缀防撞名。 */
-  readonly state: Map<string, unknown>;
+  /** Plugin 之间协作的共享 map。约定 key 带 plugin 前缀防撞名。已注册 key 自动类型推断（见 `HookStateRegistry`）。 */
+  readonly state: TypedStateMap;
   /** 当前 session.messages 的只读引用。 */
   readonly messages: ReadonlyArray<Message>;
+  /** Session 级 config 只读视图。Plugin 用它代替闭包捕获 model / tools / maxTurns 等。 */
+  readonly config: SessionConfigView;
+  /** 结构化 logger。所有 log 自动带 sessionId / turnIdx；plugin 自己的 name 在 `hook` 字段里手动加。 */
+  readonly log: HookLogger;
 
   /** Persistent message 注入：push 到 session.messages，下次 LLM call 看见。 */
   appendMessage(msg: Message): void;

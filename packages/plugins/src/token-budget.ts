@@ -9,6 +9,12 @@
 
 import type { Hook, HookContext, HookResult } from "@harness-pi/core";
 
+declare module "@harness-pi/core" {
+  interface HookStateRegistry {
+    "token-budget.tracker": BudgetTracker;
+  }
+}
+
 export interface TokenBudgetOptions {
   /** session 总 token 预算。null = 不限。 */
   budget: number | null;
@@ -31,7 +37,7 @@ interface BudgetTracker {
   fallbackOutput: number;
 }
 
-const KEY = "token-budget.tracker";
+const KEY = "token-budget.tracker" as const;
 
 function defaultNudge(
   pct: number,
@@ -42,13 +48,11 @@ function defaultNudge(
 }
 
 function readCumulativeTokens(ctx: HookContext): number {
-  // 优先 cost-tracker 累计
-  const cost = ctx.state.get("cost-tracker.stats") as
-    | { inputTokens: number; outputTokens: number }
-    | undefined;
+  // 优先 cost-tracker 累计（已通过 module augmentation 注册到 HookStateRegistry）
+  const cost = ctx.state.get("cost-tracker.stats");
   if (cost) return cost.inputTokens + cost.outputTokens;
   // fallback：本 plugin 自己 onLlmEnd 累计
-  const t = ctx.state.get(KEY) as BudgetTracker | undefined;
+  const t = ctx.state.get(KEY);
   return t ? t.fallbackInput + t.fallbackOutput : 0;
 }
 
@@ -74,7 +78,7 @@ export function tokenBudget(opts: TokenBudgetOptions): Hook {
     },
 
     onLlmEnd(input, ctx) {
-      const tr = ctx.state.get(KEY) as BudgetTracker | undefined;
+      const tr = ctx.state.get(KEY);
       if (!tr) return;
       tr.fallbackInput += input.msg.usage.input ?? 0;
       tr.fallbackOutput += input.msg.usage.output ?? 0;
@@ -83,7 +87,7 @@ export function tokenBudget(opts: TokenBudgetOptions): Hook {
     onTurnEnd(_input, ctx): HookResult | void {
       if (opts.budget == null || opts.budget <= 0) return;
 
-      const tr = ctx.state.get(KEY) as BudgetTracker | undefined;
+      const tr = ctx.state.get(KEY);
       if (!tr) return;
 
       const totalTokens = readCumulativeTokens(ctx);

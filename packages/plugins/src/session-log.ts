@@ -29,18 +29,58 @@ export interface SessionLogOptions {
   filenameFor?: (sessionId: string) => string;
 }
 
-const KEY_STREAM = "session-log.stream";
-
 interface StreamState {
   stream: WriteStream;
   backpressured: boolean;
   dropped: number;
+  /** Phase 2 加：stream close / error 后置 true；后续 write 直接丢，不再等不可能到达的 drain。 */
+  dead: boolean;
+  /** 终态原因（debug / status 暴露）。 */
+  deadReason?: string;
 }
+
+declare module "@harness-pi/core" {
+  interface HookStateRegistry {
+    "session-log.stream": StreamState;
+  }
+}
+
+const KEY_STREAM = "session-log.stream" as const;
 
 /** 业务 / debug 用：返回当前 session 因 backpressure 丢弃的 event 数。 */
 export function getSessionLogDropped(ctx: import("@harness-pi/core").HookContext): number {
-  const st = ctx.state.get(KEY_STREAM) as StreamState | undefined;
+  const st = ctx.state.get(KEY_STREAM);
   return st?.dropped ?? 0;
+}
+
+/**
+ * Phase 2 加：当前 stream 状态。
+ *
+ * - "ok"：可正常写入
+ * - "backpressured"：临时写满，等 drain；新 event 被 drop
+ * - "dead"：stream 已 close / error，永远不再写；新 event 也被 drop（不会再恢复）
+ * - "absent"：本 plugin 未挂或 session 未开始
+ *
+ * "dead" 跟 "backpressured" 区分很重要：前者是终态，后者是瞬态。监控应当对 dead 报警。
+ */
+export type SessionLogStatus = "ok" | "backpressured" | "dead" | "absent";
+
+export function getSessionLogStatus(
+  ctx: import("@harness-pi/core").HookContext,
+): { status: SessionLogStatus; dropped: number; deadReason?: string } {
+  const st = ctx.state.get(KEY_STREAM);
+  if (!st) return { status: "absent", dropped: 0 };
+  const dropped = st.dropped;
+  if (st.dead) {
+    const out: { status: SessionLogStatus; dropped: number; deadReason?: string } = {
+      status: "dead",
+      dropped,
+    };
+    if (st.deadReason !== undefined) out.deadReason = st.deadReason;
+    return out;
+  }
+  if (st.backpressured) return { status: "backpressured", dropped };
+  return { status: "ok", dropped };
 }
 
 export function sessionLog(opts: SessionLogOptions): Hook {
@@ -54,8 +94,17 @@ export function sessionLog(opts: SessionLogOptions): Hook {
     event: SessionLogEventName,
     payload: Record<string, unknown>,
   ): void => {
-    const st = ctx.state.get(KEY_STREAM) as StreamState | undefined;
-    if (!st || st.stream.writableEnded || st.stream.destroyed) return;
+    const st = ctx.state.get(KEY_STREAM);
+    if (!st) return;
+    // dead 是终态，永远不再尝试 write（即使 writableEnded/destroyed 也归入 dead）
+    if (st.dead || st.stream.writableEnded || st.stream.destroyed) {
+      if (!st.dead) {
+        st.dead = true;
+        st.deadReason = st.deadReason ?? "stream already ended/destroyed";
+      }
+      st.dropped++;
+      return;
+    }
     if (st.backpressured) {
       st.dropped++;
       return;
@@ -75,8 +124,11 @@ export function sessionLog(opts: SessionLogOptions): Hook {
           st.backpressured = false;
         });
       }
-    } catch {
-      /* swallow */
+    } catch (err) {
+      // write 抛错时（rare：通常 stream 已被 destroy）转 dead，不再继续尝试
+      st.dead = true;
+      st.deadReason = err instanceof Error ? err.message : String(err);
+      st.dropped++;
     }
   };
 
@@ -92,9 +144,27 @@ export function sessionLog(opts: SessionLogOptions): Hook {
       }
       const path = join(opts.dir, filenameFor(ctx.sessionId));
       const stream = createWriteStream(path, { flags: "a" });
-      const state: StreamState = { stream, backpressured: false, dropped: 0 };
-      stream.on("error", () => {
-        /* swallow; record-stat would be nice but plugin scope */
+      const state: StreamState = {
+        stream,
+        backpressured: false,
+        dropped: 0,
+        dead: false,
+      };
+      // 任一终态事件都把 stream 置 dead，后续 write 一律 drop，不等 drain（drain 永不到达）
+      stream.on("error", (err) => {
+        state.dead = true;
+        state.deadReason = err instanceof Error ? err.message : String(err);
+        ctx.log.warn("session-log: stream errored", {
+          hook: "session-log",
+          path,
+          reason: state.deadReason,
+        });
+      });
+      stream.on("close", () => {
+        if (!state.dead) {
+          state.dead = true;
+          state.deadReason = state.deadReason ?? "stream closed";
+        }
       });
       ctx.state.set(KEY_STREAM, state);
       if (includes("sessionStart")) {
@@ -109,7 +179,7 @@ export function sessionLog(opts: SessionLogOptions): Hook {
           reason: input.reason,
         });
       }
-      const st = ctx.state.get(KEY_STREAM) as StreamState | undefined;
+      const st = ctx.state.get(KEY_STREAM);
       st?.stream.end();
       ctx.state.delete(KEY_STREAM);
     },

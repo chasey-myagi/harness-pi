@@ -13,7 +13,13 @@ export interface MetricsOptions {
   kinds?: MetricKind[];
 }
 
-const KEY_SINK = "metrics.sink";
+declare module "@harness-pi/core" {
+  interface HookStateRegistry {
+    "metrics.sink": MetricsSink;
+  }
+}
+
+const KEY_SINK = "metrics.sink" as const;
 
 export function metrics(opts: MetricsOptions): Hook {
   const include = (k: MetricKind): boolean =>
@@ -111,7 +117,7 @@ export function metrics(opts: MetricsOptions): Hook {
 
 /** 业务代码 / 其他 plugin 拿 sink 自己 emit 自定义 kind。 */
 export function getMetricsSink(ctx: HookContext): MetricsSink | undefined {
-  return ctx.state.get(KEY_SINK) as MetricsSink | undefined;
+  return ctx.state.get(KEY_SINK);
 }
 
 /** Emit 一个事件，如果 ctx 里有 sink。 */

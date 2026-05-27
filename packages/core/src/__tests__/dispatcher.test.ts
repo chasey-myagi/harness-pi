@@ -8,12 +8,26 @@ import type { Hook, HookContext, MergedHookResult } from "../index.js";
 
 function fakeCtx(): HookContext {
   const ac = new AbortController();
+  const noopLog = {
+    debug: () => {},
+    info: () => {},
+    warn: () => {},
+    error: () => {},
+  };
   return {
     sessionId: "test",
     turnIdx: 0,
     signal: ac.signal,
-    state: new Map(),
+    state: new Map() as unknown as HookContext["state"],
     messages: [],
+    config: {
+      sessionId: "test",
+      model: { id: "fake", provider: "fake" },
+      toolNames: [],
+      maxTurns: 200,
+      maxContinuations: 5,
+    },
+    log: noopLog,
     appendMessage: vi.fn(),
     abort: vi.fn(),
     emit: vi.fn(),
