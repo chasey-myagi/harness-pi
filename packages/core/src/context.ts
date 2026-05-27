@@ -1,15 +1,16 @@
 /**
  * HookContextImpl —— HookContext 接口的具体实现。
  *
- * 整个 session 共享一个 instance。Kernel 通过 [KERNEL_INTERNALS] symbol-keyed bag 在
- * turn 切换 / run/continue 重入时更新运行时字段；symbol 不从 `index.ts` 导出，所以
- * plugin 拿到 ctx 也调不到 internal mutator。
+ * 整个 session 共享一个 instance。Kernel 通过 module-private WeakMap 持有
+ * 每个 ctx 实例对应的 mutator bag——plugin 拿不到 WeakMap 引用，
+ * 也不能通过 `Object.getOwnPropertySymbols(ctx)` 反射出来（早期 symbol 方案
+ * 的逃逸路径，已废弃；详见 Gate 1 review M1）。
  *
  * 设计要点：
  *   - state 物理上是 Map<string, unknown>；外部以 TypedStateMap 视图暴露
  *     （key 注册过的自动类型推断，未注册退回 unknown）。
  *   - log 是 HookLogger 接口；session 构造时可注入自定义 sink，默认走 console。
- *   - config 是 SessionConfigView 只读视图，由 session 构造时一次性 build；turn 内不变。
+ *   - config 是 SessionConfigView 只读视图，由 session 构造时一次性 deep-freeze；turn 内不变。
  */
 
 import type { Message } from "@mariozechner/pi-ai";
@@ -18,18 +19,35 @@ import type {
   HookLogger,
   LogLevel,
   SessionConfigView,
+  StateValueFor,
   TypedStateMap,
 } from "./hook.js";
-
-/**
- * Kernel-internal mutator bag。Plugin 拿不到这个 symbol，所以也调不到下面的方法。
- * 只在 `@harness-pi/core` 内部 import 这个 symbol。
- */
-export const KERNEL_INTERNALS = Symbol("@harness-pi/core::kernel-internals");
 
 export interface HookContextInternal {
   setTurnIdx(idx: number): void;
   setSignal(signal: AbortSignal): void;
+}
+
+/**
+ * Kernel ↔ HookContextImpl 之间的 internal mutator 通道。Module-private WeakMap：
+ *   - 外部从 `index.ts` 拿不到（不导出）
+ *   - 不在 ctx 实例上留任何 own property / symbol → `Object.getOwnPropertySymbols` 反射不到
+ *   - WeakMap 弱引用，ctx 被 GC 时自动清理
+ *
+ * 只允许 session.ts / 内部测试通过 `getKernelInternals(ctx)` 拿。
+ */
+const KERNEL_INTERNALS_BAG = new WeakMap<HookContextImpl, HookContextInternal>();
+
+/**
+ * 只能在 `@harness-pi/core` 内部用。Plugin 拿不到这个函数（不从 index 导出）。
+ * Session 用 `getKernelInternals(ctx).setTurnIdx(idx)` 推进 turn。
+ */
+export function getKernelInternals(
+  ctx: HookContextImpl,
+): HookContextInternal {
+  const bag = KERNEL_INTERNALS_BAG.get(ctx);
+  if (!bag) throw new Error("HookContext internals missing — constructor invariant violated");
+  return bag;
 }
 
 export interface HookContextDeps {
@@ -55,13 +73,33 @@ export interface HookContextDeps {
 /**
  * 默认 log sink：`console.<level>` 加结构化前缀，行尾 JSON 化 fields。
  * 不做 sampling / level 过滤 —— 那是 sink 替换者的事。
+ *
+ * 防御性 stringify：plugin 传循环引用时不让整个 turn crash。
  */
+function safeStringifyFields(fields: Record<string, unknown>): string {
+  if (Object.keys(fields).length === 0) return "";
+  try {
+    return ` ${JSON.stringify(fields)}`;
+  } catch {
+    // 退化为逐 key 字符串化，避免循环引用 / BigInt / Function 等 throw
+    const parts: string[] = [];
+    for (const [k, v] of Object.entries(fields)) {
+      try {
+        parts.push(`${k}=${JSON.stringify(v)}`);
+      } catch {
+        parts.push(`${k}=[unserializable]`);
+      }
+    }
+    return ` { ${parts.join(", ")} }`;
+  }
+}
+
 function defaultLogSink(
   level: LogLevel,
   msg: string,
   fields: Record<string, unknown>,
 ): void {
-  const fieldsStr = Object.keys(fields).length === 0 ? "" : ` ${JSON.stringify(fields)}`;
+  const fieldsStr = safeStringifyFields(fields);
   const line = `[harness-pi ${fields["sessionId"] ?? "?"} turn=${fields["turnIdx"] ?? "?"}] ${msg}${fieldsStr}`;
   // eslint-disable-next-line no-console
   const fn =
@@ -72,16 +110,42 @@ function defaultLogSink(
   fn(line);
 }
 
+/**
+ * TypedStateMap 的薄壳实现。物理仍是 Map<string, unknown>，conditional type 让 caller
+ * 在已注册 key 上拿到正确推断。命名 class 而不是 object literal，stack trace 友好。
+ */
+class StateMapImpl implements TypedStateMap {
+  private readonly _m = new Map<string, unknown>();
+
+  get<K extends string>(key: K): StateValueFor<K> | undefined {
+    return this._m.get(key) as StateValueFor<K> | undefined;
+  }
+  set<K extends string>(key: K, value: StateValueFor<K>): void {
+    this._m.set(key, value);
+  }
+  has<K extends string>(key: K): boolean {
+    return this._m.has(key);
+  }
+  delete<K extends string>(key: K): boolean {
+    return this._m.delete(key);
+  }
+  clear(): void {
+    this._m.clear();
+  }
+  get size(): number {
+    return this._m.size;
+  }
+}
+
 export class HookContextImpl implements HookContext {
   readonly sessionId: string;
   readonly config: SessionConfigView;
-  readonly state: TypedStateMap;
+  readonly state: TypedStateMap = new StateMapImpl();
   readonly log: HookLogger;
 
   private _turnIdx = 0;
   private _signal: AbortSignal;
   private readonly deps: HookContextDeps;
-  private readonly _stateMap = new Map<string, unknown>();
 
   constructor(deps: HookContextDeps) {
     this.deps = deps;
@@ -89,36 +153,34 @@ export class HookContextImpl implements HookContext {
     this._signal = deps.initialSignal;
     this.config = deps.config;
 
-    // TypedStateMap 是 Map 的薄壳：物理仍是 Map<string, unknown>，
-    // 重载签名在类型层给已注册 key 推断；运行时跟原来一致。
-    const m = this._stateMap;
-    this.state = {
-      get: (key: string) => m.get(key),
-      set: (key: string, value: unknown) => {
-        m.set(key, value);
-      },
-      has: (key: string) => m.has(key),
-      delete: (key: string) => m.delete(key),
-      clear: () => {
-        m.clear();
-      },
-      get size() {
-        return m.size;
-      },
-    } as TypedStateMap;
-
     const sink = deps.logSink ?? defaultLogSink;
+    // 关键顺序：user `extra` 在前，kernel 注入的 sessionId/turnIdx 在后覆盖 user
+    // —— 防 plugin 伪造 sessionId/turnIdx 污染下游 log 聚合。
     const buildFields = (extra?: Record<string, unknown>): Record<string, unknown> => ({
+      ...(extra ?? {}),
       sessionId: this.sessionId,
       turnIdx: this._turnIdx,
-      ...(extra ?? {}),
     });
-    this.log = {
-      debug: (msg, fields) => sink("debug", msg, buildFields(fields)),
-      info: (msg, fields) => sink("info", msg, buildFields(fields)),
-      warn: (msg, fields) => sink("warn", msg, buildFields(fields)),
-      error: (msg, fields) => sink("error", msg, buildFields(fields)),
-    };
+    this.log = Object.freeze({
+      debug: (msg: string, fields?: Record<string, unknown>) =>
+        sink("debug", msg, buildFields(fields)),
+      info: (msg: string, fields?: Record<string, unknown>) =>
+        sink("info", msg, buildFields(fields)),
+      warn: (msg: string, fields?: Record<string, unknown>) =>
+        sink("warn", msg, buildFields(fields)),
+      error: (msg: string, fields?: Record<string, unknown>) =>
+        sink("error", msg, buildFields(fields)),
+    });
+
+    // 把 internal mutator 装进 module-private WeakMap，不挂任何 own property 到 ctx 上。
+    KERNEL_INTERNALS_BAG.set(this, {
+      setTurnIdx: (idx: number) => {
+        this._turnIdx = idx;
+      },
+      setSignal: (signal: AbortSignal) => {
+        this._signal = signal;
+      },
+    });
   }
 
   get turnIdx(): number {
@@ -144,18 +206,4 @@ export class HookContextImpl implements HookContext {
   emit(event: { type: string; [k: string]: unknown }): void {
     this.deps.onEmit?.(event);
   }
-
-  /**
-   * Symbol-keyed internal API。Plugin 拿不到 KERNEL_INTERNALS 这个 symbol（它没从
-   * `index.ts` 导出），所以也调不到里面的方法。`session.ts` 通过 `ctx[KERNEL_INTERNALS]`
-   * 访问。
-   */
-  [KERNEL_INTERNALS]: HookContextInternal = {
-    setTurnIdx: (idx: number): void => {
-      this._turnIdx = idx;
-    },
-    setSignal: (signal: AbortSignal): void => {
-      this._signal = signal;
-    },
-  };
 }

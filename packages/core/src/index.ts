@@ -41,6 +41,11 @@ export { createUserMessage, createAttachmentMessage } from "./types.js";
 export { AgentSession, findToolByName } from "./session.js";
 export type { AgentSessionOptions, RunSummary } from "./session.js";
 
+// ─────────── HookContextImpl 实例类型（plugin / controller 偶尔需要） ───────────
+export type { HookContextImpl, HookContextDeps } from "./context.js";
+// 注意：getKernelInternals / KERNEL_INTERNALS_BAG 故意不导出——它们是 kernel-internal API。
+// Plugin 没有 KERNEL_INTERNALS_BAG 引用，也没有 getKernelInternals 函数，无法访问 mutator。
+
 // ─────────── pi-ai re-exports（方便用户少写一个 import）───────────
 export type {
   Message,

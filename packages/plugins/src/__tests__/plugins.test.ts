@@ -22,6 +22,7 @@ import {
   toolOutputBuffer,
   getToolOutputBuffer,
   sessionLog,
+  getSessionLogStatus,
   systemReminder,
   batchCounter,
   leaseDecision,
@@ -294,6 +295,76 @@ describe("session-log", () => {
     for (const line of lines) {
       expect(() => JSON.parse(line)).not.toThrow();
     }
+    rmSync(tmp, { recursive: true, force: true });
+  });
+
+  it("dead 状态：stream error 后 status 转 dead，dropped 累加，永不回 ok", async () => {
+    const model = createFakeModel([
+      { content: [{ type: "toolCall", name: "echo", arguments: { msg: "1" } }] },
+      { content: [{ type: "text", text: "done" }] },
+    ]);
+    let statusAfter: ReturnType<typeof getSessionLogStatus> | null = null;
+    const probe = {
+      name: "probe",
+      onSessionStart(_input: unknown, ctx: import("@harness-pi/core").HookContext) {
+        // 拿 stream 触发 error
+        const st = ctx.state.get("session-log.stream");
+        if (st) {
+          st.stream.emit("error", new Error("disk full simulated"));
+        }
+      },
+      onTurnEnd(_input: unknown, ctx: import("@harness-pi/core").HookContext) {
+        statusAfter = getSessionLogStatus(ctx);
+      },
+    };
+    const session = new AgentSession({
+      model,
+      tools: [echoTool],
+      hooks: [sessionLog({ dir: tmp }), probe],
+    });
+    await session.run("hi");
+    await new Promise((r) => setTimeout(r, 30));
+
+    expect(statusAfter).not.toBeNull();
+    expect(statusAfter!.status).toBe("dead");
+    expect(statusAfter!.dropped).toBeGreaterThan(0);
+    expect(statusAfter!.deadReason).toContain("disk full");
+    rmSync(tmp, { recursive: true, force: true });
+  });
+
+  it("dead 状态终态：close 后调 getSessionLogStatus 也返回 dead（不退回 ok）", async () => {
+    const model = createFakeModel([
+      { content: [{ type: "text", text: "done" }] },
+    ]);
+    let observedStatus: string | null = null;
+    let observedDropped = -1;
+    const probe = {
+      name: "probe",
+      onSessionStart(_input: unknown, ctx: import("@harness-pi/core").HookContext) {
+        const st = ctx.state.get("session-log.stream");
+        if (st) {
+          // 模拟 stream close (例如外部强制关闭)
+          st.stream.destroy();
+        }
+      },
+      onTurnEnd(_input: unknown, ctx: import("@harness-pi/core").HookContext) {
+        // 写一条，应被 drop
+        ctx.log.info("noise", {});
+        const s = getSessionLogStatus(ctx);
+        observedStatus = s.status;
+        observedDropped = s.dropped;
+      },
+    };
+    const session = new AgentSession({
+      model,
+      tools: [],
+      hooks: [sessionLog({ dir: tmp }), probe],
+    });
+    await session.run("hi");
+    await new Promise((r) => setTimeout(r, 30));
+
+    expect(observedStatus).toBe("dead");
+    expect(observedDropped).toBeGreaterThanOrEqual(0);
     rmSync(tmp, { recursive: true, force: true });
   });
 });

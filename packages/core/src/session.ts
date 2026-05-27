@@ -22,7 +22,7 @@ import {
   type ToolCall,
   type ToolResultMessage,
 } from "@mariozechner/pi-ai";
-import { HookContextImpl, KERNEL_INTERNALS } from "./context.js";
+import { HookContextImpl, getKernelInternals } from "./context.js";
 import { HookDispatcher, type HookFailureSink } from "./dispatcher.js";
 import type { Hook, LogLevel, SessionConfigView, ToolExecResult } from "./hook.js";
 import { ToolExecutor, findToolByName } from "./tool-executor.js";
@@ -127,14 +127,15 @@ export class AgentSession {
       });
 
     this._abortCtrl = new AbortController();
-    const configView: SessionConfigView = {
+    // tools 是构造期固定（`use()` 只允许在 idle 加 hooks，不改 tools / model / maxTurns）。
+    // 整个 configView 包括 nested model 对象都 deep-freeze，runtime 拒绝任何 plugin 修改。
+    const configView: SessionConfigView = Object.freeze({
       sessionId: this.id,
-      model: { id: this.model.id, provider: this.model.provider },
-      // 真实 tool 列表会随 `use()` 改变？暂不会——hooks 只能在 idle 加。tools 是构造期固定。
+      model: Object.freeze({ id: this.model.id, provider: this.model.provider }),
       toolNames: Object.freeze(this.tools.map((t) => t.name)),
       maxTurns: this.maxTurns,
       maxContinuations: this.maxContinuations,
-    };
+    });
     const ctxDeps: import("./context.js").HookContextDeps = {
       sessionId: this.id,
       initialSignal: this._abortCtrl.signal,
@@ -231,7 +232,7 @@ export class AgentSession {
   }): Promise<RunSummary> {
     // 每次 run/continue 重建 AbortController；上次的 abort 状态不污染本次
     this._abortCtrl = new AbortController();
-    this._ctx[KERNEL_INTERNALS].setSignal(this._abortCtrl.signal);
+    getKernelInternals(this._ctx).setSignal(this._abortCtrl.signal);
     this._pendingAttachments = [];
     this._lastTurnError = null;
 
@@ -395,7 +396,7 @@ export class AgentSession {
         return { turnIdx, reason: "aborted" };
       }
 
-      this._ctx[KERNEL_INTERNALS].setTurnIdx(turnIdx);
+      getKernelInternals(this._ctx).setTurnIdx(turnIdx);
       const outcome = await this._runOneTurn(turnIdx);
       turnIdx++;
 

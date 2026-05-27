@@ -28,6 +28,13 @@ import {
   type Model,
   type ToolCall,
 } from "@mariozechner/pi-ai";
+import { HookContextImpl, getKernelInternals } from "./context.js";
+import type {
+  HookContext,
+  HookLogger,
+  LogLevel,
+  SessionConfigView,
+} from "./hook.js";
 
 export interface FakeAssistantResponse {
   content: Array<
@@ -205,6 +212,97 @@ export function createFakeModel(
   } as unknown as FakeModel;
 
   return model;
+}
+
+/* ──────────────────── createTestContext ──────────────────── */
+
+export interface TestContextOptions {
+  sessionId?: string;
+  turnIdx?: number;
+  signal?: AbortSignal;
+  config?: Partial<SessionConfigView>;
+  logSink?: (level: LogLevel, msg: string, fields: Record<string, unknown>) => void;
+  onAppendMessage?: (msg: import("@mariozechner/pi-ai").Message) => void;
+  onAbort?: (reason: string) => void;
+  /** captureLog=true 时 logSink 默认变成把 log 推到一个数组里，便于 assert。 */
+  captureLog?: boolean;
+}
+
+/**
+ * 创建一个真实的 HookContext 实例供 dispatcher / plugin 单测用，**不需要 cast**。
+ *
+ * 默认 turnIdx=0，sessionId="test-<random>"，config 是个最小合法 view。
+ * `captureLog: true` 会把所有 log 收集到返回对象的 `.logs` 数组里。
+ *
+ * 跟手搓 fakeCtx 比，这个 helper 用了真实的 HookContextImpl，所以 state/config/log
+ * 的所有不变量（deep-freeze / kernel-internals encapsulation / log field 顺序）
+ * 都跟生产代码一致——unit test 不会因为 fakeCtx 跟生产实现漂移而误绿。
+ */
+export interface TestContextHandle {
+  ctx: HookContext;
+  /** 把 ctx 推进到 turn `idx`（用 kernel-internals 通道）。 */
+  setTurnIdx(idx: number): void;
+  /** 替换 abort signal（模拟 run/continue 重入）。 */
+  setSignal(signal: AbortSignal): void;
+  /** captureLog=true 时收集到的 log。 */
+  logs: Array<{ level: LogLevel; msg: string; fields: Record<string, unknown> }>;
+  /** 最近 appendMessage 的内容（默认收集；可被 onAppendMessage 覆盖）。 */
+  appended: import("@mariozechner/pi-ai").Message[];
+  /** 最近 onAbort 的 reason。 */
+  abortReasons: string[];
+}
+
+export function createTestContext(opts: TestContextOptions = {}): TestContextHandle {
+  const logs: TestContextHandle["logs"] = [];
+  const appended: import("@mariozechner/pi-ai").Message[] = [];
+  const abortReasons: string[] = [];
+
+  const defaultConfig: SessionConfigView = Object.freeze({
+    sessionId: opts.sessionId ?? "test-session",
+    model: Object.freeze({ id: "test-model", provider: "test" }),
+    toolNames: Object.freeze([]),
+    maxTurns: 200,
+    maxContinuations: 5,
+    ...(opts.config ?? {}),
+  });
+
+  const sink =
+    opts.logSink ??
+    (opts.captureLog
+      ? (level: LogLevel, msg: string, fields: Record<string, unknown>) => {
+          logs.push({ level, msg, fields });
+        }
+      : () => {});
+
+  const impl = new HookContextImpl({
+    sessionId: defaultConfig.sessionId,
+    initialSignal: opts.signal ?? new AbortController().signal,
+    messages: [],
+    config: defaultConfig,
+    logSink: sink,
+    onAppendMessage: opts.onAppendMessage
+      ? opts.onAppendMessage
+      : (msg) => {
+          appended.push(msg);
+        },
+    onAbort: opts.onAbort
+      ? opts.onAbort
+      : (reason) => {
+          abortReasons.push(reason);
+        },
+  });
+
+  const internals = getKernelInternals(impl);
+  if (opts.turnIdx !== undefined) internals.setTurnIdx(opts.turnIdx);
+
+  return {
+    ctx: impl,
+    setTurnIdx: (idx) => internals.setTurnIdx(idx),
+    setSignal: (signal) => internals.setSignal(signal),
+    logs,
+    appended,
+    abortReasons,
+  };
 }
 
 /**

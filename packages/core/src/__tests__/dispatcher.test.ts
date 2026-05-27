@@ -5,33 +5,10 @@
 import { describe, it, expect, vi } from "vitest";
 import { HookDispatcher, mergeResults } from "../dispatcher.js";
 import type { Hook, HookContext, MergedHookResult } from "../index.js";
+import { createTestContext } from "../testing.js";
 
 function fakeCtx(): HookContext {
-  const ac = new AbortController();
-  const noopLog = {
-    debug: () => {},
-    info: () => {},
-    warn: () => {},
-    error: () => {},
-  };
-  return {
-    sessionId: "test",
-    turnIdx: 0,
-    signal: ac.signal,
-    state: new Map() as unknown as HookContext["state"],
-    messages: [],
-    config: {
-      sessionId: "test",
-      model: { id: "fake", provider: "fake" },
-      toolNames: [],
-      maxTurns: 200,
-      maxContinuations: 5,
-    },
-    log: noopLog,
-    appendMessage: vi.fn(),
-    abort: vi.fn(),
-    emit: vi.fn(),
-  };
+  return createTestContext().ctx;
 }
 
 describe("HookDispatcher event (parallel)", () => {

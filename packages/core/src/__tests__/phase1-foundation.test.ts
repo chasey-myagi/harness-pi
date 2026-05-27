@@ -244,40 +244,23 @@ describe("Phase 1: ctx.config", () => {
   });
 });
 
-/* ──────────────── Phase 1.4 KERNEL_INTERNALS 不外泄 ──────────────── */
+/* ──────────────── Phase 1.4 KERNEL_INTERNALS encapsulation ──────────────── */
 
-describe("Phase 1: KERNEL_INTERNALS encapsulation", () => {
-  it("`@harness-pi/core` index 不导出 KERNEL_INTERNALS symbol", async () => {
+describe("Phase 1: KERNEL_INTERNALS encapsulation (post Gate-1 fix)", () => {
+  it("`@harness-pi/core` index 不导出 internal 标识符（getKernelInternals / KERNEL_INTERNALS_BAG）", async () => {
     const mod = await import("../index.js");
-    // 只导出 public API；symbol 不在
     const keys = Object.keys(mod);
-    for (const k of keys) {
-      expect(k.toLowerCase()).not.toContain("internal");
-      expect(k.toLowerCase()).not.toContain("kernel_");
-    }
-    // 也不应能拿到我们的 KERNEL_INTERNALS symbol（其他 Symbol.toStringTag 类的允许存在）
-    const symbols = Object.getOwnPropertySymbols(mod);
-    for (const s of symbols) {
-      expect(s.description ?? "").not.toContain("kernel-internals");
-    }
+    expect(keys).not.toContain("getKernelInternals");
+    expect(keys).not.toContain("KERNEL_INTERNALS_BAG");
+    expect(keys).not.toContain("KERNEL_INTERNALS");
   });
 
-  it("plugin 拿不到 KERNEL_INTERNALS symbol，调不到 setTurnIdx", async () => {
-    let leaked = false;
+  it("ctx 实例上没有任何 own symbol property — Object.getOwnPropertySymbols 反射不到 internals", async () => {
+    let leakedSymbols: symbol[] = [];
     const probe: Hook = {
       name: "probe",
       onTurnStart(_input, ctx) {
-        // plugin 端拿到的 ctx 上有 symbol-keyed 属性，但 plugin 没有 symbol 引用
-        // 无法构造一个能命中这个 key 的访问。
-        // 唯一通用 escape hatch：getOwnPropertySymbols。这个 test 锁住：即使能拿到 symbol，
-        // 改完也不影响 sessionId / 暴露的 turnIdx —— turnIdx 是 readonly getter 反射本地 state，
-        // 但 plugin 不该走这条路。
-        const syms = Object.getOwnPropertySymbols(ctx);
-        // 我们知道 KERNEL_INTERNALS 是一个 symbol，但 plugin 没有 Symbol.for("...") 名字
-        // （我们用 Symbol(desc) 而不是 Symbol.for，所以注册表里查不到）
-        const fetched = Symbol.for("@harness-pi/core::kernel-internals");
-        const matched = syms.find((s) => s === fetched);
-        if (matched) leaked = true;
+        leakedSymbols = Object.getOwnPropertySymbols(ctx);
       },
     };
     const fake = createFakeModel([
@@ -289,7 +272,179 @@ describe("Phase 1: KERNEL_INTERNALS encapsulation", () => {
       hooks: [probe],
     });
     await session.run("go");
-    expect(leaked).toBe(false);
+    expect(leakedSymbols.length).toBe(0);
+    fake.teardown();
+  });
+
+  it("ctx 上没有任何 internal-looking own property 名（穷举 enumerable keys）", async () => {
+    let leakedKeys: string[] = [];
+    const probe: Hook = {
+      name: "probe",
+      onTurnStart(_input, ctx) {
+        leakedKeys = Object.getOwnPropertyNames(ctx).filter(
+          (k) => /internal|kernel|mutator|setTurnIdx|setSignal/i.test(k),
+        );
+      },
+    };
+    const fake = createFakeModel([
+      { content: [{ type: "text", text: "done" }] },
+    ]);
+    const session = new AgentSession({
+      model: fake,
+      tools: [],
+      hooks: [probe],
+    });
+    await session.run("go");
+    expect(leakedKeys).toEqual([]);
+    fake.teardown();
+  });
+});
+
+/* ──────────────── Gate-1 follow-up: deep-freeze + log safety + session-log dead ──────────────── */
+
+describe("Phase 1 (post Gate-1): ctx.config deep-frozen", () => {
+  it("ctx.config 本身 frozen — 不能改 maxTurns / sessionId", async () => {
+    let mutationThrew = false;
+    let valueAfter: number | null = null;
+    const probe: Hook = {
+      name: "probe",
+      onSessionStart(_input, ctx) {
+        try {
+          (ctx.config as { maxTurns: number }).maxTurns = 999;
+        } catch {
+          mutationThrew = true;
+        }
+        valueAfter = ctx.config.maxTurns;
+      },
+    };
+    const fake = createFakeModel([
+      { content: [{ type: "text", text: "done" }] },
+    ]);
+    const session = new AgentSession({
+      model: fake,
+      tools: [],
+      hooks: [probe],
+      maxTurns: 50,
+    });
+    await session.run("go");
+    // strict mode 下 freeze object 的赋值会 throw；sloppy 模式下静默失败但不生效
+    expect(mutationThrew || valueAfter === 50).toBe(true);
+    expect(valueAfter).toBe(50);
+    fake.teardown();
+  });
+
+  it("ctx.config.model frozen — 不能改 model.id", async () => {
+    let modelIdAfter: string | null = null;
+    const probe: Hook = {
+      name: "probe",
+      onSessionStart(_input, ctx) {
+        try {
+          (ctx.config.model as { id: string }).id = "hacked";
+        } catch {
+          /* expected to throw in strict mode */
+        }
+        modelIdAfter = ctx.config.model.id;
+      },
+    };
+    const fake = createFakeModel([
+      { content: [{ type: "text", text: "done" }] },
+    ]);
+    const session = new AgentSession({
+      model: fake,
+      tools: [],
+      hooks: [probe],
+    });
+    await session.run("go");
+    expect(modelIdAfter).not.toBe("hacked");
+    expect(modelIdAfter).toMatch(/^fake-model-/);
+    fake.teardown();
+  });
+
+  it("ctx.config.toolNames frozen — 已在前一组测过，这里再 cover Array.prototype mutator", async () => {
+    let pushThrew = false;
+    let lenAfter = -1;
+    const probe: Hook = {
+      name: "probe",
+      onSessionStart(_input, ctx) {
+        try {
+          (ctx.config.toolNames as unknown as string[]).push("hack");
+        } catch {
+          pushThrew = true;
+        }
+        lenAfter = ctx.config.toolNames.length;
+      },
+    };
+    const fake = createFakeModel([
+      { content: [{ type: "text", text: "done" }] },
+    ]);
+    const session = new AgentSession({
+      model: fake,
+      tools: [],
+      hooks: [probe],
+    });
+    await session.run("go");
+    expect(pushThrew).toBe(true);
+    expect(lenAfter).toBe(0);
+    fake.teardown();
+  });
+});
+
+describe("Phase 1 (post Gate-1): ctx.log safety", () => {
+  it("plugin 传 sessionId/turnIdx 不能覆盖 kernel 注入的真实值", async () => {
+    const captured: Array<{
+      level: LogLevel;
+      msg: string;
+      fields: Record<string, unknown>;
+    }> = [];
+    const probe: Hook = {
+      name: "probe",
+      onTurnStart(_input, ctx) {
+        ctx.log.info("hi", {
+          sessionId: "spoofed-session",
+          turnIdx: 999,
+          hook: "probe",
+        });
+      },
+    };
+    const fake = createFakeModel([
+      { content: [{ type: "text", text: "done" }] },
+    ]);
+    const session = new AgentSession({
+      model: fake,
+      tools: [],
+      hooks: [probe],
+      logSink: (level, msg, fields) => {
+        captured.push({ level, msg, fields });
+      },
+    });
+    await session.run("go");
+    expect(captured[0]?.fields["sessionId"]).toBe(session.id);
+    expect(captured[0]?.fields["turnIdx"]).toBe(0);
+    expect(captured[0]?.fields["hook"]).toBe("probe");
+    fake.teardown();
+  });
+
+  it("默认 sink 对循环引用 fields 不 crash", async () => {
+    const spy = vi.spyOn(console, "log").mockImplementation(() => {});
+    const probe: Hook = {
+      name: "probe",
+      onTurnStart(_input, ctx) {
+        const circ: Record<string, unknown> = {};
+        circ["self"] = circ;
+        // 不应 throw —— defaultLogSink 内部 try/catch 兜底
+        expect(() => ctx.log.info("circ", circ)).not.toThrow();
+      },
+    };
+    const fake = createFakeModel([
+      { content: [{ type: "text", text: "done" }] },
+    ]);
+    const session = new AgentSession({
+      model: fake,
+      tools: [],
+      hooks: [probe],
+    });
+    await session.run("go");
+    spy.mockRestore();
     fake.teardown();
   });
 });

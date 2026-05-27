@@ -25,33 +25,10 @@ import type {
   Hook,
   HookContext,
 } from "../index.js";
-import { createFakeModel } from "../testing.js";
+import { createFakeModel, createTestContext } from "../testing.js";
 
 function fakeCtx(): HookContext {
-  const noopLog = {
-    debug: () => {},
-    info: () => {},
-    warn: () => {},
-    error: () => {},
-  };
-  return {
-    sessionId: "test",
-    turnIdx: 0,
-    signal: new AbortController().signal,
-    state: new Map() as unknown as HookContext["state"],
-    messages: [],
-    config: {
-      sessionId: "test",
-      model: { id: "fake", provider: "fake" },
-      toolNames: [],
-      maxTurns: 200,
-      maxContinuations: 5,
-    },
-    log: noopLog,
-    appendMessage: vi.fn(),
-    abort: vi.fn(),
-    emit: vi.fn(),
-  };
+  return createTestContext().ctx;
 }
 
 /* ──────────────── mergeResults edge cases ──────────────── */

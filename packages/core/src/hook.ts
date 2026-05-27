@@ -187,8 +187,10 @@ type RegistryKey = keyof HookStateRegistry & string;
 /**
  * 已注册 key K 对应的值类型；未注册 key 回退 `unknown`。用单个 conditional type 而不是
  * overload，避免 TS 在字面类型匹配时退到 string fallback。
+ *
+ * 内部 implementor (`StateMapImpl`) 也用这个类型。
  */
-type StateValueFor<K extends string> = K extends RegistryKey
+export type StateValueFor<K extends string> = K extends RegistryKey
   ? HookStateRegistry[K]
   : unknown;
 
