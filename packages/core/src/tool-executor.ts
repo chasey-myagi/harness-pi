@@ -57,8 +57,24 @@ export class ToolExecutor {
       let safe = false;
       try {
         safe = !!tool?.isConcurrencySafe?.(call.arguments);
-      } catch {
+      } catch (err) {
+        // 不再静默吞 —— 通过 onError 上报，metrics 能记录"哪个 tool.isConcurrencySafe 抛错"。
+        // 仍保守地 fail-closed 为 unsafe（顺序执行），不影响 happy path。
         safe = false;
+        await this.deps.dispatcher.fireError(
+          {
+            phase: "tool",
+            err: err instanceof Error ? err : new Error(String(err)),
+            call,
+          },
+          this.deps.ctx,
+        );
+        // 同时给 plugin author 一条结构化 log（log 是 fire-and-forget，不影响执行）
+        this.deps.ctx.log.warn("isConcurrencySafe threw — treating as unsafe", {
+          hook: "tool-executor",
+          tool: call.name,
+          error: err instanceof Error ? err.message : String(err),
+        });
       }
       (safe ? safeBatch : sequential).push(call);
     }

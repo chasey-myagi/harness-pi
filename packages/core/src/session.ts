@@ -23,7 +23,12 @@ import {
   type ToolResultMessage,
 } from "@mariozechner/pi-ai";
 import { HookContextImpl, getKernelInternals } from "./context.js";
-import { HookDispatcher, type HookFailureSink } from "./dispatcher.js";
+import {
+  HookDispatcher,
+  verifyHookDependencies,
+  type HookFailureSink,
+  type HookDependencyWarning,
+} from "./dispatcher.js";
 import type { Hook, LogLevel, SessionConfigView, ToolExecResult } from "./hook.js";
 import { ToolExecutor, findToolByName } from "./tool-executor.js";
 import { createAttachmentMessage } from "./types.js";
@@ -126,6 +131,9 @@ export class AgentSession {
         console.log(`[harness-pi ${c.sessionId} turn=${c.turnIdx}] ${msg}`);
       });
 
+    // 构造期校验 hook 软依赖，warning 走 consoleSink；不阻塞构造，让 caller 决定怎么响应
+    this._emitDependencyWarnings(verifyHookDependencies(this._hooks));
+
     this._abortCtrl = new AbortController();
     // tools 是构造期固定（`use()` 只允许在 idle 加 hooks，不改 tools / model / maxTurns）。
     // 整个 configView 包括 nested model 对象都 deep-freeze，runtime 拒绝任何 plugin 修改。
@@ -163,7 +171,21 @@ export class AgentSession {
     }
     this._hooks.push(hook);
     this._dispatcher = new HookDispatcher(this._hooks, this._hookFailureSink);
+    // 重新校验软依赖（新 hook 可能补齐 missing-required，也可能引入 conflict）
+    this._emitDependencyWarnings(verifyHookDependencies(this._hooks));
     return this;
+  }
+
+  /**
+   * 把 hook 依赖校验 warning 发给 consoleSink。turnIdx 用 -1 表示"构造期"。
+   */
+  private _emitDependencyWarnings(warnings: HookDependencyWarning[]): void {
+    for (const w of warnings) {
+      this._consoleSink(`[hook-deps:${w.kind}] ${w.message}`, {
+        sessionId: this.id,
+        turnIdx: -1,
+      });
+    }
   }
 
   abort(reason = "abort() called"): void {
@@ -408,7 +430,10 @@ export class AgentSession {
   }
 
   /**
-   * 单 turn 的完整逻辑。turn 内：onTurnStart → wrapTurn(LLM + tools) → onTurnEnd。
+   * 单 turn 的完整逻辑。3 个 phase 串起来，外层包 wrapTurn around chain。
+   * 每个 phase 做一件事，方便 reviewer 改某一阶段不动其他 phase 的缩进。
+   *
+   *   onTurnStart event → wrapTurn[ _phaseLlmCall → _phaseToolBatch → _phaseTurnEnd ]
    */
   private async _runOneTurn(turnIdx: number): Promise<TurnOutcome> {
     const tsOut = await this._dispatcher.fireEvent(
@@ -425,130 +450,12 @@ export class AgentSession {
 
     try {
       const inner = async (): Promise<void> => {
-        const sysPrompt = await this._dispatcher.firePipeSystemPrompt(
-          this.systemPrompt,
-          this._ctx,
-        );
-        const baseMessages: Message[] = [
-          ...this._messages,
-          ...this._pendingAttachments,
-        ];
-        const transformed = await this._dispatcher.firePipeMessages(
-          baseMessages,
-          this._ctx,
-        );
-        this._pendingAttachments = [];
-
-        const piTools = this.tools.map((t) => ({
-          name: t.name,
-          description: t.description,
-          parameters: t.parameters,
-        }));
-        const context: Context = {
-          messages: stripAttachmentMeta(transformed),
-          tools: piTools,
-          ...(sysPrompt ? { systemPrompt: sysPrompt } : {}),
-        };
-
-        const t0 = Date.now();
-        let assistant: AssistantMessage;
-        try {
-          assistant = await complete(this.model, context, {
-            signal: this._abortCtrl.signal,
-          });
-        } catch (err) {
-          await this._dispatcher.fireError(
-            {
-              phase: "llm",
-              err: err instanceof Error ? err : new Error(String(err)),
-            },
-            this._ctx,
-          );
-          throw err;
-        }
-        const llmDurationMs = Date.now() - t0;
+        const assistant = await this._phaseLlmCall();
         turnOut.assistant = assistant;
+        if (this._abortCtrl.signal.aborted) return;
 
-        const lleOut = await this._dispatcher.fireEvent(
-          "onLlmEnd",
-          { msg: assistant, durationMs: llmDurationMs },
-          this._ctx,
-        );
-        this._flushSystemMessages(lleOut.systemMessages);
-
-        this._messages.push(assistant);
-
-        const toolCalls = assistant.content.filter(
-          (b): b is ToolCall => b.type === "toolCall",
-        );
-
-        const toolResultsForTurn: ToolExecResult[] = [];
-
-        if (toolCalls.length > 0) {
-          const executor = new ToolExecutor({
-            tools: this.tools,
-            dispatcher: this._dispatcher,
-            ctx: this._ctx,
-            abortCtrl: this._abortCtrl,
-            pushAttachment: (c, e) => this._pushAttachment(c, e),
-            flushSystemMessages: (m) => this._flushSystemMessages(m),
-          });
-          const results = await executor.executeBatch(toolCalls);
-          for (const call of toolCalls) {
-            const result = results.get(call.id);
-            if (!result) continue;
-            const trMsg: ToolResultMessage = {
-              role: "toolResult",
-              toolCallId: call.id,
-              toolName: call.name,
-              content: result.content,
-              isError: result.isError ?? false,
-              timestamp: Date.now(),
-            };
-            this._messages.push(trMsg);
-            if (result.newMessages) {
-              for (const m of result.newMessages) {
-                // 防御：tool 不能伪造 toolResult / assistant role 来破坏 conversation 完整性
-                // user / system role 是可接受的注入（attachment 模式）
-                if (m.role === "toolResult" || m.role === "assistant") {
-                  await this._dispatcher.fireError(
-                    {
-                      phase: "tool",
-                      err: new Error(
-                        `tool "${call.name}" attempted to inject ${m.role} message via newMessages — rejected (only user/system allowed)`,
-                      ),
-                      call,
-                    },
-                    this._ctx,
-                  );
-                  continue;
-                }
-                this._messages.push(m);
-              }
-            }
-            toolResultsForTurn.push(result);
-          }
-        }
-
-        const teOut = await this._dispatcher.fireEvent(
-          "onTurnEnd",
-          {
-            turnIdx,
-            assistantMessage: assistant,
-            toolResults: toolResultsForTurn,
-          },
-          this._ctx,
-        );
-        this._flushSystemMessages(teOut.systemMessages);
-        // additionalContext from onTurnEnd → 下一 turn 的 LLM call 看到
-        for (const c of teOut.additionalContexts) {
-          this._pushAttachment(c, "onTurnEnd");
-        }
-        if (teOut.continue === false) {
-          this._abortCtrl.abort(
-            new Error(teOut.stopReason ?? "onTurnEnd continue=false"),
-          );
-        }
+        const toolResults = await this._phaseToolBatch(assistant);
+        await this._phaseTurnEnd(turnIdx, assistant, toolResults);
       };
 
       const wrapped = this._dispatcher.buildWrapTurn(this._ctx, inner);
@@ -564,6 +471,163 @@ export class AgentSession {
     if (!finalAssistant) return "error";
     if (finalAssistant.stopReason !== "toolUse") return "done";
     return "continue";
+  }
+
+  /**
+   * Phase 1 / 3：LLM call。
+   *   - pipe systemPrompt + messages
+   *   - flush pendingAttachments（已纳入 transformed view）
+   *   - 调 pi-ai complete()，失败 fire onError 后 re-throw
+   *   - onLlmEnd event
+   *   - assistant push 进 session.messages
+   */
+  private async _phaseLlmCall(): Promise<AssistantMessage> {
+    const sysPrompt = await this._dispatcher.firePipeSystemPrompt(
+      this.systemPrompt,
+      this._ctx,
+    );
+    const baseMessages: Message[] = [
+      ...this._messages,
+      ...this._pendingAttachments,
+    ];
+    const transformed = await this._dispatcher.firePipeMessages(
+      baseMessages,
+      this._ctx,
+    );
+    this._pendingAttachments = [];
+
+    const piTools = this.tools.map((t) => ({
+      name: t.name,
+      description: t.description,
+      parameters: t.parameters,
+    }));
+    const context: Context = {
+      messages: stripAttachmentMeta(transformed),
+      tools: piTools,
+      ...(sysPrompt ? { systemPrompt: sysPrompt } : {}),
+    };
+
+    const t0 = Date.now();
+    let assistant: AssistantMessage;
+    try {
+      assistant = await complete(this.model, context, {
+        signal: this._abortCtrl.signal,
+      });
+    } catch (err) {
+      await this._dispatcher.fireError(
+        {
+          phase: "llm",
+          err: err instanceof Error ? err : new Error(String(err)),
+        },
+        this._ctx,
+      );
+      throw err;
+    }
+    const llmDurationMs = Date.now() - t0;
+
+    const lleOut = await this._dispatcher.fireEvent(
+      "onLlmEnd",
+      { msg: assistant, durationMs: llmDurationMs },
+      this._ctx,
+    );
+    this._flushSystemMessages(lleOut.systemMessages);
+    this._messages.push(assistant);
+
+    return assistant;
+  }
+
+  /**
+   * Phase 2 / 3：tool batch。
+   *   - 提取 toolCalls
+   *   - ToolExecutor 按 isConcurrencySafe 分批跑
+   *   - 每个 result push 一条 toolResult message
+   *   - newMessages 注入时拦截 toolResult/assistant role（防 tool 破坏对话不变量）
+   */
+  private async _phaseToolBatch(
+    assistant: AssistantMessage,
+  ): Promise<ToolExecResult[]> {
+    const toolCalls = assistant.content.filter(
+      (b): b is ToolCall => b.type === "toolCall",
+    );
+    if (toolCalls.length === 0) return [];
+
+    const executor = new ToolExecutor({
+      tools: this.tools,
+      dispatcher: this._dispatcher,
+      ctx: this._ctx,
+      abortCtrl: this._abortCtrl,
+      pushAttachment: (c, e) => this._pushAttachment(c, e),
+      flushSystemMessages: (m) => this._flushSystemMessages(m),
+    });
+    const results = await executor.executeBatch(toolCalls);
+
+    const toolResultsForTurn: ToolExecResult[] = [];
+    for (const call of toolCalls) {
+      const result = results.get(call.id);
+      if (!result) continue;
+      const trMsg: ToolResultMessage = {
+        role: "toolResult",
+        toolCallId: call.id,
+        toolName: call.name,
+        content: result.content,
+        isError: result.isError ?? false,
+        timestamp: Date.now(),
+      };
+      this._messages.push(trMsg);
+      if (result.newMessages) {
+        for (const m of result.newMessages) {
+          // 防御：tool 不能伪造 toolResult / assistant role 来破坏 conversation 完整性
+          // user / system role 是可接受的注入（attachment 模式）
+          if (m.role === "toolResult" || m.role === "assistant") {
+            await this._dispatcher.fireError(
+              {
+                phase: "tool",
+                err: new Error(
+                  `tool "${call.name}" attempted to inject ${m.role} message via newMessages — rejected (only user/system allowed)`,
+                ),
+                call,
+              },
+              this._ctx,
+            );
+            continue;
+          }
+          this._messages.push(m);
+        }
+      }
+      toolResultsForTurn.push(result);
+    }
+    return toolResultsForTurn;
+  }
+
+  /**
+   * Phase 3 / 3：onTurnEnd event。
+   *   - flush systemMessages
+   *   - push additionalContext attachments（下一 turn 的 LLM 看到）
+   *   - 处理 continue=false（plugin 在 turn 边界主动中止 session）
+   */
+  private async _phaseTurnEnd(
+    turnIdx: number,
+    assistant: AssistantMessage,
+    toolResults: ToolExecResult[],
+  ): Promise<void> {
+    const teOut = await this._dispatcher.fireEvent(
+      "onTurnEnd",
+      {
+        turnIdx,
+        assistantMessage: assistant,
+        toolResults,
+      },
+      this._ctx,
+    );
+    this._flushSystemMessages(teOut.systemMessages);
+    for (const c of teOut.additionalContexts) {
+      this._pushAttachment(c, "onTurnEnd");
+    }
+    if (teOut.continue === false) {
+      this._abortCtrl.abort(
+        new Error(teOut.stopReason ?? "onTurnEnd continue=false"),
+      );
+    }
   }
 
 

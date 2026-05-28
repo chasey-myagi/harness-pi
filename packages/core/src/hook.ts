@@ -298,6 +298,21 @@ export interface Hook {
   internal?: boolean;
 
   /**
+   * 软依赖声明：构造 session 时 kernel 检查 hook list —— 如果 `requires` 里的 name 不在本
+   * hook **之前** 注册，通过 `consoleSink` 警告。**不会自动 reorder**（避免 caller 困惑）。
+   *
+   * 例子：`tokenBudget` requires `cost-tracker` 以拿到累计 token；如果用户先注册
+   * tokenBudget 再注册 cost-tracker，第一轮 onLlmEnd 时 cost-tracker.stats 还没初始化。
+   */
+  requires?: string[];
+
+  /**
+   * 软冲突声明：构造 session 时如果同时存在 `conflictsWith` 里的 hook name，warn。
+   * 适合标记"语义重叠不该一起用"的 plugin（例如两个不同策略的 token budget）。
+   */
+  conflictsWith?: string[];
+
+  /**
    * 仅对 **decision** hook（onPreToolUse / onUserPromptSubmit）有效。
    *
    * - `false`（默认）：hook throw / timeout → fail-open（视为没发表意见，继续问下一个 hook）。

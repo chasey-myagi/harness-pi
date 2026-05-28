@@ -30,8 +30,14 @@ export {
   HookTimeoutError,
   defaultTimeoutFor,
   mergeResults,
+  verifyHookDependencies,
 } from "./dispatcher.js";
-export type { HookFailureSink, HookFailureInfo } from "./dispatcher.js";
+export type {
+  HookFailureSink,
+  HookFailureInfo,
+  DecisionOutcome,
+  HookDependencyWarning,
+} from "./dispatcher.js";
 
 // ─────────── Tool 形态 + message helpers ───────────
 export type { HarnessTool } from "./types.js";

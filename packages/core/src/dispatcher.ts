@@ -69,6 +69,17 @@ const PIPE_METHODS = new Set([
   "transformMessagesBeforeLlm",
 ] as const);
 
+/* ────────────── Decision outcome ────────────── */
+
+/**
+ * `fireDecisionOutcome` 的返回类型。Caller 必须 switch `kind` 穷举三种情况——比
+ * nullable `HookResult` + 字段判更类型安全。详见 `fireDecisionOutcome` 文档。
+ */
+export type DecisionOutcome =
+  | { kind: "decided"; result: HookResult }
+  | { kind: "context-only"; additionalContext?: string; systemMessage?: string }
+  | { kind: "none" };
+
 /* ────────────── HookFailureSink ────────────── */
 
 export interface HookFailureInfo {
@@ -128,7 +139,9 @@ export class HookDispatcher {
       (h) => typeof h[method] === "function",
     );
     const results = await Promise.all(
-      matched.map((h) => this._invokeSafe(h, method, [input, ctx], "event")),
+      matched.map((h) =>
+        this._invokeSafe<HookResult | void>(h, method, [input, ctx], "event"),
+      ),
     );
     return mergeResults(results.map((r) => r.value));
   }
@@ -138,7 +151,7 @@ export class HookDispatcher {
     const matched = this.hooks.filter((h) => typeof h.onError === "function");
     await Promise.all(
       matched.map((h) =>
-        this._invokeSafe(h, "onError", [input, ctx], "event"),
+        this._invokeSafe<void>(h, "onError", [input, ctx], "event"),
       ),
     );
   }
@@ -149,6 +162,9 @@ export class HookDispatcher {
    * Decision 路径：顺序问每个 hook，**只在 decision / updatedInput / continue=false 上短路**。
    * - additionalContext / systemMessage 累积，不算决断（关键修复：避免 context-injection hook 误屏蔽下游安全检查）。
    * - failClosed=true 的 hook 失败时返回 deny。
+   *
+   * **类型表面**：返回 `HookResult | null`——caller 必须用 optional chain 判 decision/continue 字段。
+   * 新 caller 推荐用 `fireDecisionOutcome` 拿 discriminated union（必须 switch kind 穷举）。
    */
   async fireDecision<M extends keyof DecisionInputMap>(
     method: M,
@@ -160,7 +176,12 @@ export class HookDispatcher {
 
     for (const h of this.hooks) {
       if (typeof h[method] !== "function") continue;
-      const inv = await this._invokeSafe(h, method, [input, ctx], "decision");
+      const inv = await this._invokeSafe<HookResult | void>(
+        h,
+        method,
+        [input, ctx],
+        "decision",
+      );
 
       // hook failed (throw/timeout): fail-closed 视为 deny
       if (inv.error) {
@@ -182,8 +203,8 @@ export class HookDispatcher {
       }
 
       const r = inv.value;
-      if (!r || typeof r !== "object" || Array.isArray(r)) continue;
-      const hr = r as HookResult;
+      if (!r) continue;
+      const hr = r;
 
       // 聚合 transient context（永不短路）
       if (hr.additionalContext) additionalContexts.push(hr.additionalContext);
@@ -220,6 +241,40 @@ export class HookDispatcher {
     return null;
   }
 
+  /**
+   * Phase 2 加：discriminated-union 形态的 decision 出口。caller 必须 switch `kind` 穷举
+   * 三种情况，编译器帮你拦下"忘判 context-only"那种 bug。
+   *
+   *   - kind === "decided"     真的有 hook 给出 decision / updatedInput / continue=false
+   *   - kind === "context-only" 没人 decide，但有人累积了 additionalContext / systemMessage
+   *   - kind === "none"         没人 decide，也没人发表意见
+   */
+  async fireDecisionOutcome<M extends keyof DecisionInputMap>(
+    method: M,
+    input: DecisionInputMap[M],
+    ctx: HookContext,
+  ): Promise<DecisionOutcome> {
+    const r = await this.fireDecision(method, input, ctx);
+    if (!r) return { kind: "none" };
+
+    const hasDecision =
+      r.decision !== undefined ||
+      r.updatedInput !== undefined ||
+      r.continue === false;
+    if (hasDecision) {
+      return { kind: "decided", result: r };
+    }
+    return {
+      kind: "context-only",
+      ...(r.additionalContext !== undefined
+        ? { additionalContext: r.additionalContext }
+        : {}),
+      ...(r.systemMessage !== undefined
+        ? { systemMessage: r.systemMessage }
+        : {}),
+    };
+  }
+
   /* ────────────── Pipe: 顺序 transform ────────────── */
 
   async firePipeSystemPrompt(
@@ -229,7 +284,7 @@ export class HookDispatcher {
     let v = value;
     for (const h of this.hooks) {
       if (typeof h.transformSystemPromptBeforeLlm !== "function") continue;
-      const inv = await this._invokeSafe(
+      const inv = await this._invokeSafe<string | void>(
         h,
         "transformSystemPromptBeforeLlm",
         [v, ctx],
@@ -247,13 +302,13 @@ export class HookDispatcher {
     let v = value;
     for (const h of this.hooks) {
       if (typeof h.transformMessagesBeforeLlm !== "function") continue;
-      const inv = await this._invokeSafe(
+      const inv = await this._invokeSafe<Message[] | void>(
         h,
         "transformMessagesBeforeLlm",
         [v, ctx],
         "pipe",
       );
-      if (Array.isArray(inv.value)) v = inv.value as Message[];
+      if (Array.isArray(inv.value)) v = inv.value;
     }
     return v;
   }
@@ -290,15 +345,22 @@ export class HookDispatcher {
   /* ────────────── invoke with timeout + fail-open ────────────── */
 
   /**
-   * 调一个 hook 方法，返回 { value, error }。
+   * 调一个 hook 方法，返回 { value, error }。caller 在调用点明确 R，避免 union 在下游
+   * 二次 typeof 鉴别。
+   *
+   * - R = HookResult | void：event / decision 路径
+   * - R = string：transformSystemPromptBeforeLlm
+   * - R = Message[]：transformMessagesBeforeLlm
+   * - around hook 走 buildWrapTurn / buildWrapToolExec，不经此路径
+   *
    * error 为 null 表示成功；否则 caller 决定 fail-open / fail-closed。
    */
-  private async _invokeSafe(
+  private async _invokeSafe<R>(
     h: Hook,
     method: string,
     args: unknown[],
     category: Category,
-  ): Promise<{ value: HookResult | string | Message[] | void | undefined; error: Error | null }> {
+  ): Promise<{ value: R | undefined; error: Error | null }> {
     const fn = (h as unknown as Record<string, unknown>)[method];
     if (typeof fn !== "function") return { value: undefined, error: null };
 
@@ -306,9 +368,9 @@ export class HookDispatcher {
     let timer: ReturnType<typeof setTimeout> | null = null;
 
     try {
-      const value = await Promise.race<HookResult | string | Message[] | void | undefined>([
+      const value = await Promise.race<R | undefined>([
         Promise.resolve((fn as (...a: unknown[]) => unknown).apply(h, args)) as Promise<
-          HookResult | string | Message[] | void | undefined
+          R | undefined
         >,
         new Promise<never>((_, reject) => {
           timer = setTimeout(() => {
@@ -397,3 +459,88 @@ export function defaultTimeoutFor(method: string): number {
 }
 
 export { EVENT_METHODS, DECISION_METHODS, PIPE_METHODS };
+
+/* ────────────── Plugin dependency verification ────────────── */
+
+export interface HookDependencyWarning {
+  kind: "missing-required" | "required-after-self" | "conflict" | "duplicate-name";
+  hook: string;
+  /** missing-required / required-after-self: 被依赖的名字；conflict: 冲突的名字；duplicate-name: 重名 */
+  related: string;
+  message: string;
+}
+
+/**
+ * 校验 hook list 的 requires / conflictsWith 软依赖。返回 warnings 数组（空数组 = 无问题）。
+ * 由 caller 决定如何展示（session 构造期通过 consoleSink emit；plugin author 可在 test 里 assert）。
+ *
+ * 规则：
+ *   - duplicate-name：重名（多次注册同名 hook）警告，但不阻塞。
+ *   - missing-required：A.requires=["B"]，但 B 根本没在 list 里。
+ *   - required-after-self：A.requires=["B"]，B 在 A 之后才注册（顺序错）。
+ *   - conflict：A.conflictsWith=["B"] 且 B 在 list 里。
+ */
+export function verifyHookDependencies(
+  hooks: ReadonlyArray<Hook>,
+): HookDependencyWarning[] {
+  const warnings: HookDependencyWarning[] = [];
+  const nameToIdxs = new Map<string, number[]>();
+
+  for (let i = 0; i < hooks.length; i++) {
+    const h = hooks[i];
+    if (!h) continue;
+    const arr = nameToIdxs.get(h.name) ?? [];
+    arr.push(i);
+    nameToIdxs.set(h.name, arr);
+  }
+
+  for (const [name, idxs] of nameToIdxs) {
+    if (idxs.length > 1) {
+      warnings.push({
+        kind: "duplicate-name",
+        hook: name,
+        related: name,
+        message: `hook "${name}" is registered ${idxs.length} times — names should be unique for log attribution`,
+      });
+    }
+  }
+
+  for (let i = 0; i < hooks.length; i++) {
+    const h = hooks[i];
+    if (!h) continue;
+    if (h.requires) {
+      for (const reqName of h.requires) {
+        const reqIdxs = nameToIdxs.get(reqName);
+        if (!reqIdxs || reqIdxs.length === 0) {
+          warnings.push({
+            kind: "missing-required",
+            hook: h.name,
+            related: reqName,
+            message: `hook "${h.name}" requires "${reqName}", but it is not registered`,
+          });
+        } else if (reqIdxs[0]! > i) {
+          warnings.push({
+            kind: "required-after-self",
+            hook: h.name,
+            related: reqName,
+            message: `hook "${h.name}" requires "${reqName}", but "${reqName}" is registered after it (idx ${reqIdxs[0]} > ${i}). Reorder so "${reqName}" comes first.`,
+          });
+        }
+      }
+    }
+    if (h.conflictsWith) {
+      for (const conflictName of h.conflictsWith) {
+        if (nameToIdxs.has(conflictName)) {
+          warnings.push({
+            kind: "conflict",
+            hook: h.name,
+            related: conflictName,
+            message: `hook "${h.name}" conflicts with "${conflictName}"; they should not be used together`,
+          });
+        }
+      }
+    }
+  }
+
+  return warnings;
+}
