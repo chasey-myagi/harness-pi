@@ -20,3 +20,9 @@ export type {
   QueueLease,
   LeaseStatus,
 } from "./lease-queue.js";
+
+export { forkSession, forkSessionAll } from "./fork-session.js";
+export type {
+  ForkOptions,
+  ForkResult,
+} from "./fork-session.js";

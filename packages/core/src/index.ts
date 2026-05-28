@@ -45,7 +45,11 @@ export { createUserMessage, createAttachmentMessage } from "./types.js";
 
 // ─────────── Kernel ───────────
 export { AgentSession, findToolByName } from "./session.js";
-export type { AgentSessionOptions, RunSummary } from "./session.js";
+export type {
+  AgentSessionOptions,
+  RunSummary,
+  SessionEvent,
+} from "./session.js";
 
 // ─────────── HookContextImpl 实例类型（plugin / controller 偶尔需要） ───────────
 export type { HookContextImpl, HookContextDeps } from "./context.js";

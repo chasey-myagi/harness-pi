@@ -22,6 +22,25 @@ import {
   type ToolCall,
   type ToolResultMessage,
 } from "@mariozechner/pi-ai";
+
+/**
+ * Phase 3：streaming consumer 看到的事件类型。每个事件对应一个 hook event。
+ *
+ * 跟 hook event 的区别：
+ *   - hook 是 plugin 写的代码（可以决断、改 context）
+ *   - SessionEvent 是只读流，给外部 consumer（HTTP/WS handler / 测试）订阅
+ *
+ * 这个 union 显式列出，让消费者用 discriminated switch 处理。
+ */
+export type SessionEvent =
+  | { type: "session-start"; sessionId: string; source: "run" | "continue"; initialPrompt?: string }
+  | { type: "turn-start"; turnIdx: number }
+  | { type: "llm-end"; msg: AssistantMessage; durationMs: number }
+  | { type: "tool-end"; call: ToolCall; result: ToolExecResult; durationMs: number }
+  | { type: "turn-end"; turnIdx: number; toolResultsCount: number; stopReason: AssistantMessage["stopReason"] }
+  | { type: "continuation-check"; turns: number; continuations: number }
+  | { type: "session-end"; summary: RunSummary }
+  | { type: "error"; phase: "llm" | "tool" | "hook"; message: string; hookName?: string };
 import { HookContextImpl, getKernelInternals } from "./context.js";
 import {
   HookDispatcher,
@@ -235,6 +254,183 @@ export class AgentSession {
       source: "continue",
       ...(opts?.signal ? { signal: opts.signal } : {}),
     });
+  }
+
+  /**
+   * Phase 3 新增：streaming API。返回 `AsyncIterable<SessionEvent>`，consumer 可以边
+   * 跑边 push（典型场景：后端 HTTP/WebSocket 流式回前端）。
+   *
+   * 实现上挂一个 internal forwarder hook 把事件 push 到 async queue；外部 iterator 把
+   * queue 转 async iterator。yield 完最后的 `session-end` 事件后 iterator close。
+   *
+   * **不能并发**：跟 `run()` / `continue()` 互斥，同一 session 同一时刻只能一个跑。
+   */
+  runStreaming(
+    prompt: string,
+    opts?: { signal?: AbortSignal },
+  ): AsyncIterable<SessionEvent> & { finalSummary: Promise<RunSummary> } {
+    return this._runStreamingInternal({
+      source: "run",
+      prompt,
+      ...(opts?.signal ? { signal: opts.signal } : {}),
+    });
+  }
+
+  /** Streaming 版本的 continue()。 */
+  continueStreaming(
+    opts?: { signal?: AbortSignal },
+  ): AsyncIterable<SessionEvent> & { finalSummary: Promise<RunSummary> } {
+    return this._runStreamingInternal({
+      source: "continue",
+      ...(opts?.signal ? { signal: opts.signal } : {}),
+    });
+  }
+
+  private _runStreamingInternal(args: {
+    source: "run" | "continue";
+    prompt?: string;
+    signal?: AbortSignal;
+  }): AsyncIterable<SessionEvent> & { finalSummary: Promise<RunSummary> } {
+    // 内部 push-to-queue forwarder hook（不上报 metric / log；纯 plumbing）
+    const queue: SessionEvent[] = [];
+    let resolveNext: ((v: IteratorResult<SessionEvent>) => void) | null = null;
+    let done = false;
+
+    const push = (ev: SessionEvent): void => {
+      if (done) return;
+      if (resolveNext) {
+        const r = resolveNext;
+        resolveNext = null;
+        r({ value: ev, done: false });
+      } else {
+        queue.push(ev);
+      }
+    };
+    const close = (): void => {
+      if (done) return;
+      done = true;
+      if (resolveNext) {
+        const r = resolveNext;
+        resolveNext = null;
+        r({ value: undefined, done: true });
+      }
+    };
+
+    const forwarder: Hook = {
+      name: "harness-pi.streaming-forwarder",
+      internal: true,
+      onSessionStart(input) {
+        push({
+          type: "session-start",
+          sessionId: this_id_capture,
+          source: input.source,
+          ...(input.initialPrompt !== undefined
+            ? { initialPrompt: input.initialPrompt }
+            : {}),
+        });
+      },
+      onTurnStart(input) {
+        push({ type: "turn-start", turnIdx: input.turnIdx });
+      },
+      onLlmEnd(input) {
+        push({
+          type: "llm-end",
+          msg: input.msg,
+          durationMs: input.durationMs,
+        });
+      },
+      onPostToolUse(input) {
+        push({
+          type: "tool-end",
+          call: input.call,
+          result: input.result,
+          durationMs: input.durationMs,
+        });
+      },
+      onTurnEnd(input) {
+        push({
+          type: "turn-end",
+          turnIdx: input.turnIdx,
+          toolResultsCount: input.toolResults.length,
+          stopReason: input.assistantMessage.stopReason,
+        });
+      },
+      onContinuationCheck(input) {
+        push({
+          type: "continuation-check",
+          turns: input.turns,
+          continuations: input.continuations,
+        });
+      },
+      onError(input) {
+        push({
+          type: "error",
+          phase: input.phase,
+          message: input.err.message,
+          ...(input.hookName !== undefined
+            ? { hookName: input.hookName }
+            : {}),
+        });
+      },
+    };
+    const this_id_capture = this.id;
+
+    // 临时挂上 forwarder（Session 没在 run 时；如果在 run 则 use() 会 throw → caller 错）
+    this.use(forwarder);
+
+    // 异步跑 session，结束后 push session-end + close
+    const summaryPromise = this._runInternal(args).then(
+      (summary) => {
+        push({ type: "session-end", summary });
+        close();
+        // 卸 forwarder：只移除自己挂的这个 hook，不影响 caller 挂的
+        const idx = this._hooks.indexOf(forwarder);
+        if (idx >= 0) this._hooks.splice(idx, 1);
+        // 重新构造 dispatcher 以同步 hook list
+        this._dispatcher = new HookDispatcher(
+          this._hooks,
+          this._hookFailureSink,
+        );
+        return summary;
+      },
+      (err) => {
+        push({
+          type: "error",
+          phase: "hook",
+          message: err instanceof Error ? err.message : String(err),
+        });
+        close();
+        const idx = this._hooks.indexOf(forwarder);
+        if (idx >= 0) this._hooks.splice(idx, 1);
+        this._dispatcher = new HookDispatcher(
+          this._hooks,
+          this._hookFailureSink,
+        );
+        throw err;
+      },
+    );
+
+    const iter: AsyncIterableIterator<SessionEvent> = {
+      next(): Promise<IteratorResult<SessionEvent>> {
+        if (queue.length > 0) {
+          return Promise.resolve({
+            value: queue.shift()!,
+            done: false,
+          });
+        }
+        if (done) {
+          return Promise.resolve({ value: undefined, done: true });
+        }
+        return new Promise((resolve) => {
+          resolveNext = resolve;
+        });
+      },
+      [Symbol.asyncIterator]() {
+        return this;
+      },
+    };
+
+    return Object.assign(iter, { finalSummary: summaryPromise });
   }
 
   /* ────────────── 主流程 ────────────── */

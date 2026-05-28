@@ -23,6 +23,16 @@ export interface CostTrackerOptions {
   ) => number;
   /** session 结束时回调（典型用：emit metric / 持久化）。 */
   onSessionFinalized?: (ctx: HookContext, stats: CostStats) => void;
+  /**
+   * 累计单元（Phase 3 新增）。默认 `"per-run"` 保持向后兼容。
+   *
+   * - `"per-run"`：每次 `session.run()` 重置；外部 `session.continue()` 沿用累计
+   * - `"lifetime"`：整个 session 生命周期累计；多次 `run()` 不重置
+   *
+   * kernel-internal continuation loop（`onContinuationCheck → continue=true`）始终
+   * 沿用累计——不属于"run"边界。
+   */
+  mode?: "per-run" | "lifetime";
 }
 
 export interface CostStats {
@@ -61,6 +71,8 @@ function newStats(): CostStats {
 }
 
 export function costTracker(opts: CostTrackerOptions = {}): Hook {
+  const mode = opts.mode ?? "per-run";
+
   return {
     name: "cost-tracker",
     internal: true,
@@ -70,14 +82,24 @@ export function costTracker(opts: CostTrackerOptions = {}): Hook {
       // 注意：kernel 的内部 continuation loop（onContinuationCheck → continue=true）
       // **不**会 fire onSessionStart——这里的 "continue" 仅指外部 `session.continue()` 调用。
       //
-      // - run() 第一次：state.has(KEY) 是 false，初始化 fresh
-      // - 外部 continue()：state.has(KEY) 是 true，沿用累计；first time continue 才 init
-      // - 同 session 多次 run()：state.has(KEY) 是 true，重置为新计数
+      // 累积规则（mode='per-run' 默认）：
+      //   - 首次 run()：init fresh
+      //   - 外部 continue()：沿用累计；首次进入才 init
+      //   - 同 session 多次 run()：每次 run 重置（独立计数单元）
+      //
+      // 累积规则（mode='lifetime'）：
+      //   - 首次 run()：init fresh
+      //   - 之后所有 run/continue：沿用累计，永不重置
       if (input.source === "continue") {
         if (!ctx.state.has(KEY)) {
           ctx.state.set(KEY_START, Date.now());
           ctx.state.set(KEY, newStats());
         }
+        return;
+      }
+      // source === "run"
+      if (mode === "lifetime" && ctx.state.has(KEY)) {
+        // lifetime 模式下，第二次 run() 不重置
         return;
       }
       ctx.state.set(KEY_START, Date.now());
