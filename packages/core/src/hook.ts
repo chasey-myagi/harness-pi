@@ -35,6 +35,12 @@ export interface ToolExecResult {
   isError?: boolean;
 
   /**
+   * 非模型文本元数据。用于 truncation、diff、fullOutputPath 等 UI / trace 需要但不应混入
+   * LLM-visible content 的结构化信息。
+   */
+  details?: unknown;
+
+  /**
    * 【高级用法】Tool 主动追加的额外 message。详见 docs/04-context-injection.md §6。
    * 大多数 plugin 应优先用 hook `additionalContext` 注入；只有"附加 message 是
    * tool 输出语义的一部分"才用 newMessages。

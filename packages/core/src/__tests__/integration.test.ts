@@ -137,6 +137,68 @@ describe("Integration: Context injection", () => {
     }
   });
 
+  it("preserves ToolExecResult.details on toolResult messages", async () => {
+    const tool: HarnessTool = {
+      ...echoTool,
+      async execute() {
+        return {
+          content: [{ type: "text", text: "ok" }],
+          details: { truncation: { originalLines: 12, returnedLines: 3 } },
+        } as any;
+      },
+    };
+    const model = createFakeModel([
+      {
+        content: [
+          { type: "toolCall", name: "echo", arguments: { msg: "x" } },
+        ],
+      },
+      { content: [{ type: "text", text: "done" }] },
+    ]);
+    const session = new AgentSession({ model, tools: [tool] });
+    await session.run("go");
+    const tr = session.messages.find((m) => m.role === "toolResult");
+    expect(tr).toBeDefined();
+    expect(tr && tr.role === "toolResult" && (tr as any).details).toEqual({
+      truncation: { originalLines: 12, returnedLines: 3 },
+    });
+    const modelToolResult = model.getCalls()[1]?.messages.find(
+      (m) => m.role === "toolResult",
+    );
+    expect(modelToolResult && (modelToolResult as any).details).toBeUndefined();
+  });
+
+  it("preserves details from updatedToolOutput", async () => {
+    const model = createFakeModel([
+      {
+        content: [
+          { type: "toolCall", name: "echo", arguments: { msg: "x" } },
+        ],
+      },
+      { content: [{ type: "text", text: "done" }] },
+    ]);
+    const hook: Hook = {
+      name: "replace-with-details",
+      onPostToolUse: () => ({
+        updatedToolOutput: {
+          content: [{ type: "text", text: "rewritten" }],
+          details: { diff: "changed" },
+        } as any,
+      }),
+    };
+    const session = new AgentSession({
+      model,
+      tools: [echoTool],
+      hooks: [hook],
+    });
+    await session.run("go");
+    const tr = session.messages.find((m) => m.role === "toolResult");
+    expect(tr).toBeDefined();
+    expect(tr && tr.role === "toolResult" && (tr as any).details).toEqual({
+      diff: "changed",
+    });
+  });
+
   it("PreToolUse decision=deny prevents execute, returns isError result", async () => {
     let executed = false;
     const tool: HarnessTool = {

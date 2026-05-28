@@ -767,7 +767,7 @@ export class AgentSession {
       parameters: t.parameters,
     }));
     const context: Context = {
-      messages: stripAttachmentMeta(transformed),
+      messages: stripHarnessOnlyFields(transformed),
       tools: piTools,
       ...(sysPrompt ? { systemPrompt: sysPrompt } : {}),
     };
@@ -838,6 +838,10 @@ export class AgentSession {
         isError: result.isError ?? false,
         timestamp: Date.now(),
       };
+      if (result.details !== undefined) {
+        (trMsg as ToolResultMessage & { details?: unknown }).details =
+          result.details;
+      }
       this._messages.push(trMsg);
       if (result.newMessages) {
         for (const m of result.newMessages) {
@@ -925,23 +929,33 @@ export class AgentSession {
 export { findToolByName } from "./tool-executor.js";
 
 /**
- * 把 attachment message 的 `_meta` 字段去掉再发给 pi-ai。
- * 优化：先 scan，只有真有 `_meta` 才走 map（绝大多数 turn messages 没有 attachment）。
+ * 把 kernel-only 字段去掉再发给 pi-ai。
+ * `details` 是本地 trace metadata，不能进入模型上下文。
+ * 优化：先 scan，只有真有字段要剥离时才走 map。
  */
-function stripAttachmentMeta(messages: ReadonlyArray<Message>): Message[] {
-  let hasMeta = false;
+function stripHarnessOnlyFields(messages: ReadonlyArray<Message>): Message[] {
+  let hasHarnessOnlyFields = false;
   for (const m of messages) {
-    if ((m as { _meta?: unknown })._meta !== undefined) {
-      hasMeta = true;
+    if (
+      (m as { _meta?: unknown })._meta !== undefined ||
+      (m as { details?: unknown }).details !== undefined
+    ) {
+      hasHarnessOnlyFields = true;
       break;
     }
   }
-  if (!hasMeta) return messages.slice();
+  if (!hasHarnessOnlyFields) return messages.slice();
 
   return messages.map((m) => {
-    if ((m as { _meta?: unknown })._meta === undefined) return m;
-    const copy = { ...m } as Message & { _meta?: unknown };
+    if (
+      (m as { _meta?: unknown })._meta === undefined &&
+      (m as { details?: unknown }).details === undefined
+    ) {
+      return m;
+    }
+    const copy = { ...m } as Message & { _meta?: unknown; details?: unknown };
     delete copy._meta;
+    delete copy.details;
     return copy;
   });
 }

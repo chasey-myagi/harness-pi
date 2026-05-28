@@ -96,7 +96,7 @@ export function createUserMessage(
  * 借鉴 Claude Code `createAttachmentMessage({ type: 'hook_additional_context', hookName, hookEvent })`。
  *
  * 物理形态：user role + text content。`_meta` 是 harness-pi 自定义字段，kernel 在
- * 发给 pi-ai 前会剥掉（参见 session.ts stripAttachmentMeta）。
+ * 发给 pi-ai 前会剥掉（参见 session.ts stripHarnessOnlyFields）。
  */
 export function createAttachmentMessage(opts: {
   type: "hook_additional_context" | "tool_result_overflow" | (string & {});

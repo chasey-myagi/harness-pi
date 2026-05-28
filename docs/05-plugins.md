@@ -48,7 +48,7 @@ export function myPlugin(opts: MyPluginOptions): Hook {
 - **无状态优先**：plugin 函数本身尽量纯（一次 new session 一次工厂调用即可重用）
 - **配置通过 opts**：所有可调参数走构造时传入
 - **状态走 `ctx.state`**：session 级状态在 `ctx.state.set(key, value)`
-- **≤100 LOC**：超过就拆。watchdog ~30 行、metrics ~80 行最多
+- **小而单一**：plugin 应优先保持一个清晰职责；如果状态、hook 分支或测试夹具开始互相拖累，就拆成更小的 plugin 或 helper
 - **零跨 plugin 依赖**：不 import 另一个 plugin
 
 ## 2. Plugin 工厂模式

@@ -43,6 +43,22 @@ importers:
         specifier: ^5.6.0
         version: 5.9.3
 
+  examples/03-tools:
+    dependencies:
+      '@harness-pi/core':
+        specifier: workspace:*
+        version: link:../../packages/core
+      '@harness-pi/tools':
+        specifier: workspace:*
+        version: link:../../packages/tools
+    devDependencies:
+      tsx:
+        specifier: ^4.0.0
+        version: 4.22.3
+      typescript:
+        specifier: ^5.6.0
+        version: 5.9.3
+
   packages/core:
     dependencies:
       '@mariozechner/pi-ai':
@@ -67,6 +83,22 @@ importers:
       '@mariozechner/pi-ai':
         specifier: ^0.53.0
         version: 0.53.1(ws@8.21.0)(zod@3.25.76)
+    devDependencies:
+      '@types/node':
+        specifier: ^22.0.0
+        version: 22.19.19
+      typescript:
+        specifier: ^5.6.0
+        version: 5.9.3
+      vitest:
+        specifier: ^2.1.0
+        version: 2.1.9(@types/node@22.19.19)
+
+  packages/tools:
+    dependencies:
+      '@harness-pi/core':
+        specifier: workspace:*
+        version: link:../core
     devDependencies:
       '@types/node':
         specifier: ^22.0.0
