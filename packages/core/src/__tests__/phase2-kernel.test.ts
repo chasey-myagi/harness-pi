@@ -208,6 +208,133 @@ describe("Phase 2: fireDecisionOutcome", () => {
   });
 });
 
+/* ──────────────── DecisionOutcome edge cases (Gate-2 #4) ──────────────── */
+
+describe("Phase 2 (post Gate-2): fireDecisionOutcome edge cases", () => {
+  const makeProbeArgs = () =>
+    ({
+      call: {
+        type: "toolCall" as const,
+        id: "1",
+        name: "echo",
+        arguments: {},
+      },
+      tool: {
+        name: "echo",
+        description: "",
+        parameters: Type.Object({}),
+        execute: async () => ({ content: [] }),
+      },
+    });
+
+  it("kind=context-only when only systemMessage is set (no additionalContext)", async () => {
+    const dispatcher = new HookDispatcher([
+      {
+        name: "sys-only",
+        onPreToolUse: () => ({ systemMessage: "hey operator" }),
+      },
+    ]);
+    const { ctx } = createTestContext();
+    const out = await dispatcher.fireDecisionOutcome(
+      "onPreToolUse",
+      makeProbeArgs(),
+      ctx,
+    );
+    expect(out.kind).toBe("context-only");
+    if (out.kind === "context-only") {
+      expect(out.systemMessage).toBe("hey operator");
+      expect(out.additionalContext).toBeUndefined();
+    }
+  });
+
+  it("kind=none when hook returns { continue: true } only", async () => {
+    const dispatcher = new HookDispatcher([
+      {
+        name: "no-op-continue",
+        onPreToolUse: () => ({ continue: true }),
+      },
+    ]);
+    const { ctx } = createTestContext();
+    const out = await dispatcher.fireDecisionOutcome(
+      "onPreToolUse",
+      makeProbeArgs(),
+      ctx,
+    );
+    expect(out.kind).toBe("none");
+  });
+
+  it("exhaustive switch (compile-time): all 3 kinds covered", async () => {
+    // Type-level smoke: if a new kind is added without a switch arm, this would
+    // fail to typecheck via the never check in the default arm.
+    const handle = (o: DecisionOutcome): string => {
+      switch (o.kind) {
+        case "decided":
+          return "d";
+        case "context-only":
+          return "c";
+        case "none":
+          return "n";
+        default: {
+          const _exhaustive: never = o;
+          return _exhaustive;
+        }
+      }
+    };
+    const dispatcher = new HookDispatcher([]);
+    const { ctx } = createTestContext();
+    const out = await dispatcher.fireDecisionOutcome(
+      "onPreToolUse",
+      makeProbeArgs(),
+      ctx,
+    );
+    expect(handle(out)).toBe("n");
+  });
+});
+
+/* ──────────────── Phase split: abort propagation (Gate-2 #3) ──────────────── */
+
+describe("Phase 2 (post Gate-2): abort between phases", () => {
+  it("onLlmEnd abort → 跳过 toolBatch 跟 onTurnEnd（新行为）", async () => {
+    const seq: string[] = [];
+    const abortFromLlm: Hook = {
+      name: "abort-on-llm",
+      onLlmEnd(_input, ctx) {
+        seq.push("llmEnd");
+        ctx.abort("abort from onLlmEnd");
+      },
+      onPostToolUse() {
+        seq.push("postTool");
+      },
+      onTurnEnd() {
+        seq.push("turnEnd");
+      },
+    };
+    const echo: HarnessTool = {
+      name: "echo",
+      description: "",
+      parameters: Type.Object({}),
+      async execute() {
+        return { content: [{ type: "text", text: "x" }] };
+      },
+    };
+    const fake = createFakeModel([
+      {
+        content: [{ type: "toolCall", name: "echo", arguments: {} }],
+      },
+    ]);
+    const session = new AgentSession({
+      model: fake,
+      tools: [echo],
+      hooks: [abortFromLlm],
+    });
+    const summary = await session.run("go");
+    expect(summary.reason).toBe("aborted");
+    // onLlmEnd 之后 ctx.abort()：phase split 让 toolBatch + turnEnd 都不跑
+    expect(seq).toEqual(["llmEnd"]);
+    fake.teardown();
+  });
+});
+
 /* ──────────────── isConcurrencySafe 错误上报 ──────────────── */
 
 describe("Phase 2: isConcurrencySafe error surfacing", () => {

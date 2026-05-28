@@ -298,13 +298,20 @@ export interface Hook {
   internal?: boolean;
 
   /**
-   * 软依赖声明：构造 session 时 kernel 检查 hook list —— 如果 `requires` 里的 name 不在本
-   * hook **之前** 注册，通过 `consoleSink` 警告。**不会自动 reorder**（避免 caller 困惑）。
+   * 硬依赖声明：缺了或顺序错就 warn。**没有 fallback 路径的依赖**用这个。
    *
-   * 例子：`tokenBudget` requires `cost-tracker` 以拿到累计 token；如果用户先注册
-   * tokenBudget 再注册 cost-tracker，第一轮 onLlmEnd 时 cost-tracker.stats 还没初始化。
+   * 例子：一个 plugin 必须读 cost-tracker 的累计 token 才能工作（没 fallback），就用
+   * `requires: ["cost-tracker"]`。
    */
   requires?: string[];
+
+  /**
+   * 软依赖声明：有 fallback 路径，但有对方会更好。**不发出 warning**——只用于文档/
+   * tooling 视化依赖图。
+   *
+   * 例子：`tokenBudget` 优先读 cost-tracker，但缺了也能自累 token；用 `prefers`。
+   */
+  prefers?: string[];
 
   /**
    * 软冲突声明：构造 session 时如果同时存在 `conflictsWith` 里的 hook name，warn。

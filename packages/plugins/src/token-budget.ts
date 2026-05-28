@@ -65,9 +65,9 @@ export function tokenBudget(opts: TokenBudgetOptions): Hook {
   return {
     name: "token-budget",
     timeout: 50,
-    // 软依赖：cost-tracker 累计 token 是首选信号；缺它就走 fallback 自累。
-    // 不阻塞构造，只 warn。
-    requires: ["cost-tracker"],
+    // cost-tracker 累计 token 是首选信号；缺它走 fallback 自累。
+    // 用 `prefers`（不发 warning），不用 `requires`（会 warn 噪音）。
+    prefers: ["cost-tracker"],
 
     onSessionStart(_input, ctx) {
       ctx.state.set(KEY, {

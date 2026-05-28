@@ -204,19 +204,18 @@ export class HookDispatcher {
 
       const r = inv.value;
       if (!r) continue;
-      const hr = r;
 
       // 聚合 transient context（永不短路）
-      if (hr.additionalContext) additionalContexts.push(hr.additionalContext);
-      if (hr.systemMessage) systemMessages.push(hr.systemMessage);
+      if (r.additionalContext) additionalContexts.push(r.additionalContext);
+      if (r.systemMessage) systemMessages.push(r.systemMessage);
 
       // 真正的决断：decision / updatedInput / continue=false
       if (
-        hr.decision !== undefined ||
-        hr.updatedInput !== undefined ||
-        hr.continue === false
+        r.decision !== undefined ||
+        r.updatedInput !== undefined ||
+        r.continue === false
       ) {
-        const out: HookResult = { ...hr };
+        const out: HookResult = { ...r };
         if (additionalContexts.length > 0) {
           out.additionalContext = additionalContexts.join("\n");
         }

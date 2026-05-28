@@ -178,9 +178,17 @@ export class AgentSession {
 
   /**
    * 把 hook 依赖校验 warning 发给 consoleSink。turnIdx 用 -1 表示"构造期"。
+   *
+   * 抑制规则（避免 spam 用户）：
+   *   - 抑制 `hook` 是 `internal: true` 的 hook 触发的 warning（plugin author 自己的事，不该跟用户报）
+   *   - 抑制 `related` 是 `internal: true` hook 的 warning（同上）
    */
   private _emitDependencyWarnings(warnings: HookDependencyWarning[]): void {
+    const internalNames = new Set(
+      this._hooks.filter((h) => h.internal === true).map((h) => h.name),
+    );
     for (const w of warnings) {
+      if (internalNames.has(w.hook) || internalNames.has(w.related)) continue;
       this._consoleSink(`[hook-deps:${w.kind}] ${w.message}`, {
         sessionId: this.id,
         turnIdx: -1,
