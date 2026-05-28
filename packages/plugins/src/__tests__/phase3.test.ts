@@ -21,33 +21,6 @@ const echoTool: HarnessTool = {
 /* ──────────────── cost-tracker mode option ──────────────── */
 
 describe("Phase 3: cost-tracker mode", () => {
-  it("per-run (default): 每次 run() 重置 stats", async () => {
-    const fake = createFakeModel([
-      {
-        content: [{ type: "text", text: "first" }],
-        usage: { input: 100, output: 50 },
-      },
-      {
-        content: [{ type: "text", text: "second" }],
-        usage: { input: 200, output: 80 },
-      },
-    ]);
-    const session = new AgentSession({
-      model: fake,
-      tools: [],
-      hooks: [costTracker()],
-    });
-    // 第一次 run
-    await session.run("first");
-    // session 在 onSessionEnd 时 stats 还在 state 里；下次 run 会重置
-    // 直接抓 state.get 验证
-    // 因为 onSessionEnd 之后 ctx state 还存活到下次 onSessionStart 才被重置
-    // 第二次 run
-    await session.run("second");
-    // 这里我们没办法直接观察 mid-run state；改用一个 probe hook 捕获
-    fake.teardown();
-  });
-
   it("per-run vs lifetime: 第二次 run 后累计 vs 重置", async () => {
     const captured: Array<number> = [];
     const probeHook = {

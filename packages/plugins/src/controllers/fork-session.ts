@@ -57,6 +57,14 @@ export async function forkSession(
   const snapshot = parent.snapshot();
   const child = factory(snapshot.messages);
 
+  // M4：防 self-fork。factory 必须返回新的 AgentSession 实例，否则 child.run() 会
+  // 直接 mutate 父，破坏 fork 语义。
+  if (child === parent) {
+    throw new Error(
+      "forkSession: factory must return a new AgentSession instance, not the parent",
+    );
+  }
+
   const runOpts = opts.signal ? { signal: opts.signal } : {};
   const summary = opts.prompt
     ? await child.run(opts.prompt, runOpts)

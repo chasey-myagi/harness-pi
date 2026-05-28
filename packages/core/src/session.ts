@@ -24,13 +24,26 @@ import {
 } from "@mariozechner/pi-ai";
 
 /**
- * Phase 3：streaming consumer 看到的事件类型。每个事件对应一个 hook event。
+ * Phase 3：streaming consumer 看到的事件类型。每个事件对应一个 EVENT-category hook。
  *
  * 跟 hook event 的区别：
  *   - hook 是 plugin 写的代码（可以决断、改 context）
  *   - SessionEvent 是只读流，给外部 consumer（HTTP/WS handler / 测试）订阅
  *
- * 这个 union 显式列出，让消费者用 discriminated switch 处理。
+ * **故意不包括的事件**（设计决定，不要"补全"）：
+ *   - onPreToolUse / onUserPromptSubmit：decision-category，能改 control flow；
+ *     stream 是只读视图，让 caller 决断会模糊"控制平面"边界。
+ *   - transformSystemPromptBeforeLlm / transformMessagesBeforeLlm：pipe-category，
+ *     是 plugin-to-plugin 的转换链，对外部 consumer 不可观察也无意义。
+ *   - wrapTurn / wrapToolExec：around-category，洋葱嵌套；嵌套语义跟"flat event 流"
+ *     不兼容，强行 yield 会让 consumer 看到错乱的 begin/end 序列。
+ *
+ * 这个 union 显式列出，让消费者用 discriminated switch 处理。新加 arm 时记得
+ * 同步更新 phase3-capabilities.test.ts 的 exhaustive-switch 测试。
+ *
+ * **注意**：`tool-end.result.newMessages` 包含 tool 想注入的 user/system 消息，但 kernel
+ * 可能在 push 进 session.messages 之前过滤掉 assistant/toolResult role 的注入。Stream
+ * consumer 看到的是 raw result，不是 kernel 实际接受的 messages。
  */
 export type SessionEvent =
   | { type: "session-start"; sessionId: string; source: "run" | "continue"; initialPrompt?: string }
@@ -295,6 +308,7 @@ export class AgentSession {
     const queue: SessionEvent[] = [];
     let resolveNext: ((v: IteratorResult<SessionEvent>) => void) | null = null;
     let done = false;
+    const sessionIdCapture = this.id;
 
     const push = (ev: SessionEvent): void => {
       if (done) return;
@@ -322,7 +336,7 @@ export class AgentSession {
       onSessionStart(input) {
         push({
           type: "session-start",
-          sessionId: this_id_capture,
+          sessionId: sessionIdCapture,
           source: input.source,
           ...(input.initialPrompt !== undefined
             ? { initialPrompt: input.initialPrompt }
@@ -373,24 +387,63 @@ export class AgentSession {
         });
       },
     };
-    const this_id_capture = this.id;
 
-    // 临时挂上 forwarder（Session 没在 run 时；如果在 run 则 use() 会 throw → caller 错）
-    this.use(forwarder);
+    // 提取 cleanup 给 resolve/reject 路径共用，避免重复
+    const cleanupForwarder = (): void => {
+      const idx = this._hooks.indexOf(forwarder);
+      if (idx >= 0) this._hooks.splice(idx, 1);
+      this._dispatcher = new HookDispatcher(
+        this._hooks,
+        this._hookFailureSink,
+      );
+    };
+
+    // M3 兜底：如果当前已在跑（_running=true），this.use() 会 throw。把这个错转成
+    // 已关闭的 iterator，让 caller 可以正常 for-await 而不是 catch sync exception。
+    try {
+      this.use(forwarder);
+    } catch (err) {
+      const errEv: SessionEvent = {
+        type: "error",
+        phase: "hook",
+        message:
+          err instanceof Error
+            ? err.message
+            : "runStreaming called while session is already running",
+      };
+      let emitted = false;
+      const closedIter: AsyncIterableIterator<SessionEvent> = {
+        async next(): Promise<IteratorResult<SessionEvent>> {
+          if (!emitted) {
+            emitted = true;
+            return { value: errEv, done: false };
+          }
+          return { value: undefined, done: true };
+        },
+        async return(): Promise<IteratorResult<SessionEvent>> {
+          emitted = true;
+          return { value: undefined, done: true };
+        },
+        [Symbol.asyncIterator]() {
+          return this;
+        },
+      };
+      const rejected = Promise.reject<RunSummary>(
+        err instanceof Error
+          ? err
+          : new Error("runStreaming concurrent invocation"),
+      );
+      // 避免 unhandled-rejection 警告——caller 不 await finalSummary 也 OK
+      rejected.catch(() => {});
+      return Object.assign(closedIter, { finalSummary: rejected });
+    }
 
     // 异步跑 session，结束后 push session-end + close
     const summaryPromise = this._runInternal(args).then(
       (summary) => {
         push({ type: "session-end", summary });
         close();
-        // 卸 forwarder：只移除自己挂的这个 hook，不影响 caller 挂的
-        const idx = this._hooks.indexOf(forwarder);
-        if (idx >= 0) this._hooks.splice(idx, 1);
-        // 重新构造 dispatcher 以同步 hook list
-        this._dispatcher = new HookDispatcher(
-          this._hooks,
-          this._hookFailureSink,
-        );
+        cleanupForwarder();
         return summary;
       },
       (err) => {
@@ -400,18 +453,13 @@ export class AgentSession {
           message: err instanceof Error ? err.message : String(err),
         });
         close();
-        const idx = this._hooks.indexOf(forwarder);
-        if (idx >= 0) this._hooks.splice(idx, 1);
-        this._dispatcher = new HookDispatcher(
-          this._hooks,
-          this._hookFailureSink,
-        );
+        cleanupForwarder();
         throw err;
       },
     );
 
     const iter: AsyncIterableIterator<SessionEvent> = {
-      next(): Promise<IteratorResult<SessionEvent>> {
+      next: (): Promise<IteratorResult<SessionEvent>> => {
         if (queue.length > 0) {
           return Promise.resolve({
             value: queue.shift()!,
@@ -424,6 +472,19 @@ export class AgentSession {
         return new Promise((resolve) => {
           resolveNext = resolve;
         });
+      },
+      // M2：consumer 可以提前 break，触发 session.abort() 取消正在跑的 session。
+      // 满足标准 AsyncIterator close protocol：`for await ... break` / iter.return() 都会调这里。
+      return: (): Promise<IteratorResult<SessionEvent>> => {
+        if (!done) {
+          // 让 session 走正常 abort 流程（onSessionEnd 还会 fire，summaryPromise 会 resolve aborted）
+          if (!this._abortCtrl.signal.aborted) {
+            this._abortCtrl.abort(
+              new Error("runStreaming: consumer broke iteration"),
+            );
+          }
+        }
+        return Promise.resolve({ value: undefined, done: true });
       },
       [Symbol.asyncIterator]() {
         return this;
