@@ -1,0 +1,28 @@
+{
+  "name": "@harness-pi/coding-agent",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Dogfood coding agent built on harness-pi",
+  "type": "module",
+  "main": "./dist/cli.js",
+  "types": "./dist/cli.d.ts",
+  "scripts": {
+    "start": "tsx src/cli.ts",
+    "build": "tsc -p .",
+    "typecheck": "tsc -p . --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "dependencies": {
+    "@harness-pi/core": "workspace:*",
+    "@harness-pi/plugins": "workspace:*",
+    "@harness-pi/tools": "workspace:*",
+    "@mariozechner/pi-ai": "^0.53.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "tsx": "^4.0.0",
+    "typescript": "^5.6.0",
+    "vitest": "^2.1.0"
+  }
+}

@@ -78,6 +78,11 @@ export interface AgentSessionOptions {
   maxContinuations?: number;
   /** 续跑时可注入历史 messages（lifecycle-restart controller 用）。 */
   initialMessages?: Message[];
+  /**
+   * 透传给 pi-ai complete() 的 provider options。
+   * `signal` 是 kernel 保留字段：即使传入也会被当前 session 的 AbortSignal 覆盖。
+   */
+  llmOptions?: Record<string, unknown>;
   /** Hook 失败上报通道（metrics plugin 通常 hook 进来）。 */
   hookFailureSink?: HookFailureSink;
   /**
@@ -128,6 +133,7 @@ export class AgentSession {
   readonly systemPrompt: string;
   readonly maxTurns: number;
   readonly maxContinuations: number;
+  private readonly _llmOptions: Record<string, unknown>;
 
   private _messages: Message[];
   private _hooks: Hook[];
@@ -151,6 +157,7 @@ export class AgentSession {
     this.systemPrompt = opts.systemPrompt ?? "";
     this.maxTurns = opts.maxTurns ?? DEFAULT_MAX_TURNS;
     this.maxContinuations = opts.maxContinuations ?? DEFAULT_MAX_CONTINUATIONS;
+    this._llmOptions = { ...(opts.llmOptions ?? {}) };
 
     this._messages = opts.initialMessages ? [...opts.initialMessages] : [];
     this._hooks = [...(opts.hooks ?? [])];
@@ -776,6 +783,7 @@ export class AgentSession {
     let assistant: AssistantMessage;
     try {
       assistant = await complete(this.model, context, {
+        ...this._llmOptions,
         signal: this._abortCtrl.signal,
       });
     } catch (err) {

@@ -41,14 +41,32 @@
 
 ## 当前状态
 
-`harness-pi` 现在处在 **v0.1 readiness** 阶段：core loop、hook dispatcher、standard plugins、controllers、first-party tools、offline examples 和测试都已经落地，足够做 spike/review。
+`harness-pi` 现在处在 **v0.1 readiness** 阶段：core loop、hook dispatcher、standard plugins、controllers、first-party tools、dogfood coding agent、offline examples 和测试都已经落地，足够做 spike/review。
 
 还不应直接全量替换 `bidding-agent`：这个框架尚未经过第三方 production 验证，streaming `message_update`/thinking parity、完整 auto-compaction、PG sink 仍是迁移 blocker。当前建议是先把 `bidding-agent` 内部接口形状对齐，再用 worktree 做最小 happy-path spike。
+
+## Dogfood Agent
+
+`apps/coding-agent` 是当前唯一真实 agent 应用，用来对标 `pi-coding-agent` 的核心 coding loop：真实 model、真实 repo、第一方 tools、session log、metrics、token/cost/tool/耗时报告。
+
+```bash
+pnpm --filter @harness-pi/coding-agent start -- --cwd . --model provider:model "inspect and summarize this repo"
+pnpm --filter @harness-pi/coding-agent start -- --cwd . --model dashscope:qwen-plus
+```
+
+- model 来源：`--model provider:modelId` 或 `HARNESS_PI_MODEL`。
+- DashScope/Qwen 可用 `dashscope:qwen-plus` 或 `qwen:qwen-plus`，凭据来自 `DASHSCOPE_API_KEY` 或 `QWEN_API_KEY`；已知 Qwen 文本模型会显示人民币 token 成本估算，未知 DashScope 模型保持 `n/a`。
+- 默认 full mode 挂 `read/bash/edit/write/grep/find/ls`；`--read-only` 只挂 `read/grep/find/ls`。
+- `--disable bash,write` 可以关闭指定基础 tool。
+- 默认 log 目录是 `.harness-pi/logs`；`--metrics-file path.ndjson` 可写 metrics。
+- **安全边界**：`bash` 是 host shell，不是 sandbox。full mode 只应在你明确允许修改的 workspace 里运行。
 
 ## Layout
 
 ```
 harness-pi/
+├── apps/
+│   └── coding-agent/ # @harness-pi/coding-agent —— real dogfood coding agent
 ├── packages/
 │   ├── core/         # @harness-pi/core —— AgentSession + hook protocol
 │   ├── plugins/      # @harness-pi/plugins —— watchdog / metrics / trim / log ...

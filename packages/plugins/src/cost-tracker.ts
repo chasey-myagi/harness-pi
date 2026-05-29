@@ -41,6 +41,8 @@ export interface CostStats {
   cachedTokens: number;
   costUSD: number;
   durationMs: number;
+  llmDurationMs: number;
+  avgLlmDurationMs: number;
   llmCallCount: number;
   byModel: Map<
     string,
@@ -50,6 +52,7 @@ export interface CostStats {
       cached: number;
       costUSD: number;
       calls: number;
+      durationMs: number;
     }
   >;
 }
@@ -65,6 +68,8 @@ function newStats(): CostStats {
     cachedTokens: 0,
     costUSD: 0,
     durationMs: 0,
+    llmDurationMs: 0,
+    avgLlmDurationMs: 0,
     llmCallCount: 0,
     byModel: new Map(),
   };
@@ -111,9 +116,9 @@ export function costTracker(opts: CostTrackerOptions = {}): Hook {
       if (!stats) return;
       const usage = input.msg.usage;
       const modelId = input.msg.model || "unknown";
-      const inputTok = usage.input ?? 0;
-      const outputTok = usage.output ?? 0;
-      const cachedTok = usage.cacheRead ?? 0;
+      const inputTok = usage?.input ?? 0;
+      const outputTok = usage?.output ?? 0;
+      const cachedTok = usage?.cacheRead ?? 0;
 
       let cost = 0;
       try {
@@ -132,6 +137,8 @@ export function costTracker(opts: CostTrackerOptions = {}): Hook {
       stats.cachedTokens += cachedTok;
       stats.costUSD += cost;
       stats.llmCallCount += 1;
+      stats.llmDurationMs += input.durationMs;
+      stats.avgLlmDurationMs = stats.llmDurationMs / stats.llmCallCount;
 
       const m = stats.byModel.get(modelId) ?? {
         input: 0,
@@ -139,12 +146,14 @@ export function costTracker(opts: CostTrackerOptions = {}): Hook {
         cached: 0,
         costUSD: 0,
         calls: 0,
+        durationMs: 0,
       };
       m.input += inputTok;
       m.output += outputTok;
       m.cached += cachedTok;
       m.costUSD += cost;
       m.calls += 1;
+      m.durationMs += input.durationMs;
       stats.byModel.set(modelId, m);
     },
 

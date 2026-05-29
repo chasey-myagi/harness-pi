@@ -63,6 +63,18 @@ export type {
 export { costTracker, getCostStats } from "./cost-tracker.js";
 export type { CostTrackerOptions, CostStats } from "./cost-tracker.js";
 
+export {
+  toolStats,
+  getToolStats,
+  estimateParallelSavings,
+} from "./tool-stats.js";
+export type {
+  ToolStatsOptions,
+  ToolStats,
+  ToolStatsByTool,
+  ToolSpan,
+} from "./tool-stats.js";
+
 export { tokenBudget } from "./token-budget.js";
 export type { TokenBudgetOptions } from "./token-budget.js";
 
