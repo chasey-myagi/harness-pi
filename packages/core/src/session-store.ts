@@ -15,6 +15,8 @@
 
 import type { Message } from "@mariozechner/pi-ai";
 import { randomUUID } from "node:crypto";
+// type-only import（无运行时循环）：terminal entry 携带内核的 RunSummary 终态。
+import type { RunSummary } from "./session.js";
 
 /**
  * 一条会话条目的**内容**。domain-free：内核不认识 question/evidence/judgment。
@@ -26,13 +28,13 @@ import { randomUUID } from "node:crypto";
  * **不可变契约**：entry（及其内部 `Message`）一旦落库即视为不可变。store 出于性能不深拷贝，
  * 调用方**不得**原地修改从 `getPathToLeaf` 取回的 entry（否则会跨 fork/session 串改）。
  *
- * **待补变体**（设计依据 docs/09 §3.4 附录 A）：`{ kind: "terminal"; result: TerminalResult }`
- * 随 `TerminalResult`（Task #3）落地，由 resume 机制（Task #4）在每个 turn 结束时 append。
- * 本模块当前只承诺 `message` / `compaction_boundary` —— 它们已足够支撑 store 协议与回溯。
+ * `terminal`：一次 run/continue 的终态（RunSummary）。仅作元数据/审计，resume 重放时忽略它
+ * （不影响消息重建）。
  */
 export type SessionEntry =
   | { kind: "message"; message: Message }
-  | { kind: "compaction_boundary"; summary: Message };
+  | { kind: "compaction_boundary"; summary: Message }
+  | { kind: "terminal"; result: RunSummary };
 
 /** 落库后的条目：内核分配 `id` / `parentId` / `seq`，调用方只给 `entry` 内容。 */
 export interface StoredEntry {

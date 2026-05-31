@@ -94,6 +94,7 @@ import type { Hook, LogLevel, SessionConfigView, ToolExecResult } from "./hook.j
 import { ToolExecutor, findToolByName } from "./tool-executor.js";
 import { createAttachmentMessage } from "./types.js";
 import type { HarnessTool } from "./types.js";
+import type { SessionStore } from "./session-store.js";
 import { randomUUID } from "node:crypto";
 
 export interface AgentSessionOptions {
@@ -107,6 +108,19 @@ export interface AgentSessionOptions {
   maxContinuations?: number;
   /** 续跑时可注入历史 messages（lifecycle-restart controller 用）。 */
   initialMessages?: Message[];
+  /**
+   * 可选会话存储。给定后，内核在每个 turn 结束 + run 结束把新 messages（及一条 terminal entry）
+   * append 进 store；配合 `AgentSession.resume(store, sessionId)` 可从落盘历史重建并续跑。
+   * 协议在内核，落盘实现（JSONL / Postgres）在 adapter。
+   */
+  store?: SessionStore;
+  /** 覆盖自动生成的 session id。`AgentSession.resume` 用它把新 session 绑回同一 lineage。 */
+  sessionId?: string;
+  /**
+   * 内核内部用：resume 时声明前 N 条 initialMessages 已在 store 里、不要重复 append。
+   * 普通调用者不要设。
+   */
+  resumedMessageCount?: number;
   /**
    * 透传给 pi-ai complete() 的 provider options。
    * `signal` 是 kernel 保留字段：即使传入也会被当前 session 的 AbortSignal 覆盖。
@@ -215,9 +229,19 @@ export class AgentSession {
     LiveEventType,
     Set<(e: LiveEvent) => void>
   >();
+  /** 可选会话存储 + 已 append 进 store 的 messages 数（避免重复落盘）。 */
+  private readonly _store: SessionStore | undefined;
+  private _persistedCount: number;
 
   constructor(opts: AgentSessionOptions) {
-    this.id = randomUUID();
+    this.id = opts.sessionId ?? randomUUID();
+    this._store = opts.store;
+    // resume 时前 N 条 initialMessages 已在 store，不重复 append；普通构造从 0 起。
+    // 夹到 initialMessages 长度，防止误传过大值导致首批新消息漏落盘。
+    this._persistedCount = Math.min(
+      opts.resumedMessageCount ?? 0,
+      opts.initialMessages?.length ?? 0,
+    );
     this.model = opts.model;
     this.tools = opts.tools;
     this.systemPrompt = opts.systemPrompt ?? "";
@@ -702,6 +726,7 @@ export class AgentSession {
             "onUserPromptSubmit halted";
           summary.abortReason = reasonText;
           await this._fireSessionEnd(0, 0, summary.reason);
+          await this._persistTerminal(summary);
           return summary;
         }
         if (upsOut?.systemMessage) {
@@ -752,7 +777,9 @@ export class AgentSession {
 
       // 退出 loop：恰好 fire 一次 onSessionEnd（无论 done / aborted / error / max_turns / max_continuations）
       await this._fireSessionEnd(turnIdx, continuations, reason);
-      return this._buildSummary(turnIdx, continuations, reason);
+      const summary = this._buildSummary(turnIdx, continuations, reason);
+      await this._persistTerminal(summary);
+      return summary;
     } finally {
       cleanupCallerForward();
     }
@@ -841,6 +868,90 @@ export class AgentSession {
     return summary;
   }
 
+  /** best-effort 持久化：store I/O 失败**不**劫持控制流/终态，记日志即可（下次 flush 从未成功处重试）。 */
+  private _reportStoreError(op: string, err: unknown): void {
+    this._consoleSink(
+      `[session-store] ${op} failed (best-effort persistence, will retry next flush): ${
+        err instanceof Error ? err.message : String(err)
+      }`,
+      { sessionId: this.id, turnIdx: this._ctx.turnIdx },
+    );
+  }
+
+  /**
+   * 把自上次以来的新 messages append 进 store（顺序、append-only）。无 store 即 no-op。
+   *
+   * `_persistedCount` 是 **high-water-mark，逐条推进**：append 成功一条才前进一条 —— 中途
+   * `appendEntry` 抛错时计数器停在已成功处，下次 flush 从失败那条重试，**绝不重复 append**
+   * （store 是 append-only、不去重，重复 append 会让 resume 读出重复消息）。
+   * best-effort：append 失败被 catch，不抛给控制流（持久化失败不该杀掉 run）。
+   * 依赖 `_messages` **append-only、索引稳定**（内核只 push，从不 splice/reorder）—— HWM 才成立。
+   */
+  private async _flushToStore(): Promise<void> {
+    if (!this._store) return;
+    try {
+      for (; this._persistedCount < this._messages.length; this._persistedCount++) {
+        await this._store.appendEntry(this.id, {
+          kind: "message",
+          message: this._messages[this._persistedCount]!,
+        });
+      }
+    } catch (err) {
+      this._reportStoreError("appendEntry(message)", err);
+    }
+  }
+
+  /** run 结束：flush 剩余 messages + append 一条 terminal entry（终态元数据）。best-effort，无 store 即 no-op。 */
+  private async _persistTerminal(summary: RunSummary): Promise<void> {
+    if (!this._store) return;
+    await this._flushToStore(); // best-effort（不会抛）
+    try {
+      await this._store.appendEntry(this.id, { kind: "terminal", result: summary });
+    } catch (err) {
+      this._reportStoreError("appendEntry(terminal)", err);
+    }
+  }
+
+  /**
+   * 从 store 的落盘历史重建一个绑回同一 lineage 的 AgentSession，可直接 `continue()` 续跑。
+   *
+   * 重放规则：按 root→leaf 顺序重建 messages；遇到 `compaction_boundary` **丢弃已累积前缀、
+   * 用 summary 接续**（这正是 SessionStore 故意不裁剪、把裁剪留给 resume 的那部分，见 session-store.ts）；
+   * `terminal` entry 忽略（仅元数据）。重建出的 messages 标记为「已持久化」，续跑只 append 新消息。
+   *
+   * **信任边界**：这是不可信落盘数据进入内核的唯一入口。本方法**信任 store 返回的 `Message` 形状合法**
+   * （schema 校验是 adapter 的职责）；形状坏的 message 会在下一次 `_phaseLlmCall` 喂给 pi-ai 时才炸。
+   * **引用不可变**：重建直接复用 store 返回的 `Message`/`summary` 引用塞进新 session 的 messages —— 依赖
+   * hooks/pipes **不原地 mutate** message 对象（与 SessionStore 的不可变契约一致，见 session-store.ts:SessionEntry）。
+   */
+  static async resume(
+    store: SessionStore,
+    sessionId: string,
+    opts: Omit<
+      AgentSessionOptions,
+      "store" | "sessionId" | "initialMessages" | "resumedMessageCount"
+    >,
+  ): Promise<AgentSession> {
+    const path = await store.getPathToLeaf(sessionId);
+    const msgs: Message[] = [];
+    for (const { entry } of path) {
+      if (entry.kind === "message") {
+        msgs.push(entry.message);
+      } else if (entry.kind === "compaction_boundary") {
+        msgs.length = 0; // 丢弃被 summary 替换的前缀
+        msgs.push(entry.summary);
+      }
+      // terminal: 忽略
+    }
+    return new AgentSession({
+      ...opts,
+      store,
+      sessionId,
+      initialMessages: msgs,
+      resumedMessageCount: msgs.length,
+    });
+  }
+
   /**
    * 跑 turn 直到某种结束（done / abort / error / max_turns）。
    * 不处理 onSessionEnd —— 调用方决定要不要续跑。
@@ -858,6 +969,9 @@ export class AgentSession {
       getKernelInternals(this._ctx).setTurnIdx(turnIdx);
       const outcome = await this._runOneTurn(turnIdx);
       turnIdx++;
+
+      // 每个 turn 结束把新 messages append 进 store（durable resume；no-op if no store）。
+      await this._flushToStore();
 
       if (outcome === "done") return { turnIdx, reason: "done" };
       if (outcome === "abort") return { turnIdx, reason: "aborted" };
