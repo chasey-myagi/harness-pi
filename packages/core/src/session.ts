@@ -13,7 +13,7 @@
  */
 
 import {
-  complete,
+  stream,
   type AssistantMessage,
   type Context,
   type Message,
@@ -54,6 +54,33 @@ export type SessionEvent =
   | { type: "continuation-check"; turns: number; continuations: number }
   | { type: "session-end"; summary: RunSummary }
   | { type: "error"; phase: "llm" | "tool" | "hook"; message: string; hookName?: string };
+
+/**
+ * Event Bus —— **live track**（设计依据 docs/09 §3.1）。
+ *
+ * 与 `SessionEvent`（coarse "recorded" 生命周期事件，经 `runStreaming()` 暴露）分两条轨：
+ * 这里是回合**进行中**的细粒度 token/thinking/toolcall delta，经 `session.on(type, cb)` 订阅。
+ * 它们**可丢**（UI 丢几帧无所谓），不进 transcript；listener 抛错被内核隔离，绝不影响 loop
+ * （借鉴 kimi LoopEventDispatcher 的 durable/live 双轨 + live listener 容错）。
+ */
+export type LiveEvent =
+  | { type: "message_start" }
+  | { type: "text_delta"; contentIndex: number; delta: string }
+  | { type: "thinking_delta"; contentIndex: number; delta: string }
+  | { type: "toolcall_delta"; contentIndex: number; delta: string }
+  // `message_start` 与 `message_end` **严格成对**：成功路径在 try 后 emit 一次（带 message），
+  // catch 路径 emit 一次（不带 message）且必 rethrow —— 两路恰好各一次，不重复、不悬空。
+  // （注意：不是 try/finally；若把成功路径那次挪进 finally 会与 catch 那次造成 double-emit。）
+  //
+  // **关于 `message`**：绝大多数情况下 `message` 都**存在**——provider 把运行时 LLM 错误 / abort
+  // 表达成一个 `error` 流事件，`stream().result()` 会 **resolve** 出一条 `stopReason` 为
+  // `"error"`/`"aborted"` 的 AssistantMessage（不 reject），走成功路径、`message_end` **带** message。
+  // 只有 `stream()` **同步抛**（如 provider 未注册）才走 catch、`message` 缺省。
+  // **下游判失败应看 `message.stopReason`，不要用「message 是否存在」来判。**
+  | { type: "message_end"; message?: AssistantMessage };
+
+type LiveEventType = LiveEvent["type"];
+type LiveHandler<T extends LiveEventType> = (e: Extract<LiveEvent, { type: T }>) => void;
 import { HookContextImpl, getKernelInternals } from "./context.js";
 import {
   HookDispatcher,
@@ -149,6 +176,11 @@ export class AgentSession {
     msg: string,
     ctx: { sessionId: string; turnIdx: number },
   ) => void;
+  /** Event Bus live listeners（按事件类型分组）。 */
+  private readonly _liveListeners = new Map<
+    LiveEventType,
+    Set<(e: LiveEvent) => void>
+  >();
 
   constructor(opts: AgentSessionOptions) {
     this.id = randomUUID();
@@ -238,6 +270,43 @@ export class AgentSession {
   abort(reason = "abort() called"): void {
     if (this._abortCtrl.signal.aborted) return;
     this._abortCtrl.abort(new Error(reason));
+  }
+
+  /**
+   * 订阅 Event Bus 的 **live** 事件（回合进行中的 token/thinking/toolcall delta）。
+   * 返回 unsubscribe 函数。可在 run 进行中或之前注册（与 `use()` 不同，不受 `_running` 限制——
+   * 它是只读观察，不改控制平面）。listener 抛错被隔离，不影响 loop。
+   */
+  on<T extends LiveEventType>(type: T, handler: LiveHandler<T>): () => void {
+    let set = this._liveListeners.get(type);
+    if (!set) {
+      set = new Set();
+      this._liveListeners.set(type, set);
+    }
+    const erased = handler as (e: LiveEvent) => void;
+    set.add(erased);
+    return () => {
+      this._liveListeners.get(type)?.delete(erased);
+    };
+  }
+
+  /** 发一条 live 事件给订阅者。listener 抛错被吞掉（live 容错），绝不冒泡进 loop。 */
+  private _emitLive(e: LiveEvent): void {
+    const set = this._liveListeners.get(e.type);
+    if (!set || set.size === 0) return;
+    // 快照：listener 在回调里 on()/unsubscribe 不影响本次遍历——新 listener 从下个事件起生效。
+    for (const h of [...set]) {
+      try {
+        h(e);
+      } catch (err) {
+        this._consoleSink(
+          `[event-bus] live listener for "${e.type}" threw: ${
+            err instanceof Error ? err.message : String(err)
+          }`,
+          { sessionId: this.id, turnIdx: this._ctx.turnIdx },
+        );
+      }
+    }
   }
 
   snapshot(): { sessionId: string; messages: Message[] } {
@@ -781,12 +850,28 @@ export class AgentSession {
 
     const t0 = Date.now();
     let assistant: AssistantMessage;
+    this._emitLive({ type: "message_start" });
     try {
-      assistant = await complete(this.model, context, {
+      // stream() 而非 complete()：complete() 内部就是 stream().result()，两者结果完全等价，
+      // 但 stream 让我们在回合进行中把 delta 作为 live 事件发出（Event Bus）。
+      const s = stream(this.model, context, {
         ...this._llmOptions,
         signal: this._abortCtrl.signal,
       });
+      for await (const ev of s) {
+        // pi-ai 的 delta 事件字段名（contentIndex/delta）与 LiveEvent 一致，直接转发。
+        if (
+          ev.type === "text_delta" ||
+          ev.type === "thinking_delta" ||
+          ev.type === "toolcall_delta"
+        ) {
+          this._emitLive({ type: ev.type, contentIndex: ev.contentIndex, delta: ev.delta });
+        }
+      }
+      assistant = await s.result();
     } catch (err) {
+      // message_start 必须配对：抛错 / abort 时也发 message_end（不带 message）。
+      this._emitLive({ type: "message_end" });
       await this._dispatcher.fireError(
         {
           phase: "llm",
@@ -797,6 +882,7 @@ export class AgentSession {
       throw err;
     }
     const llmDurationMs = Date.now() - t0;
+    this._emitLive({ type: "message_end", message: assistant });
 
     const lleOut = await this._dispatcher.fireEvent(
       "onLlmEnd",

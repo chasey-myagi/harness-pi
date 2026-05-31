@@ -58,6 +58,7 @@ export type {
   AgentSessionOptions,
   RunSummary,
   SessionEvent,
+  LiveEvent,
 } from "./session.js";
 
 // ─────────── HookContextImpl 实例类型（plugin / controller 偶尔需要） ───────────

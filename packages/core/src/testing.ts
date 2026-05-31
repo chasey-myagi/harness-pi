@@ -50,6 +50,20 @@ export interface FakeAssistantResponse {
   usage?: { input: number; output: number; cached?: number };
   delayMs?: number;
   throwError?: Error;
+  /**
+   * 可选：让 fake provider 在 `.end()` 之前**逐块 push** 流式 delta 事件，
+   * 用于测试 kernel 的 Event Bus（live token/thinking 流）。不设则只 end（沿用旧行为，
+   * 既有测试不受影响）。delta 内容仅供断言，与最终 message 的 text 不强制一致。
+   */
+  textDeltas?: string[];
+  thinkingDeltas?: string[];
+  toolcallDeltas?: string[];
+  /**
+   * 让 provider 的 `stream()` **同步抛**（而非返回流后 end-with-error）。模拟真实 provider
+   * 在建流阶段就失败（网络/鉴权异常）—— kernel 的 `stream()` 调用会 throw、走 catch 路径。
+   * 用于测试 message_start/message_end 在异常下仍严格配对。
+   */
+  streamThrows?: Error;
 }
 
 /**
@@ -98,11 +112,24 @@ export function createFakeModel(
       api,
       stream: ((_model: Model<Api>, context: Context) => {
         seenContexts.push(context);
+        const next = queue.shift();
+        // provider.stream 同步抛 → pi-ai 的 stream() 抛 → kernel 走 catch 路径。
+        if (next?.streamThrows) throw next.streamThrows;
         const stream = createAssistantMessageEventStream();
+        // 对齐真实 provider 的终止语义：push 一个 done/error 事件再 end()（无参），
+        // 而不是 end(message)。这样 `for await` 在 fake 与真实 provider 看到的事件序列同构，
+        // result() 仍从 done/error 事件 resolve（借鉴真实 provider，避免 fake 语义漂移）。
+        const finish = (m: AssistantMessage): void => {
+          if (m.stopReason === "error" || m.stopReason === "aborted") {
+            stream.push({ type: "error", reason: m.stopReason, error: m } as never);
+          } else {
+            stream.push({ type: "done", reason: m.stopReason, message: m } as never);
+          }
+          stream.end();
+        };
         void (async () => {
-          const next = queue.shift();
           if (!next) {
-            stream.end({
+            finish({
               role: "assistant",
               content: [
                 {
@@ -123,7 +150,7 @@ export function createFakeModel(
             await new Promise<void>((r) => setTimeout(r, next.delayMs));
           }
           if (next.throwError) {
-            stream.end({
+            finish({
               role: "assistant",
               content: [],
               api,
@@ -173,7 +200,31 @@ export function createFakeModel(
             stopReason: next.stopReason ?? (hasToolCall ? "toolUse" : "stop"),
             timestamp: Date.now(),
           };
-          stream.end(assistant);
+          // 可选：push 流式 delta 事件（供 Event Bus 测试）。在 end() 之前。
+          if (next.thinkingDeltas?.length) {
+            stream.push({ type: "thinking_start", contentIndex: 0, partial: assistant } as never);
+            for (const d of next.thinkingDeltas)
+              stream.push({ type: "thinking_delta", contentIndex: 0, delta: d, partial: assistant } as never);
+            stream.push({ type: "thinking_end", contentIndex: 0, content: next.thinkingDeltas.join(""), partial: assistant } as never);
+          }
+          if (next.textDeltas?.length) {
+            const ci = content.findIndex((b) => b.type === "text");
+            if (ci < 0) throw new Error("createFakeModel: textDeltas set but no text block in content");
+            stream.push({ type: "text_start", contentIndex: ci, partial: assistant } as never);
+            for (const d of next.textDeltas)
+              stream.push({ type: "text_delta", contentIndex: ci, delta: d, partial: assistant } as never);
+            stream.push({ type: "text_end", contentIndex: ci, content: next.textDeltas.join(""), partial: assistant } as never);
+          }
+          if (next.toolcallDeltas?.length) {
+            const ci = content.findIndex((b) => b.type === "toolCall");
+            if (ci < 0) throw new Error("createFakeModel: toolcallDeltas set but no toolCall block in content");
+            const tc = content[ci];
+            stream.push({ type: "toolcall_start", contentIndex: ci, partial: assistant } as never);
+            for (const d of next.toolcallDeltas)
+              stream.push({ type: "toolcall_delta", contentIndex: ci, delta: d, partial: assistant } as never);
+            stream.push({ type: "toolcall_end", contentIndex: ci, toolCall: tc, partial: assistant } as never);
+          }
+          finish(assistant);
         })();
         return stream;
       }) as never,
