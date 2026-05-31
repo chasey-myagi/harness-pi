@@ -26,3 +26,6 @@ export type {
   ForkOptions,
   ForkResult,
 } from "./fork-session.js";
+
+export { parallel } from "./orchestrate.js";
+export type { ItemOutcome, ParallelOptions } from "./orchestrate.js";
