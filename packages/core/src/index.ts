@@ -43,6 +43,15 @@ export type {
 export type { HarnessTool } from "./types.js";
 export { createUserMessage, createAttachmentMessage } from "./types.js";
 
+// ─────────── Session persistence (协议在内核，落盘实现在 adapter) ───────────
+export { MemorySessionStore } from "./session-store.js";
+export type {
+  SessionStore,
+  SessionEntry,
+  StoredEntry,
+  ForkLineage,
+} from "./session-store.js";
+
 // ─────────── Kernel ───────────
 export { AgentSession, findToolByName } from "./session.js";
 export type {
