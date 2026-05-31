@@ -341,6 +341,27 @@ namespace AgentSession {
   function resume(store: SessionStore, sessionId: string, deps: SessionDeps): Promise<AgentSession>;
 }
 
+// ── #6 Compaction overflow 观测点 ───────────────────────────
+// 实现说明：未把 overflow 做成上面 KernelEvent 草案里的 recorded "context_overflow"，而是落成一个
+// **hook 方法** `onContextOverflow`（与既有 onLlmEnd/onTurnEnd 同构，策略插件直接挂）。pi-ai 把「越界」
+// resolve 成两种终态（不是 sync throw —— 那只在 provider 未注册时发生）：stopReason==="length"（无歧义截断）
+// 与 stopReason==="error"+errorMessage 命中 overflow 文案。后者的判定经选项可整体替换，内核不选边。
+// §3.6(c) 的 onTurnBoundary：已有 onTurnEnd 在每个 turn 边界 fire，compaction worker 直接订阅它，
+// 不再新增冗余事件。
+interface ContextOverflowInput {
+  turnIdx: number;
+  stopReason: "length" | "error";   // 判别来源（即触发时 assistant 的 stopReason）
+  errorMessage?: string;            // stopReason==="error" 时的 provider 文案
+  messageCount: number;             // 触发时 session.messages 条数（assistant 已 push）
+}
+interface AgentSessionOptions {
+  // 把一次 error-stopReason 判成 overflow 的谓词；默认 defaultIsContextOverflow（OpenAI/Anthropic/DashScope 文案）
+  isContextOverflow?: (errorMessage: string) => boolean;
+}
+// #10 compactRestartFresh（插件，§4.2）：compactOnOverflow() hook 在 onContextOverflow 里
+// ctx.abort("compaction:…")，CompactRestartFresh 控制器据 isCompactionRestart(abortReason) 用 fresh
+// session 重跑同一 prompt（丢掉越界 trace）。与 LifecycleRestart 共享该谓词，但语义相反（丢历史 vs 带历史）。
+
 // ── #7 fail-closed 分类 ─────────────────────────────────────
 session.use(
   decisionHook("onPreToolUse", handler, { critical: true /* 未显式 failClosed 则注册期报错 */ })

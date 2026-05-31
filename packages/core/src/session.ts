@@ -90,11 +90,18 @@ import {
   type HookFailureSink,
   type HookDependencyWarning,
 } from "./dispatcher.js";
-import type { Hook, LogLevel, SessionConfigView, ToolExecResult } from "./hook.js";
+import type {
+  Hook,
+  LogLevel,
+  SessionConfigView,
+  ToolExecResult,
+  ContextOverflowInput,
+} from "./hook.js";
 import { ToolExecutor, findToolByName } from "./tool-executor.js";
 import { createAttachmentMessage } from "./types.js";
 import type { HarnessTool } from "./types.js";
 import type { SessionStore } from "./session-store.js";
+import { defaultIsContextOverflow } from "./context-overflow.js";
 import { randomUUID } from "node:crypto";
 
 export interface AgentSessionOptions {
@@ -128,6 +135,13 @@ export interface AgentSessionOptions {
   llmOptions?: Record<string, unknown>;
   /** Hook 失败上报通道（metrics plugin 通常 hook 进来）。 */
   hookFailureSink?: HookFailureSink;
+  /**
+   * 把一次「LLM 以 `stopReason==="error"` 结束」判定为 context-overflow 的谓词（docs/09 §3.6）。
+   * 返回 true → 内核 fire `onContextOverflow`（`stopReason:"error"`）。默认 `defaultIsContextOverflow`
+   * （匹配 OpenAI/Anthropic/DashScope 常见 prompt-too-long 文案）。`stopReason==="length"` 是无歧义
+   * 越界，不经此谓词。内核不内置 compaction 策略，连「什么算 overflow」都让你可换。
+   */
+  isContextOverflow?: (errorMessage: string) => boolean;
   /**
    * systemMessage emit 通道：所有 HookResult.systemMessage 走这里。
    * 默认 console.log；永不进 LLM context。
@@ -232,6 +246,8 @@ export class AgentSession {
   /** 可选会话存储 + 已 append 进 store 的 messages 数（避免重复落盘）。 */
   private readonly _store: SessionStore | undefined;
   private _persistedCount: number;
+  /** error-stopReason → 是否 context-overflow 的判定（可经选项覆盖，默认内置启发式）。 */
+  private readonly _isContextOverflow: (errorMessage: string) => boolean;
 
   constructor(opts: AgentSessionOptions) {
     this.id = opts.sessionId ?? randomUUID();
@@ -252,6 +268,7 @@ export class AgentSession {
     this._messages = opts.initialMessages ? [...opts.initialMessages] : [];
     this._hooks = [...(opts.hooks ?? [])];
     this._hookFailureSink = opts.hookFailureSink;
+    this._isContextOverflow = opts.isContextOverflow ?? defaultIsContextOverflow;
     this._dispatcher = new HookDispatcher(this._hooks, this._hookFailureSink);
     this._consoleSink =
       opts.consoleSink ??
@@ -1102,7 +1119,48 @@ export class AgentSession {
     this._flushSystemMessages(lleOut.systemMessages);
     this._messages.push(assistant);
 
+    // Context overflow 观测点（docs/09 §3.6）。pi-ai 把「越界」表达成两种 resolve 出的终态：
+    //   - stopReason==="length"：输出/窗口被模型截断（无歧义，必是 overflow）。
+    //   - stopReason==="error" + errorMessage 命中 overflow 文案（provider 把 context-overflow 当
+    //     API error 报回，pi-ai 转成 error 流事件 → result() resolve 出 stopReason==="error"）。
+    // 内核只「发事件」，不再当普通 done 静默吞掉；压缩/重启策略全在插件（ctx.abort("compaction:...")
+    // → compactRestartFresh 重启 fresh，或 transformMessagesBeforeLlm 改写消息）。注意 fire 不改控制流：
+    // 没策略 abort 时这条 length/error assistant 仍以 reason:"done" 收尾。connection/config 类 sync-throw
+    //（provider 未注册）走上面的 catch，不是 overflow，不在此分类。
+    const overflow = this._detectOverflow(assistant);
+    if (overflow) {
+      const coOut = await this._dispatcher.fireEvent(
+        "onContextOverflow",
+        overflow,
+        this._ctx,
+      );
+      this._flushSystemMessages(coOut.systemMessages);
+    }
+
     return assistant;
+  }
+
+  /**
+   * 把一条 resolve 出的 assistant 判定为 context-overflow（docs/09 §3.6），返回 fire 用的事件输入或
+   * null。"length" 无歧义；"error" 经 `_isContextOverflow`（默认启发式，可选项覆盖）匹配 errorMessage。
+   */
+  private _detectOverflow(
+    assistant: AssistantMessage,
+  ): ContextOverflowInput | null {
+    const base = {
+      turnIdx: this._ctx.turnIdx,
+      messageCount: this._messages.length,
+    };
+    if (assistant.stopReason === "length") {
+      return { ...base, stopReason: "length" };
+    }
+    if (assistant.stopReason === "error") {
+      const errorMessage = assistant.errorMessage ?? "";
+      if (this._isContextOverflow(errorMessage)) {
+        return { ...base, stopReason: "error", errorMessage };
+      }
+    }
+    return null;
   }
 
   /**

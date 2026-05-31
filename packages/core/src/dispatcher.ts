@@ -20,6 +20,7 @@
 
 import type { ToolCall } from "@mariozechner/pi-ai";
 import type {
+  ContextOverflowInput,
   ContinuationCheckInput,
   ErrorInput,
   Hook,
@@ -55,6 +56,7 @@ const EVENT_METHODS = new Set([
   "onTurnStart",
   "onTurnEnd",
   "onLlmEnd",
+  "onContextOverflow",
   "onPostToolUse",
   "onError",
 ] as const);
@@ -114,6 +116,7 @@ export interface EventInputMap {
   onTurnStart: TurnStartInput;
   onTurnEnd: TurnEndInput;
   onLlmEnd: LlmEndInput;
+  onContextOverflow: ContextOverflowInput;
   onPostToolUse: PostToolUseInput;
 }
 

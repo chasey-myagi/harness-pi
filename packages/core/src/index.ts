@@ -12,6 +12,7 @@ export type {
   TurnStartInput,
   TurnEndInput,
   LlmEndInput,
+  ContextOverflowInput,
   PreToolUseInput,
   PostToolUseInput,
   UserPromptSubmitInput,
@@ -38,6 +39,9 @@ export type {
   DecisionOutcome,
   HookDependencyWarning,
 } from "./dispatcher.js";
+
+// ─────────── Context-overflow 默认分类器（可经 AgentSessionOptions.isContextOverflow 覆盖） ───────────
+export { defaultIsContextOverflow } from "./context-overflow.js";
 
 // ─────────── Tool 形态 + message helpers ───────────
 export type { HarnessTool } from "./types.js";
