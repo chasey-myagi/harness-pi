@@ -288,12 +288,18 @@ roadmap 已列 `sideQuestion` controller + `subAgent` tool factory。给 Hybrid 
 
 ```ts
 // ── #2 TerminalResult（domain-free）──────────────────────────
-type StopReason = "end_turn" | "tool_use" | "max_tokens" | "length" | "stop";
-type TerminalResult =
-  | { kind: "done"; stopReason: StopReason; usage: Usage; lastMessage: AssistantMessage }
-  | { kind: "aborted"; reason: string }
-  | { kind: "error"; phase: "llm" | "tool" | "hook"; error: unknown }
-  | { kind: "max_turns" };
+// 实现说明：未新造 TerminalResult 类型，而是把既有 `RunSummary` 富化成「结构化终态」——
+// 判别字段是 `reason`（非 `kind`），并加上 `usage`（内核总是累加填充）/`lastMessage`/`stopReason`。
+// 这样不破坏 154 个既有测试（它们读 .reason/.turns），同时给编排层 budget + work-item 终态。
+interface RunSummary {
+  turns: number; continuations: number;
+  reason: "done" | "max_turns" | "aborted" | "error" | "max_continuations";
+  usage: Usage;                       // 跨本次 run 累加（含 cost），内核总是填充
+  lastMessage?: AssistantMessage;     // 最后一条 assistant（无 LLM 调用则缺省）
+  stopReason?: StopReason;            // lastMessage 的 stopReason
+  error?: Error; abortReason?: string;
+}
+// 业务层（bidding）从 reason + 自己的 tool 回调映射出 filled/uncertain/failed（不进内核）。
 
 // ── #1 Event Bus（recorded + live 双轨）──────────────────────
 type KernelEvent =
@@ -328,7 +334,7 @@ interface StoredEntry { id: string; parentId: string | null; seq: number; entry:
 type SessionEntry =
   | { kind: "message"; message: Message }
   | { kind: "compaction_boundary"; summary: Message }                 // resume 重放跳过其前缀（裁剪在 T4）
-  | { kind: "terminal"; result: TerminalResult };                     // 随 TerminalResult(T3) 落地
+  | { kind: "terminal"; result: RunSummary };                         // RunSummary 即终态（T3 已富化）；T4 resume 落它
 
 namespace AgentSession {
   // resume 重入是内核机制

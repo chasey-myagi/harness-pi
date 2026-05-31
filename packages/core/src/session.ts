@@ -21,6 +21,8 @@ import {
   type Api,
   type ToolCall,
   type ToolResultMessage,
+  type Usage,
+  type StopReason,
 } from "@mariozechner/pi-ai";
 
 /**
@@ -133,16 +135,48 @@ export interface AgentSessionOptions {
   ) => void;
 }
 
+/**
+ * 一次 run/continue 的**结构化终态**（设计依据 docs/09 §3.2 的 TerminalResult）。
+ *
+ * `reason` 是判别字段（done / max_turns / aborted / error / max_continuations）。
+ * domain-free：内核只给 done/aborted/error 这种通用终态，业务层（如 bidding 的
+ * filled/uncertain/failed）从 `reason` + 自己的 tool 回调映射，**不进内核**。
+ *
+ * `usage` 总是由内核填充。声明式编排层（controllers）靠 `usage` 做 budget、靠
+ * `reason`/`lastMessage` 判 work-item 终态。
+ */
 export interface RunSummary {
   turns: number;
   /** 同 session 内 onSessionEnd 触发续跑的次数。 */
   continuations: number;
+  /**
+   * 终态判别字段。注意 `"aborted"` 涵盖三类来源（caller abort / watchdog / onUserPromptSubmit
+   * policy-deny），需配合 `abortReason` 细分 —— 编排层判重试不应只看 reason（如 lifecycle-restart
+   * 默认只重试 `abortReason` 以 `watchdog:` 开头的，policy-deny 不会被误重试）。
+   */
   reason:
     | "done"
     | "max_turns"
     | "aborted"
     | "error"
     | "max_continuations";
+  /**
+   * **session 累计** token usage（含 cost）：累加该 session `messages` 里**至今所有** assistant
+   * 的 usage —— 含本次 run 之前的 run/continue（messages 是持久累积的）。内核总是填充（无 LLM 调用为零值）。
+   * 注意：lifecycle-restart 这类「换 session + 搬历史」的 controller 会让 usage 在重启间**重叠累加**，
+   * 那是 controller 层语义（见 controllers/lifecycle-restart.ts 注释），内核契约本身自洽。
+   */
+  usage: Usage;
+  /**
+   * 该 session `messages` 里最后一条 assistant 消息（无任何 assistant 则缺省）。
+   * **注意 `error` 终态**：LLM 同步抛时失败的 assistant **不入 messages**，`lastMessage` 指向
+   * 上一个成功 turn（甚至上一次 run），失败详情在 `error`。而 provider 把错误表达成流事件时，
+   * `result()` resolve 出 `stopReason="error"` 的 assistant，它**会**入 messages、成为 `lastMessage`。
+   * 判失败请看 `reason`/`error`/`lastMessage.stopReason`，别假设 `lastMessage` 就是本次的产物。
+   */
+  lastMessage?: AssistantMessage;
+  /** `lastMessage` 的 stopReason（便于消费者不必自己翻 lastMessage）。 */
+  stopReason?: StopReason;
   error?: Error;
   abortReason?: string;
 }
@@ -655,7 +689,13 @@ export class AgentSession {
             turns: 0,
             continuations: 0,
             reason: "aborted",
+            usage: this._accumulatedUsage(),
           };
+          const last = this._lastAssistant();
+          if (last) {
+            summary.lastMessage = last;
+            summary.stopReason = last.stopReason;
+          }
           const reasonText =
             upsOut.stopReason ??
             upsOut.reason ??
@@ -731,12 +771,68 @@ export class AgentSession {
     this._flushSystemMessages(seOut.systemMessages);
   }
 
+  /**
+   * 累加该 session `messages` 里所有 assistant 的 usage（含 cost）。无 LLM 调用则全零。
+   *
+   * ⚠️ **维护契约**：这是**逐字段手写**累加。pi-ai 的 `Usage` 若新增字段（如 reasoningTokens），
+   * TS 不会在这里报错，会**静默漏算** —— 加字段时务必同步这里。
+   * `?? 0` / `if (mu.cost)`：pi-ai 的 Usage 字段类型上均必填，这些是**防御 OpenAI-compatible
+   * provider（如 DashScope）/ 代理返回畸形 / 缺字段 usage** 的兜底，不是类型层需要。
+   */
+  private _accumulatedUsage(): Usage {
+    const u: Usage = {
+      input: 0,
+      output: 0,
+      cacheRead: 0,
+      cacheWrite: 0,
+      totalTokens: 0,
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+    };
+    for (const m of this._messages) {
+      if (m.role !== "assistant") continue;
+      const mu = (m as AssistantMessage).usage;
+      if (!mu) continue;
+      u.input += mu.input ?? 0;
+      u.output += mu.output ?? 0;
+      u.cacheRead += mu.cacheRead ?? 0;
+      u.cacheWrite += mu.cacheWrite ?? 0;
+      u.totalTokens += mu.totalTokens ?? 0;
+      if (mu.cost) {
+        u.cost.input += mu.cost.input ?? 0;
+        u.cost.output += mu.cost.output ?? 0;
+        u.cost.cacheRead += mu.cost.cacheRead ?? 0;
+        u.cost.cacheWrite += mu.cost.cacheWrite ?? 0;
+        u.cost.total += mu.cost.total ?? 0;
+      }
+    }
+    return u;
+  }
+
+  /** 最后一条 assistant 消息（用于 RunSummary.lastMessage）。 */
+  private _lastAssistant(): AssistantMessage | undefined {
+    for (let i = this._messages.length - 1; i >= 0; i--) {
+      const m = this._messages[i];
+      if (m && m.role === "assistant") return m as AssistantMessage;
+    }
+    return undefined;
+  }
+
   private _buildSummary(
     turns: number,
     continuations: number,
     reason: RunSummary["reason"],
   ): RunSummary {
-    const summary: RunSummary = { turns, continuations, reason };
+    const last = this._lastAssistant();
+    const summary: RunSummary = {
+      turns,
+      continuations,
+      reason,
+      usage: this._accumulatedUsage(),
+    };
+    if (last) {
+      summary.lastMessage = last;
+      summary.stopReason = last.stopReason;
+    }
     if (this._lastTurnError) summary.error = this._lastTurnError;
     if (this._abortCtrl.signal.aborted) {
       const r = this._abortCtrl.signal.reason;
