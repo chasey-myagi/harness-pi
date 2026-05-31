@@ -232,6 +232,8 @@ export class AgentSession {
   /** 单 AbortController 唯一的 abort 真相源。Reason 通过 signal.reason 传播。 */
   private _abortCtrl: AbortController;
   private _pendingAttachments: Message[] = [];
+  /** Steering inbox（park 队列）。steer() enqueue，loop 在 turn 开始的安全点 drain。 */
+  private _steerInbox: Message[] = [];
   private _lastTurnError: Error | null = null;
   private _running = false;
   private _consoleSink: (
@@ -398,6 +400,28 @@ export class AgentSession {
       forkContextMessages: [...this._messages],
       model: this.model,
     };
+  }
+
+  /**
+   * Steering（park/drain，docs/09 §3.5）：把一条消息 **park** 进 steering inbox。loop 会在下一个
+   * turn 开始的安全点 drain 它、注入对话——**不 suspend、不打断进行中的 turn**（对齐 iii.dev / codex
+   * 的「park 不 suspend」）。run 进行中或之外调用都安全（单线程下 push 是原子的）。
+   *
+   * 只接受 `role:"user"` 消息（用 `createUserMessage` 构造）——assistant/toolResult 会破坏对话不变量，
+   * 直接抛错（fail-loud）。pi-ai 无独立 system role，"系统提示"类 steering 用 user 消息表达或走
+   * consoleSink，不在此注入。
+   *
+   * drain 时机是 loop 控制流的一部分（只有 loop 能保证 turn 原子性 / cache 前缀不破），故此机制进内核；
+   * 「何时该 park、谁能回复」是 policy，留给插件 / app。
+   */
+  steer(message: Message): void {
+    if (message.role !== "user") {
+      throw new Error(
+        `AgentSession.steer: only user-role messages can be steered, got "${message.role}" ` +
+          `(assistant/toolResult would break conversation invariants)`,
+      );
+    }
+    this._steerInbox.push(message);
   }
 
   /** 追加 user prompt 跑到结束。 */
@@ -673,6 +697,9 @@ export class AgentSession {
     getKernelInternals(this._ctx).setSignal(this._abortCtrl.signal);
     this._pendingAttachments = [];
     this._lastTurnError = null;
+    // 注意：_steerInbox **故意不在此清空**——park 的 steer 是「等下次跑起来时插队」的用户意图，
+    // 应跨 run/continue 边界存活、在首个 turn 的安全点 drain；这与 transient 的 _pendingAttachments
+    // （上次 run 的残渣、每次清零）语义相反。别"顺手"加 `this._steerInbox = []` 求对称。
 
     // 把 caller signal forward 进 internal controller
     const cleanupCallerForward = forwardSignal(args.signal, this._abortCtrl);
@@ -998,12 +1025,41 @@ export class AgentSession {
   }
 
   /**
+   * Drain steering inbox（docs/09 §3.5）：原子取走队列、按入队顺序 push 进 _messages，并对每条
+   * fire 一次 onSteer。在 turn 开始的安全点调用，保证插队消息进入下一次 buildMessages、且不破坏
+   * 进行中 turn 的原子性。
+   *
+   * 原子性：`drained = inbox; inbox = []` 是同步 swap，读取与清空之间无 await，所以 fire onSteer 期间
+   * steer() 的新 push 落进新数组、下个 turn 再 drain，既不丢也不重。
+   */
+  private async _drainSteerInbox(turnIdx: number): Promise<void> {
+    if (this._steerInbox.length === 0) return;
+    const drained = this._steerInbox;
+    this._steerInbox = [];
+    for (const message of drained) {
+      this._messages.push(message);
+      const out = await this._dispatcher.fireEvent(
+        "onSteer",
+        { message, turnIdx },
+        this._ctx,
+      );
+      this._flushSystemMessages(out.systemMessages);
+      for (const c of out.additionalContexts) {
+        this._pushAttachment(c, "onSteer");
+      }
+    }
+  }
+
+  /**
    * 单 turn 的完整逻辑。3 个 phase 串起来，外层包 wrapTurn around chain。
    * 每个 phase 做一件事，方便 reviewer 改某一阶段不动其他 phase 的缩进。
    *
-   *   onTurnStart event → wrapTurn[ _phaseLlmCall → _phaseToolBatch → _phaseTurnEnd ]
+   *   drainSteer → onTurnStart event → wrapTurn[ _phaseLlmCall → _phaseToolBatch → _phaseTurnEnd ]
    */
   private async _runOneTurn(turnIdx: number): Promise<TurnOutcome> {
+    // 安全点：turn 开始前 drain steering inbox，把 park 的消息注入下一次 buildMessages。
+    await this._drainSteerInbox(turnIdx);
+
     const tsOut = await this._dispatcher.fireEvent(
       "onTurnStart",
       { turnIdx },

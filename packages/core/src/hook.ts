@@ -93,6 +93,20 @@ export interface TurnEndInput {
   toolResults: ToolExecResult[];
 }
 
+/**
+ * Steering 注入信号（设计依据 docs/09 §3.5）。`session.steer(msg)` 把消息 park 进 inbox，loop 在
+ * **turn 开始的安全点** drain，对每条被注入的消息 fire 一次。这是「park 不 suspend」：消息不打断
+ * 进行中的 turn，而是排到下一个安全点注入下一次 buildMessages，保证 turn 原子性 / cache 前缀不被破坏。
+ *
+ * 这是**观测点**：内核只提供「park + 安全点恢复」的机制；「何时该 park、谁能回复」是 policy（插件/app）。
+ */
+export interface SteerInput {
+  /** 被注入进对话的消息（fire 时已 push 进 session.messages）。 */
+  message: Message;
+  /** drain 发生时的 turn 序号。 */
+  turnIdx: number;
+}
+
 export interface LlmEndInput {
   msg: AssistantMessage;
   durationMs: number;
@@ -378,6 +392,11 @@ export interface Hook {
   ): HookResult | void | Promise<HookResult | void>;
   onTurnEnd?(
     input: TurnEndInput,
+    ctx: HookContext,
+  ): HookResult | void | Promise<HookResult | void>;
+  /** Steering 观测点：loop 在 turn 开始的安全点 drain inbox、对每条被注入的消息 fire 一次（docs/09 §3.5）。 */
+  onSteer?(
+    input: SteerInput,
     ctx: HookContext,
   ): HookResult | void | Promise<HookResult | void>;
   onLlmEnd?(

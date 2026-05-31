@@ -32,6 +32,7 @@ import type {
   PreToolUseInput,
   SessionEndInput,
   SessionStartInput,
+  SteerInput,
   ToolExecResult,
   TurnEndInput,
   TurnStartInput,
@@ -55,6 +56,7 @@ const EVENT_METHODS = new Set([
   "onContinuationCheck",
   "onTurnStart",
   "onTurnEnd",
+  "onSteer",
   "onLlmEnd",
   "onContextOverflow",
   "onPostToolUse",
@@ -115,6 +117,7 @@ export interface EventInputMap {
   onContinuationCheck: ContinuationCheckInput;
   onTurnStart: TurnStartInput;
   onTurnEnd: TurnEndInput;
+  onSteer: SteerInput;
   onLlmEnd: LlmEndInput;
   onContextOverflow: ContextOverflowInput;
   onPostToolUse: PostToolUseInput;

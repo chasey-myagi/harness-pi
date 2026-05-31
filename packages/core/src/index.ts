@@ -11,6 +11,7 @@ export type {
   ContinuationCheckInput,
   TurnStartInput,
   TurnEndInput,
+  SteerInput,
   LlmEndInput,
   ContextOverflowInput,
   PreToolUseInput,

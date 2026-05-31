@@ -341,6 +341,17 @@ namespace AgentSession {
   function resume(store: SessionStore, sessionId: string, deps: SessionDeps): Promise<AgentSession>;
 }
 
+// ── #5 Steering（park/drain，内核机制）─────────────────────
+// 实现说明：草案的 KernelEvent "steer" 与 `steer(message: UserMessage | SystemMessage)` 落地为：
+// 一个公共方法 `AgentSession.steer(message: Message)` + 一个 hook 事件 `onSteer`。pi-ai 无独立
+// system role（Message = user|assistant|toolResult），故只接受 role:"user"（assistant/toolResult
+// 抛错 fail-loud）。loop 在**每个 turn 开始的安全点**（_runOneTurn 顶部、onTurnStart 之前）drain
+// inbox：原子 swap 取走队列、按序 push 进 messages、对每条 fire onSteer。这是「park 不 suspend」——
+// 不打断进行中的 turn，排到下个安全点注入，保 turn 原子性 / cache 前缀不破。tool-batch 之间的
+// （可选）drain 暂未做（YAGNI），turn-start drain 已覆盖 clarify 回复插队的主场景。
+interface SteerInput { message: Message; turnIdx: number; }
+// AgentSession.steer(message: Message): void   // 线程安全 enqueue（单线程 push 原子），非阻塞
+
 // ── #6 Compaction overflow 观测点 ───────────────────────────
 // 实现说明：未把 overflow 做成上面 KernelEvent 草案里的 recorded "context_overflow"，而是落成一个
 // **hook 方法** `onContextOverflow`（与既有 onLlmEnd/onTurnEnd 同构，策略插件直接挂）。pi-ai 把「越界」
