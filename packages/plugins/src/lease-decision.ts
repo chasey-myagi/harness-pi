@@ -10,8 +10,11 @@ import type { ToolCall } from "@mariozechner/pi-ai";
 export interface LeaseDecisionOptions {
   /** 返回当前 lease 持有的 id；null/undefined = 没 lease，跳过检查。 */
   currentLease: (ctx: HookContext) => string | null | undefined;
-  /** Tool args 里哪个字段是 lease id（默认 "questionId"）。 */
-  argField?: string;
+  /**
+   * Tool args 里哪个字段是 lease id。**必须显式传入**（docs/09 清理项，见 §4 区域 line 239 的 ⚠️：
+   * 原来默认 "questionId" 把 bidding 的领域概念焊进了通用插件）。bidding 传 "questionId"，别的域传自己的。
+   */
+  argField: string;
   /** 只检查这些工具；undefined = 所有携带 argField 的工具。 */
   guardedTools?: string[];
   /** 冲突回调。 */
@@ -26,7 +29,7 @@ export interface LeaseDecisionOptions {
 }
 
 export function leaseDecision(opts: LeaseDecisionOptions): Hook {
-  const argField = opts.argField ?? "questionId";
+  const argField = opts.argField;
   const reasonPrefix = opts.reasonPrefix ?? "Lease mismatch:";
   const guardedSet = opts.guardedTools ? new Set(opts.guardedTools) : null;
 

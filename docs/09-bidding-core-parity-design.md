@@ -390,6 +390,14 @@ const gate: Hook = {
 //   match: string（精确）| RegExp（name 模式）| (call, ctx) => boolean（domain 谓词，由调用方提供）。
 //   首条命中胜出；无命中走 fallback（默认 deny）；ask 经 onAsk 解析（无解析器 → deny）。
 //   默认 critical:true + failClosed:true，故天然通过 #7 校验。规则引擎 domain-free，业务判定全在谓词里。
+
+// ── #11 per-work-item metrics 归账（插件，§4.4）──────────────
+// 实现说明：#3 per-call meta 已由既有 onPostToolUse（携带 call.name/id、result.isError/details、durationMs）
+// 满足，无需内核改。#11 在既有 metrics 插件上补 work-item 维度：
+//   metrics({ sink, workItemId })  // workItemId 戳进每条 MetricEvent（domain 中性，不是 questionId）
+//   new WorkItemAggregator({ forward? })  // MetricsSink，按 workItemId rollup（token/tool/error/duration）
+//     .rollup(id) / .all()           // 只对 llm.called/tool.called/error.observed 建 rollup；其余只透传
+// 清理：lease-decision 的 argField 由「默认 questionId」改为**必填**（清除焊进通用插件的 domain 默认）。
 ```
 
 ## 附录 B · 一句话

@@ -373,7 +373,7 @@ describe("lease-decision edge", () => {
     const session = new AgentSession({
       model,
       tools: [tool],
-      hooks: [leaseDecision({ currentLease: () => null })],
+      hooks: [leaseDecision({ currentLease: () => null, argField: "questionId" })],
     });
     await session.run("go");
     expect(called).toBe(true);
@@ -405,7 +405,7 @@ describe("lease-decision edge", () => {
     const session = new AgentSession({
       model,
       tools: [tool],
-      hooks: [leaseDecision({ currentLease: () => "Q1" })],
+      hooks: [leaseDecision({ currentLease: () => "Q1", argField: "questionId" })],
     });
     await session.run("go");
     expect(called).toBe(true);
@@ -440,6 +440,7 @@ describe("lease-decision edge", () => {
       hooks: [
         leaseDecision({
           currentLease: () => "Q1",
+          argField: "questionId",
           guardedTools: ["other-tool"], // free 不在白名单
         }),
       ],

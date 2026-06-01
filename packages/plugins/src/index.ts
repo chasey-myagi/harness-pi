@@ -55,6 +55,7 @@ export {
   emitMetric,
   MemorySink,
   NdjsonFileSink,
+  WorkItemAggregator,
   BatchingSink,
 } from "./metrics/index.js";
 export type {
@@ -66,6 +67,8 @@ export type {
   SinkStats,
   UserMetricKinds,
   CoreMetricKind,
+  WorkItemRollup,
+  WorkItemAggregatorOptions,
 } from "./metrics/all.js";
 
 export { costTracker, getCostStats } from "./cost-tracker.js";
