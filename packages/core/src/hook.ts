@@ -377,6 +377,16 @@ export interface Hook {
    */
   failClosed?: boolean;
 
+  /**
+   * 标记「安全关键」decision hook（权限 / lease / 鉴权），docs/09 §3.7。
+   *
+   * `critical:true` 的 decision hook **必须显式声明 `failClosed`**（true 或 false 都行，但不能不写）——
+   * 否则在 **session 构造期直接抛错**（fail-loud）。目的：让最该表态的那类 hook 无法靠"忘了设 →
+   * 静默 fail-open"放过本该拒绝的调用。`critical` 只对 decision hook（onPreToolUse / onUserPromptSubmit）
+   * 有意义；标在非 decision hook 上同样构造期报错（属作者的类别误用）。
+   */
+  critical?: boolean;
+
   // ─────────── Event (parallel) ───────────
   onSessionStart?(
     input: SessionStartInput,

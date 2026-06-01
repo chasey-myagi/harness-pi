@@ -374,9 +374,22 @@ interface AgentSessionOptions {
 // session 重跑同一 prompt（丢掉越界 trace）。与 LifecycleRestart 共享该谓词，但语义相反（丢历史 vs 带历史）。
 
 // ── #7 fail-closed 分类 ─────────────────────────────────────
-session.use(
-  decisionHook("onPreToolUse", handler, { critical: true /* 未显式 failClosed 则注册期报错 */ })
-);
+// 实现说明：草案的 `decisionHook(..., { critical })` wrapper 落地成 Hook 上的两个字段 + 一个注册期硬校验，
+// 不另造 wrapper（保持 hook = 普通对象的一致形态）：
+interface Hook { critical?: boolean; failClosed?: boolean; /* ... */ }
+// assertCriticalDecisionHooks(hooks)：在 AgentSession 构造期 + use() 调用。critical:true 的 hook
+//   1. 必须实现 decision 方法（onPreToolUse/onUserPromptSubmit，复用 DECISION_METHODS 判定）；
+//   2. 必须显式声明 failClosed（true/false 皆可，但不能 undefined）——否则 throw（fail-loud）。
+// 即「默认仍 fail-open，但安全类无法静默 fail-open」。decision 超时已可经既有 hook.timeout 放宽。
+const gate: Hook = {
+  name: "permissionGate", critical: true, failClosed: true,   // 显式表态 → 通过校验
+  onPreToolUse(input, ctx) { /* allow / deny */ },
+};
+// ── #9 permissionGate（插件，§4.3）──────────────────────────
+// permissionGate({ rules: [{ match, decision: "allow"|"ask"|"deny", reason? }], fallback?, onAsk?, ... })
+//   match: string（精确）| RegExp（name 模式）| (call, ctx) => boolean（domain 谓词，由调用方提供）。
+//   首条命中胜出；无命中走 fallback（默认 deny）；ask 经 onAsk 解析（无解析器 → deny）。
+//   默认 critical:true + failClosed:true，故天然通过 #7 校验。规则引擎 domain-free，业务判定全在谓词里。
 ```
 
 ## 附录 B · 一句话

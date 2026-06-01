@@ -41,6 +41,14 @@ export type { BatchCounterOptions } from "./batch-counter.js";
 export { leaseDecision } from "./lease-decision.js";
 export type { LeaseDecisionOptions } from "./lease-decision.js";
 
+export { permissionGate } from "./permission-gate.js";
+export type {
+  PermissionGateOptions,
+  PermissionRule,
+  PermissionDecision,
+  PermissionMatch,
+} from "./permission-gate.js";
+
 export {
   metrics,
   getMetricsSink,

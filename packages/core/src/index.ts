@@ -33,6 +33,7 @@ export {
   defaultTimeoutFor,
   mergeResults,
   verifyHookDependencies,
+  assertCriticalDecisionHooks,
 } from "./dispatcher.js";
 export type {
   HookFailureSink,

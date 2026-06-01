@@ -87,6 +87,7 @@ import { HookContextImpl, getKernelInternals } from "./context.js";
 import {
   HookDispatcher,
   verifyHookDependencies,
+  assertCriticalDecisionHooks,
   type HookFailureSink,
   type HookDependencyWarning,
 } from "./dispatcher.js";
@@ -269,6 +270,9 @@ export class AgentSession {
 
     this._messages = opts.initialMessages ? [...opts.initialMessages] : [];
     this._hooks = [...(opts.hooks ?? [])];
+    // fail-closed 分类硬校验（§3.7）：critical decision hook 必须显式声明 failClosed，否则拒绝构造。
+    // 放在 dispatcher 之前——配错就 fail-loud，不让一个静默 fail-open 的安全 hook 跑起来。
+    assertCriticalDecisionHooks(this._hooks);
     this._hookFailureSink = opts.hookFailureSink;
     this._isContextOverflow = opts.isContextOverflow ?? defaultIsContextOverflow;
     this._dispatcher = new HookDispatcher(this._hooks, this._hookFailureSink);
@@ -317,6 +321,8 @@ export class AgentSession {
         "AgentSession.use(): cannot register hook while run() is in progress",
       );
     }
+    // 与构造期同样的 fail-closed 硬校验：use() 也是注册期，critical decision hook 配错即拒绝。
+    assertCriticalDecisionHooks([hook]);
     this._hooks.push(hook);
     this._dispatcher = new HookDispatcher(this._hooks, this._hookFailureSink);
     // 重新校验软依赖（新 hook 可能补齐 missing-required，也可能引入 conflict）

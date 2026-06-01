@@ -549,3 +549,38 @@ export function verifyHookDependencies(
 
   return warnings;
 }
+
+/**
+ * Fail-closed 分类的注册期强制（docs/09 §3.7）。与 `verifyHookDependencies`（返回 warning、不阻塞）
+ * 不同，这是**硬校验、违例直接 throw**——安全关键 hook 配错不能只是个警告。
+ *
+ * 规则：`critical:true` 的 hook
+ *   1. 必须实现 decision 方法（onPreToolUse / onUserPromptSubmit）；否则 critical 是类别误用。
+ *   2. 必须显式声明 `failClosed`（true / false 皆可，但不能 undefined）；否则最该表态的 hook 会靠
+ *      "忘了设 → 默认 fail-open"静默放过本该拒绝的调用。
+ *
+ * 在 AgentSession 构造期调用，配错就拒绝构造（fail-loud，对齐 §3.7「让安全类无法静默 fail-open」）。
+ */
+export function assertCriticalDecisionHooks(hooks: ReadonlyArray<Hook>): void {
+  for (const h of hooks) {
+    if (!h.critical) continue;
+    // 「是不是 decision hook」复用权威集合 DECISION_METHODS，而非内联写死方法名——
+    // 将来加第三个 decision 方法时，这里不会静默漏判 critical 校验。
+    const isDecisionHook = [...DECISION_METHODS].some(
+      (m) => typeof (h as unknown as Record<string, unknown>)[m] === "function",
+    );
+    if (!isDecisionHook) {
+      throw new Error(
+        `Hook "${h.name}" sets critical:true but implements no decision method ` +
+          `(onPreToolUse / onUserPromptSubmit). critical only applies to decision hooks.`,
+      );
+    }
+    if (h.failClosed === undefined) {
+      throw new Error(
+        `Critical decision hook "${h.name}" must declare failClosed explicitly ` +
+          `(true = deny on failure/timeout, false = allow on failure). ` +
+          `Refusing to default silently — a security-critical hook must take a stance (docs/09 §3.7).`,
+      );
+    }
+  }
+}
