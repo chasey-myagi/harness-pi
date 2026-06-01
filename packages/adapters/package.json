@@ -1,0 +1,35 @@
+{
+  "name": "@harness-pi/adapters",
+  "version": "0.0.0",
+  "description": "SessionStore adapters for harness-pi (JSONL file + Postgres). Concrete I/O behind the kernel SessionStore protocol.",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "src",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsc -p .",
+    "typecheck": "tsc -p . --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "dependencies": {
+    "@harness-pi/core": "workspace:*",
+    "@mariozechner/pi-ai": "^0.53.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "pg-mem": "^3.0.14",
+    "typescript": "^5.6.0",
+    "vitest": "^2.1.0"
+  }
+}
