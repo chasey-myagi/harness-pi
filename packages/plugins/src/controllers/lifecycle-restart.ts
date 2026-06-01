@@ -75,6 +75,11 @@ export class LifecycleRestart {
       summary = await session.continue(runOpts);
     }
 
+    // ⚠️ usage 语义：每次重试都 `sessionFactory(carriedMessages)` 造新 session 并搬入历史，
+    // 新 session 的 RunSummary.usage 是「该 session 至今全部 assistant」的累加 —— 含搬进来的
+    // 历史。因此重启间 usage **重叠累加**，这里返回的 `usage` 是「末次 session 视角的累计」而非
+    // 「各 attempt 真消耗之和」。要精确对账 budget，调用方应改累加每个 attempt 的 usage delta，
+    // 或把本字段当成上界。（内核 _accumulatedUsage 契约自洽，重叠源于这里换 session + 搬历史。）
     return { ...summary, retries: attempt };
   }
 }

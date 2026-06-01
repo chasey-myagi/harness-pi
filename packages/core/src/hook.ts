@@ -93,9 +93,49 @@ export interface TurnEndInput {
   toolResults: ToolExecResult[];
 }
 
+/**
+ * Steering 注入信号（设计依据 docs/09 §3.5）。`session.steer(msg)` 把消息 park 进 inbox，loop 在
+ * **turn 开始的安全点** drain，对每条被注入的消息 fire 一次。这是「park 不 suspend」：消息不打断
+ * 进行中的 turn，而是排到下一个安全点注入下一次 buildMessages，保证 turn 原子性 / cache 前缀不被破坏。
+ *
+ * 这是**观测点**：内核只提供「park + 安全点恢复」的机制；「何时该 park、谁能回复」是 policy（插件/app）。
+ */
+export interface SteerInput {
+  /** 被注入进对话的消息（fire 时已 push 进 session.messages）。 */
+  message: Message;
+  /** drain 发生时的 turn 序号。 */
+  turnIdx: number;
+}
+
 export interface LlmEndInput {
   msg: AssistantMessage;
   durationMs: number;
+}
+
+/**
+ * Context overflow 信号（设计依据 docs/09 §3.6）。pi-ai 把「越界」表达成两种 **resolve 出**
+ * 的终态（不是 sync throw —— sync throw 只发生在 provider 未注册这类配置错，不是 overflow）：
+ *   - `stopReason==="length"`：输出/上下文窗口被模型截断（无歧义，必是 overflow）。
+ *   - `stopReason==="error"`：provider 把 context-overflow 当 API error 报回，pi-ai 转成 error
+ *     流事件 → `result()` resolve 出 `stopReason==="error"` 的 assistant，且 `errorMessage` 命中
+ *     overflow 文案（默认启发式见 `defaultIsContextOverflow`，可经 `isContextOverflow` 选项覆盖）。
+ *
+ * 这是**观测点**：内核只负责把"越界"发出来，不再当普通 done 静默吞掉；**压缩/重启策略**由插件实现
+ * （transformMessagesBeforeLlm 改写消息，或 `ctx.abort("compaction:...")` 让 compactRestartFresh 重启
+ * fresh —— 前缀必须是 `compaction:`，isCompactionRestart 据此识别）。
+ *
+ * ⚠️ **锋利边**：fire 本身**不改变控制流**。若没有策略 abort 或改写消息，一次 `stopReason==="length"`
+ * 截断仍会照常走完 turn loop、以 `reason:"done"` 收尾（被截断的 assistant 进 messages）；
+ * `stopReason==="error"` 同理以 `reason:"done"` 收尾。光监听不够——要恢复必须挂会 abort/改写的策略。
+ */
+export interface ContextOverflowInput {
+  turnIdx: number;
+  /** 越界判别来源（即触发时 assistant 的 stopReason）：`"length"`=截断，`"error"`=被分类器判定的 overflow API 错误。 */
+  stopReason: "length" | "error";
+  /** `stopReason==="error"` 时携带 provider 错误文案，供策略记录 / 二次判定。 */
+  errorMessage?: string;
+  /** 当前 session.messages 条数（给策略一个粗粒度规模信号）。 */
+  messageCount: number;
 }
 
 export interface PreToolUseInput {
@@ -337,6 +377,16 @@ export interface Hook {
    */
   failClosed?: boolean;
 
+  /**
+   * 标记「安全关键」decision hook（权限 / lease / 鉴权），docs/09 §3.7。
+   *
+   * `critical:true` 的 decision hook **必须显式声明 `failClosed`**（true 或 false 都行，但不能不写）——
+   * 否则在 **session 构造期直接抛错**（fail-loud）。目的：让最该表态的那类 hook 无法靠"忘了设 →
+   * 静默 fail-open"放过本该拒绝的调用。`critical` 只对 decision hook（onPreToolUse / onUserPromptSubmit）
+   * 有意义；标在非 decision hook 上同样构造期报错（属作者的类别误用）。
+   */
+  critical?: boolean;
+
   // ─────────── Event (parallel) ───────────
   onSessionStart?(
     input: SessionStartInput,
@@ -354,8 +404,18 @@ export interface Hook {
     input: TurnEndInput,
     ctx: HookContext,
   ): HookResult | void | Promise<HookResult | void>;
+  /** Steering 观测点：loop 在 turn 开始的安全点 drain inbox、对每条被注入的消息 fire 一次（docs/09 §3.5）。 */
+  onSteer?(
+    input: SteerInput,
+    ctx: HookContext,
+  ): HookResult | void | Promise<HookResult | void>;
   onLlmEnd?(
     input: LlmEndInput,
+    ctx: HookContext,
+  ): HookResult | void | Promise<HookResult | void>;
+  /** Context overflow 观测点（stopReason==="length" 截断，或被分类的 overflow API error）。compaction 策略插件挂这里。 */
+  onContextOverflow?(
+    input: ContextOverflowInput,
     ctx: HookContext,
   ): HookResult | void | Promise<HookResult | void>;
   onPostToolUse?(

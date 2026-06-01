@@ -535,7 +535,7 @@ describe("lease-decision", () => {
       model,
       tools: [tool],
       hooks: [
-        leaseDecision({ currentLease: () => "Q1", onConflict }),
+        leaseDecision({ currentLease: () => "Q1", argField: "questionId", onConflict }),
       ],
     });
     await session.run("go");
@@ -570,7 +570,7 @@ describe("lease-decision", () => {
     const session = new AgentSession({
       model,
       tools: [tool],
-      hooks: [leaseDecision({ currentLease: () => "Q1" })],
+      hooks: [leaseDecision({ currentLease: () => "Q1", argField: "questionId" })],
     });
     await session.run("go");
     const tr = session.messages.find((m) => m.role === "toolResult");

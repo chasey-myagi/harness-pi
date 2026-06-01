@@ -41,12 +41,24 @@ export type { BatchCounterOptions } from "./batch-counter.js";
 export { leaseDecision } from "./lease-decision.js";
 export type { LeaseDecisionOptions } from "./lease-decision.js";
 
+export { compactSummarize } from "./compact-summarize.js";
+export type { CompactSummarizeOptions } from "./compact-summarize.js";
+
+export { permissionGate } from "./permission-gate.js";
+export type {
+  PermissionGateOptions,
+  PermissionRule,
+  PermissionDecision,
+  PermissionMatch,
+} from "./permission-gate.js";
+
 export {
   metrics,
   getMetricsSink,
   emitMetric,
   MemorySink,
   NdjsonFileSink,
+  WorkItemAggregator,
   BatchingSink,
 } from "./metrics/index.js";
 export type {
@@ -58,6 +70,8 @@ export type {
   SinkStats,
   UserMetricKinds,
   CoreMetricKind,
+  WorkItemRollup,
+  WorkItemAggregatorOptions,
 } from "./metrics/all.js";
 
 export { costTracker, getCostStats } from "./cost-tracker.js";

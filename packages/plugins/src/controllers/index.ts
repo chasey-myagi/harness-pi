@@ -26,3 +26,29 @@ export type {
   ForkOptions,
   ForkResult,
 } from "./fork-session.js";
+
+export { parallel } from "./orchestrate.js";
+export type { ItemOutcome, ParallelOptions } from "./orchestrate.js";
+
+export {
+  compactOnOverflow,
+  CompactRestartFresh,
+  isCompactionRestart,
+  COMPACTION_OVERFLOW_REASON,
+} from "./compact-restart-fresh.js";
+export type {
+  CompactOnOverflowOptions,
+  CompactRestartFreshOptions,
+  CompactRestartResult,
+} from "./compact-restart-fresh.js";
+
+export { subAgentTool } from "./sub-agent-tool.js";
+export type { SubAgentToolOptions } from "./sub-agent-tool.js";
+
+export { GapExplorer } from "./gap-explorer.js";
+export type {
+  Gap,
+  ExplorerFinding,
+  GapExplorerOptions,
+  GapExplorerResult,
+} from "./gap-explorer.js";

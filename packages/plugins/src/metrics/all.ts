@@ -12,3 +12,7 @@ export type {
 } from "./types.js";
 export type { BatchingSinkOptions } from "./batching-sink.js";
 export type { MetricsOptions } from "./index.js";
+export type {
+  WorkItemRollup,
+  WorkItemAggregatorOptions,
+} from "./sinks/work-item-aggregator.js";

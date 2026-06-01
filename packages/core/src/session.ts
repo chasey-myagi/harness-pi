@@ -13,7 +13,7 @@
  */
 
 import {
-  complete,
+  stream,
   type AssistantMessage,
   type Context,
   type Message,
@@ -21,6 +21,8 @@ import {
   type Api,
   type ToolCall,
   type ToolResultMessage,
+  type Usage,
+  type StopReason,
 } from "@mariozechner/pi-ai";
 
 /**
@@ -54,17 +56,53 @@ export type SessionEvent =
   | { type: "continuation-check"; turns: number; continuations: number }
   | { type: "session-end"; summary: RunSummary }
   | { type: "error"; phase: "llm" | "tool" | "hook"; message: string; hookName?: string };
+
+/**
+ * Event Bus —— **live track**（设计依据 docs/09 §3.1）。
+ *
+ * 与 `SessionEvent`（coarse "recorded" 生命周期事件，经 `runStreaming()` 暴露）分两条轨：
+ * 这里是回合**进行中**的细粒度 token/thinking/toolcall delta，经 `session.on(type, cb)` 订阅。
+ * 它们**可丢**（UI 丢几帧无所谓），不进 transcript；listener 抛错被内核隔离，绝不影响 loop
+ * （借鉴 kimi LoopEventDispatcher 的 durable/live 双轨 + live listener 容错）。
+ */
+export type LiveEvent =
+  | { type: "message_start" }
+  | { type: "text_delta"; contentIndex: number; delta: string }
+  | { type: "thinking_delta"; contentIndex: number; delta: string }
+  | { type: "toolcall_delta"; contentIndex: number; delta: string }
+  // `message_start` 与 `message_end` **严格成对**：成功路径在 try 后 emit 一次（带 message），
+  // catch 路径 emit 一次（不带 message）且必 rethrow —— 两路恰好各一次，不重复、不悬空。
+  // （注意：不是 try/finally；若把成功路径那次挪进 finally 会与 catch 那次造成 double-emit。）
+  //
+  // **关于 `message`**：绝大多数情况下 `message` 都**存在**——provider 把运行时 LLM 错误 / abort
+  // 表达成一个 `error` 流事件，`stream().result()` 会 **resolve** 出一条 `stopReason` 为
+  // `"error"`/`"aborted"` 的 AssistantMessage（不 reject），走成功路径、`message_end` **带** message。
+  // 只有 `stream()` **同步抛**（如 provider 未注册）才走 catch、`message` 缺省。
+  // **下游判失败应看 `message.stopReason`，不要用「message 是否存在」来判。**
+  | { type: "message_end"; message?: AssistantMessage };
+
+type LiveEventType = LiveEvent["type"];
+type LiveHandler<T extends LiveEventType> = (e: Extract<LiveEvent, { type: T }>) => void;
 import { HookContextImpl, getKernelInternals } from "./context.js";
 import {
   HookDispatcher,
   verifyHookDependencies,
+  assertCriticalDecisionHooks,
   type HookFailureSink,
   type HookDependencyWarning,
 } from "./dispatcher.js";
-import type { Hook, LogLevel, SessionConfigView, ToolExecResult } from "./hook.js";
+import type {
+  Hook,
+  LogLevel,
+  SessionConfigView,
+  ToolExecResult,
+  ContextOverflowInput,
+} from "./hook.js";
 import { ToolExecutor, findToolByName } from "./tool-executor.js";
 import { createAttachmentMessage } from "./types.js";
 import type { HarnessTool } from "./types.js";
+import type { SessionStore } from "./session-store.js";
+import { defaultIsContextOverflow } from "./context-overflow.js";
 import { randomUUID } from "node:crypto";
 
 export interface AgentSessionOptions {
@@ -79,12 +117,32 @@ export interface AgentSessionOptions {
   /** 续跑时可注入历史 messages（lifecycle-restart controller 用）。 */
   initialMessages?: Message[];
   /**
+   * 可选会话存储。给定后，内核在每个 turn 结束 + run 结束把新 messages（及一条 terminal entry）
+   * append 进 store；配合 `AgentSession.resume(store, sessionId)` 可从落盘历史重建并续跑。
+   * 协议在内核，落盘实现（JSONL / Postgres）在 adapter。
+   */
+  store?: SessionStore;
+  /** 覆盖自动生成的 session id。`AgentSession.resume` 用它把新 session 绑回同一 lineage。 */
+  sessionId?: string;
+  /**
+   * 内核内部用：resume 时声明前 N 条 initialMessages 已在 store 里、不要重复 append。
+   * 普通调用者不要设。
+   */
+  resumedMessageCount?: number;
+  /**
    * 透传给 pi-ai complete() 的 provider options。
    * `signal` 是 kernel 保留字段：即使传入也会被当前 session 的 AbortSignal 覆盖。
    */
   llmOptions?: Record<string, unknown>;
   /** Hook 失败上报通道（metrics plugin 通常 hook 进来）。 */
   hookFailureSink?: HookFailureSink;
+  /**
+   * 把一次「LLM 以 `stopReason==="error"` 结束」判定为 context-overflow 的谓词（docs/09 §3.6）。
+   * 返回 true → 内核 fire `onContextOverflow`（`stopReason:"error"`）。默认 `defaultIsContextOverflow`
+   * （匹配 OpenAI/Anthropic/DashScope 常见 prompt-too-long 文案）。`stopReason==="length"` 是无歧义
+   * 越界，不经此谓词。内核不内置 compaction 策略，连「什么算 overflow」都让你可换。
+   */
+  isContextOverflow?: (errorMessage: string) => boolean;
   /**
    * systemMessage emit 通道：所有 HookResult.systemMessage 走这里。
    * 默认 console.log；永不进 LLM context。
@@ -106,16 +164,48 @@ export interface AgentSessionOptions {
   ) => void;
 }
 
+/**
+ * 一次 run/continue 的**结构化终态**（设计依据 docs/09 §3.2 的 TerminalResult）。
+ *
+ * `reason` 是判别字段（done / max_turns / aborted / error / max_continuations）。
+ * domain-free：内核只给 done/aborted/error 这种通用终态，业务层（如 bidding 的
+ * filled/uncertain/failed）从 `reason` + 自己的 tool 回调映射，**不进内核**。
+ *
+ * `usage` 总是由内核填充。声明式编排层（controllers）靠 `usage` 做 budget、靠
+ * `reason`/`lastMessage` 判 work-item 终态。
+ */
 export interface RunSummary {
   turns: number;
   /** 同 session 内 onSessionEnd 触发续跑的次数。 */
   continuations: number;
+  /**
+   * 终态判别字段。注意 `"aborted"` 涵盖三类来源（caller abort / watchdog / onUserPromptSubmit
+   * policy-deny），需配合 `abortReason` 细分 —— 编排层判重试不应只看 reason（如 lifecycle-restart
+   * 默认只重试 `abortReason` 以 `watchdog:` 开头的，policy-deny 不会被误重试）。
+   */
   reason:
     | "done"
     | "max_turns"
     | "aborted"
     | "error"
     | "max_continuations";
+  /**
+   * **session 累计** token usage（含 cost）：累加该 session `messages` 里**至今所有** assistant
+   * 的 usage —— 含本次 run 之前的 run/continue（messages 是持久累积的）。内核总是填充（无 LLM 调用为零值）。
+   * 注意：lifecycle-restart 这类「换 session + 搬历史」的 controller 会让 usage 在重启间**重叠累加**，
+   * 那是 controller 层语义（见 controllers/lifecycle-restart.ts 注释），内核契约本身自洽。
+   */
+  usage: Usage;
+  /**
+   * 该 session `messages` 里最后一条 assistant 消息（无任何 assistant 则缺省）。
+   * **注意 `error` 终态**：LLM 同步抛时失败的 assistant **不入 messages**，`lastMessage` 指向
+   * 上一个成功 turn（甚至上一次 run），失败详情在 `error`。而 provider 把错误表达成流事件时，
+   * `result()` resolve 出 `stopReason="error"` 的 assistant，它**会**入 messages、成为 `lastMessage`。
+   * 判失败请看 `reason`/`error`/`lastMessage.stopReason`，别假设 `lastMessage` 就是本次的产物。
+   */
+  lastMessage?: AssistantMessage;
+  /** `lastMessage` 的 stopReason（便于消费者不必自己翻 lastMessage）。 */
+  stopReason?: StopReason;
   error?: Error;
   abortReason?: string;
 }
@@ -143,15 +233,34 @@ export class AgentSession {
   /** 单 AbortController 唯一的 abort 真相源。Reason 通过 signal.reason 传播。 */
   private _abortCtrl: AbortController;
   private _pendingAttachments: Message[] = [];
+  /** Steering inbox（park 队列）。steer() enqueue，loop 在 turn 开始的安全点 drain。 */
+  private _steerInbox: Message[] = [];
   private _lastTurnError: Error | null = null;
   private _running = false;
   private _consoleSink: (
     msg: string,
     ctx: { sessionId: string; turnIdx: number },
   ) => void;
+  /** Event Bus live listeners（按事件类型分组）。 */
+  private readonly _liveListeners = new Map<
+    LiveEventType,
+    Set<(e: LiveEvent) => void>
+  >();
+  /** 可选会话存储 + 已 append 进 store 的 messages 数（避免重复落盘）。 */
+  private readonly _store: SessionStore | undefined;
+  private _persistedCount: number;
+  /** error-stopReason → 是否 context-overflow 的判定（可经选项覆盖，默认内置启发式）。 */
+  private readonly _isContextOverflow: (errorMessage: string) => boolean;
 
   constructor(opts: AgentSessionOptions) {
-    this.id = randomUUID();
+    this.id = opts.sessionId ?? randomUUID();
+    this._store = opts.store;
+    // resume 时前 N 条 initialMessages 已在 store，不重复 append；普通构造从 0 起。
+    // 夹到 initialMessages 长度，防止误传过大值导致首批新消息漏落盘。
+    this._persistedCount = Math.min(
+      opts.resumedMessageCount ?? 0,
+      opts.initialMessages?.length ?? 0,
+    );
     this.model = opts.model;
     this.tools = opts.tools;
     this.systemPrompt = opts.systemPrompt ?? "";
@@ -161,7 +270,11 @@ export class AgentSession {
 
     this._messages = opts.initialMessages ? [...opts.initialMessages] : [];
     this._hooks = [...(opts.hooks ?? [])];
+    // fail-closed 分类硬校验（§3.7）：critical decision hook 必须显式声明 failClosed，否则拒绝构造。
+    // 放在 dispatcher 之前——配错就 fail-loud，不让一个静默 fail-open 的安全 hook 跑起来。
+    assertCriticalDecisionHooks(this._hooks);
     this._hookFailureSink = opts.hookFailureSink;
+    this._isContextOverflow = opts.isContextOverflow ?? defaultIsContextOverflow;
     this._dispatcher = new HookDispatcher(this._hooks, this._hookFailureSink);
     this._consoleSink =
       opts.consoleSink ??
@@ -208,6 +321,8 @@ export class AgentSession {
         "AgentSession.use(): cannot register hook while run() is in progress",
       );
     }
+    // 与构造期同样的 fail-closed 硬校验：use() 也是注册期，critical decision hook 配错即拒绝。
+    assertCriticalDecisionHooks([hook]);
     this._hooks.push(hook);
     this._dispatcher = new HookDispatcher(this._hooks, this._hookFailureSink);
     // 重新校验软依赖（新 hook 可能补齐 missing-required，也可能引入 conflict）
@@ -240,6 +355,43 @@ export class AgentSession {
     this._abortCtrl.abort(new Error(reason));
   }
 
+  /**
+   * 订阅 Event Bus 的 **live** 事件（回合进行中的 token/thinking/toolcall delta）。
+   * 返回 unsubscribe 函数。可在 run 进行中或之前注册（与 `use()` 不同，不受 `_running` 限制——
+   * 它是只读观察，不改控制平面）。listener 抛错被隔离，不影响 loop。
+   */
+  on<T extends LiveEventType>(type: T, handler: LiveHandler<T>): () => void {
+    let set = this._liveListeners.get(type);
+    if (!set) {
+      set = new Set();
+      this._liveListeners.set(type, set);
+    }
+    const erased = handler as (e: LiveEvent) => void;
+    set.add(erased);
+    return () => {
+      this._liveListeners.get(type)?.delete(erased);
+    };
+  }
+
+  /** 发一条 live 事件给订阅者。listener 抛错被吞掉（live 容错），绝不冒泡进 loop。 */
+  private _emitLive(e: LiveEvent): void {
+    const set = this._liveListeners.get(e.type);
+    if (!set || set.size === 0) return;
+    // 快照：listener 在回调里 on()/unsubscribe 不影响本次遍历——新 listener 从下个事件起生效。
+    for (const h of [...set]) {
+      try {
+        h(e);
+      } catch (err) {
+        this._consoleSink(
+          `[event-bus] live listener for "${e.type}" threw: ${
+            err instanceof Error ? err.message : String(err)
+          }`,
+          { sessionId: this.id, turnIdx: this._ctx.turnIdx },
+        );
+      }
+    }
+  }
+
   snapshot(): { sessionId: string; messages: Message[] } {
     return { sessionId: this.id, messages: [...this._messages] };
   }
@@ -254,6 +406,28 @@ export class AgentSession {
       forkContextMessages: [...this._messages],
       model: this.model,
     };
+  }
+
+  /**
+   * Steering（park/drain，docs/09 §3.5）：把一条消息 **park** 进 steering inbox。loop 会在下一个
+   * turn 开始的安全点 drain 它、注入对话——**不 suspend、不打断进行中的 turn**（对齐 iii.dev / codex
+   * 的「park 不 suspend」）。run 进行中或之外调用都安全（单线程下 push 是原子的）。
+   *
+   * 只接受 `role:"user"` 消息（用 `createUserMessage` 构造）——assistant/toolResult 会破坏对话不变量，
+   * 直接抛错（fail-loud）。pi-ai 无独立 system role，"系统提示"类 steering 用 user 消息表达或走
+   * consoleSink，不在此注入。
+   *
+   * drain 时机是 loop 控制流的一部分（只有 loop 能保证 turn 原子性 / cache 前缀不破），故此机制进内核；
+   * 「何时该 park、谁能回复」是 policy，留给插件 / app。
+   */
+  steer(message: Message): void {
+    if (message.role !== "user") {
+      throw new Error(
+        `AgentSession.steer: only user-role messages can be steered, got "${message.role}" ` +
+          `(assistant/toolResult would break conversation invariants)`,
+      );
+    }
+    this._steerInbox.push(message);
   }
 
   /** 追加 user prompt 跑到结束。 */
@@ -529,6 +703,9 @@ export class AgentSession {
     getKernelInternals(this._ctx).setSignal(this._abortCtrl.signal);
     this._pendingAttachments = [];
     this._lastTurnError = null;
+    // 注意：_steerInbox **故意不在此清空**——park 的 steer 是「等下次跑起来时插队」的用户意图，
+    // 应跨 run/continue 边界存活、在首个 turn 的安全点 drain；这与 transient 的 _pendingAttachments
+    // （上次 run 的残渣、每次清零）语义相反。别"顺手"加 `this._steerInbox = []` 求对称。
 
     // 把 caller signal forward 进 internal controller
     const cleanupCallerForward = forwardSignal(args.signal, this._abortCtrl);
@@ -586,13 +763,20 @@ export class AgentSession {
             turns: 0,
             continuations: 0,
             reason: "aborted",
+            usage: this._accumulatedUsage(),
           };
+          const last = this._lastAssistant();
+          if (last) {
+            summary.lastMessage = last;
+            summary.stopReason = last.stopReason;
+          }
           const reasonText =
             upsOut.stopReason ??
             upsOut.reason ??
             "onUserPromptSubmit halted";
           summary.abortReason = reasonText;
           await this._fireSessionEnd(0, 0, summary.reason);
+          await this._persistTerminal(summary);
           return summary;
         }
         if (upsOut?.systemMessage) {
@@ -643,7 +827,9 @@ export class AgentSession {
 
       // 退出 loop：恰好 fire 一次 onSessionEnd（无论 done / aborted / error / max_turns / max_continuations）
       await this._fireSessionEnd(turnIdx, continuations, reason);
-      return this._buildSummary(turnIdx, continuations, reason);
+      const summary = this._buildSummary(turnIdx, continuations, reason);
+      await this._persistTerminal(summary);
+      return summary;
     } finally {
       cleanupCallerForward();
     }
@@ -662,18 +848,158 @@ export class AgentSession {
     this._flushSystemMessages(seOut.systemMessages);
   }
 
+  /**
+   * 累加该 session `messages` 里所有 assistant 的 usage（含 cost）。无 LLM 调用则全零。
+   *
+   * ⚠️ **维护契约**：这是**逐字段手写**累加。pi-ai 的 `Usage` 若新增字段（如 reasoningTokens），
+   * TS 不会在这里报错，会**静默漏算** —— 加字段时务必同步这里。
+   * `?? 0` / `if (mu.cost)`：pi-ai 的 Usage 字段类型上均必填，这些是**防御 OpenAI-compatible
+   * provider（如 DashScope）/ 代理返回畸形 / 缺字段 usage** 的兜底，不是类型层需要。
+   */
+  private _accumulatedUsage(): Usage {
+    const u: Usage = {
+      input: 0,
+      output: 0,
+      cacheRead: 0,
+      cacheWrite: 0,
+      totalTokens: 0,
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+    };
+    for (const m of this._messages) {
+      if (m.role !== "assistant") continue;
+      const mu = (m as AssistantMessage).usage;
+      if (!mu) continue;
+      u.input += mu.input ?? 0;
+      u.output += mu.output ?? 0;
+      u.cacheRead += mu.cacheRead ?? 0;
+      u.cacheWrite += mu.cacheWrite ?? 0;
+      u.totalTokens += mu.totalTokens ?? 0;
+      if (mu.cost) {
+        u.cost.input += mu.cost.input ?? 0;
+        u.cost.output += mu.cost.output ?? 0;
+        u.cost.cacheRead += mu.cost.cacheRead ?? 0;
+        u.cost.cacheWrite += mu.cost.cacheWrite ?? 0;
+        u.cost.total += mu.cost.total ?? 0;
+      }
+    }
+    return u;
+  }
+
+  /** 最后一条 assistant 消息（用于 RunSummary.lastMessage）。 */
+  private _lastAssistant(): AssistantMessage | undefined {
+    for (let i = this._messages.length - 1; i >= 0; i--) {
+      const m = this._messages[i];
+      if (m && m.role === "assistant") return m as AssistantMessage;
+    }
+    return undefined;
+  }
+
   private _buildSummary(
     turns: number,
     continuations: number,
     reason: RunSummary["reason"],
   ): RunSummary {
-    const summary: RunSummary = { turns, continuations, reason };
+    const last = this._lastAssistant();
+    const summary: RunSummary = {
+      turns,
+      continuations,
+      reason,
+      usage: this._accumulatedUsage(),
+    };
+    if (last) {
+      summary.lastMessage = last;
+      summary.stopReason = last.stopReason;
+    }
     if (this._lastTurnError) summary.error = this._lastTurnError;
     if (this._abortCtrl.signal.aborted) {
       const r = this._abortCtrl.signal.reason;
       summary.abortReason = r instanceof Error ? r.message : String(r ?? "aborted");
     }
     return summary;
+  }
+
+  /** best-effort 持久化：store I/O 失败**不**劫持控制流/终态，记日志即可（下次 flush 从未成功处重试）。 */
+  private _reportStoreError(op: string, err: unknown): void {
+    this._consoleSink(
+      `[session-store] ${op} failed (best-effort persistence, will retry next flush): ${
+        err instanceof Error ? err.message : String(err)
+      }`,
+      { sessionId: this.id, turnIdx: this._ctx.turnIdx },
+    );
+  }
+
+  /**
+   * 把自上次以来的新 messages append 进 store（顺序、append-only）。无 store 即 no-op。
+   *
+   * `_persistedCount` 是 **high-water-mark，逐条推进**：append 成功一条才前进一条 —— 中途
+   * `appendEntry` 抛错时计数器停在已成功处，下次 flush 从失败那条重试，**绝不重复 append**
+   * （store 是 append-only、不去重，重复 append 会让 resume 读出重复消息）。
+   * best-effort：append 失败被 catch，不抛给控制流（持久化失败不该杀掉 run）。
+   * 依赖 `_messages` **append-only、索引稳定**（内核只 push，从不 splice/reorder）—— HWM 才成立。
+   */
+  private async _flushToStore(): Promise<void> {
+    if (!this._store) return;
+    try {
+      for (; this._persistedCount < this._messages.length; this._persistedCount++) {
+        await this._store.appendEntry(this.id, {
+          kind: "message",
+          message: this._messages[this._persistedCount]!,
+        });
+      }
+    } catch (err) {
+      this._reportStoreError("appendEntry(message)", err);
+    }
+  }
+
+  /** run 结束：flush 剩余 messages + append 一条 terminal entry（终态元数据）。best-effort，无 store 即 no-op。 */
+  private async _persistTerminal(summary: RunSummary): Promise<void> {
+    if (!this._store) return;
+    await this._flushToStore(); // best-effort（不会抛）
+    try {
+      await this._store.appendEntry(this.id, { kind: "terminal", result: summary });
+    } catch (err) {
+      this._reportStoreError("appendEntry(terminal)", err);
+    }
+  }
+
+  /**
+   * 从 store 的落盘历史重建一个绑回同一 lineage 的 AgentSession，可直接 `continue()` 续跑。
+   *
+   * 重放规则：按 root→leaf 顺序重建 messages；遇到 `compaction_boundary` **丢弃已累积前缀、
+   * 用 summary 接续**（这正是 SessionStore 故意不裁剪、把裁剪留给 resume 的那部分，见 session-store.ts）；
+   * `terminal` entry 忽略（仅元数据）。重建出的 messages 标记为「已持久化」，续跑只 append 新消息。
+   *
+   * **信任边界**：这是不可信落盘数据进入内核的唯一入口。本方法**信任 store 返回的 `Message` 形状合法**
+   * （schema 校验是 adapter 的职责）；形状坏的 message 会在下一次 `_phaseLlmCall` 喂给 pi-ai 时才炸。
+   * **引用不可变**：重建直接复用 store 返回的 `Message`/`summary` 引用塞进新 session 的 messages —— 依赖
+   * hooks/pipes **不原地 mutate** message 对象（与 SessionStore 的不可变契约一致，见 session-store.ts:SessionEntry）。
+   */
+  static async resume(
+    store: SessionStore,
+    sessionId: string,
+    opts: Omit<
+      AgentSessionOptions,
+      "store" | "sessionId" | "initialMessages" | "resumedMessageCount"
+    >,
+  ): Promise<AgentSession> {
+    const path = await store.getPathToLeaf(sessionId);
+    const msgs: Message[] = [];
+    for (const { entry } of path) {
+      if (entry.kind === "message") {
+        msgs.push(entry.message);
+      } else if (entry.kind === "compaction_boundary") {
+        msgs.length = 0; // 丢弃被 summary 替换的前缀
+        msgs.push(entry.summary);
+      }
+      // terminal: 忽略
+    }
+    return new AgentSession({
+      ...opts,
+      store,
+      sessionId,
+      initialMessages: msgs,
+      resumedMessageCount: msgs.length,
+    });
   }
 
   /**
@@ -694,6 +1020,9 @@ export class AgentSession {
       const outcome = await this._runOneTurn(turnIdx);
       turnIdx++;
 
+      // 每个 turn 结束把新 messages append 进 store（durable resume；no-op if no store）。
+      await this._flushToStore();
+
       if (outcome === "done") return { turnIdx, reason: "done" };
       if (outcome === "abort") return { turnIdx, reason: "aborted" };
       if (outcome === "error") return { turnIdx, reason: "error" };
@@ -702,12 +1031,41 @@ export class AgentSession {
   }
 
   /**
+   * Drain steering inbox（docs/09 §3.5）：原子取走队列、按入队顺序 push 进 _messages，并对每条
+   * fire 一次 onSteer。在 turn 开始的安全点调用，保证插队消息进入下一次 buildMessages、且不破坏
+   * 进行中 turn 的原子性。
+   *
+   * 原子性：`drained = inbox; inbox = []` 是同步 swap，读取与清空之间无 await，所以 fire onSteer 期间
+   * steer() 的新 push 落进新数组、下个 turn 再 drain，既不丢也不重。
+   */
+  private async _drainSteerInbox(turnIdx: number): Promise<void> {
+    if (this._steerInbox.length === 0) return;
+    const drained = this._steerInbox;
+    this._steerInbox = [];
+    for (const message of drained) {
+      this._messages.push(message);
+      const out = await this._dispatcher.fireEvent(
+        "onSteer",
+        { message, turnIdx },
+        this._ctx,
+      );
+      this._flushSystemMessages(out.systemMessages);
+      for (const c of out.additionalContexts) {
+        this._pushAttachment(c, "onSteer");
+      }
+    }
+  }
+
+  /**
    * 单 turn 的完整逻辑。3 个 phase 串起来，外层包 wrapTurn around chain。
    * 每个 phase 做一件事，方便 reviewer 改某一阶段不动其他 phase 的缩进。
    *
-   *   onTurnStart event → wrapTurn[ _phaseLlmCall → _phaseToolBatch → _phaseTurnEnd ]
+   *   drainSteer → onTurnStart event → wrapTurn[ _phaseLlmCall → _phaseToolBatch → _phaseTurnEnd ]
    */
   private async _runOneTurn(turnIdx: number): Promise<TurnOutcome> {
+    // 安全点：turn 开始前 drain steering inbox，把 park 的消息注入下一次 buildMessages。
+    await this._drainSteerInbox(turnIdx);
+
     const tsOut = await this._dispatcher.fireEvent(
       "onTurnStart",
       { turnIdx },
@@ -781,12 +1139,28 @@ export class AgentSession {
 
     const t0 = Date.now();
     let assistant: AssistantMessage;
+    this._emitLive({ type: "message_start" });
     try {
-      assistant = await complete(this.model, context, {
+      // stream() 而非 complete()：complete() 内部就是 stream().result()，两者结果完全等价，
+      // 但 stream 让我们在回合进行中把 delta 作为 live 事件发出（Event Bus）。
+      const s = stream(this.model, context, {
         ...this._llmOptions,
         signal: this._abortCtrl.signal,
       });
+      for await (const ev of s) {
+        // pi-ai 的 delta 事件字段名（contentIndex/delta）与 LiveEvent 一致，直接转发。
+        if (
+          ev.type === "text_delta" ||
+          ev.type === "thinking_delta" ||
+          ev.type === "toolcall_delta"
+        ) {
+          this._emitLive({ type: ev.type, contentIndex: ev.contentIndex, delta: ev.delta });
+        }
+      }
+      assistant = await s.result();
     } catch (err) {
+      // message_start 必须配对：抛错 / abort 时也发 message_end（不带 message）。
+      this._emitLive({ type: "message_end" });
       await this._dispatcher.fireError(
         {
           phase: "llm",
@@ -797,6 +1171,7 @@ export class AgentSession {
       throw err;
     }
     const llmDurationMs = Date.now() - t0;
+    this._emitLive({ type: "message_end", message: assistant });
 
     const lleOut = await this._dispatcher.fireEvent(
       "onLlmEnd",
@@ -806,7 +1181,48 @@ export class AgentSession {
     this._flushSystemMessages(lleOut.systemMessages);
     this._messages.push(assistant);
 
+    // Context overflow 观测点（docs/09 §3.6）。pi-ai 把「越界」表达成两种 resolve 出的终态：
+    //   - stopReason==="length"：输出/窗口被模型截断（无歧义，必是 overflow）。
+    //   - stopReason==="error" + errorMessage 命中 overflow 文案（provider 把 context-overflow 当
+    //     API error 报回，pi-ai 转成 error 流事件 → result() resolve 出 stopReason==="error"）。
+    // 内核只「发事件」，不再当普通 done 静默吞掉；压缩/重启策略全在插件（ctx.abort("compaction:...")
+    // → compactRestartFresh 重启 fresh，或 transformMessagesBeforeLlm 改写消息）。注意 fire 不改控制流：
+    // 没策略 abort 时这条 length/error assistant 仍以 reason:"done" 收尾。connection/config 类 sync-throw
+    //（provider 未注册）走上面的 catch，不是 overflow，不在此分类。
+    const overflow = this._detectOverflow(assistant);
+    if (overflow) {
+      const coOut = await this._dispatcher.fireEvent(
+        "onContextOverflow",
+        overflow,
+        this._ctx,
+      );
+      this._flushSystemMessages(coOut.systemMessages);
+    }
+
     return assistant;
+  }
+
+  /**
+   * 把一条 resolve 出的 assistant 判定为 context-overflow（docs/09 §3.6），返回 fire 用的事件输入或
+   * null。"length" 无歧义；"error" 经 `_isContextOverflow`（默认启发式，可选项覆盖）匹配 errorMessage。
+   */
+  private _detectOverflow(
+    assistant: AssistantMessage,
+  ): ContextOverflowInput | null {
+    const base = {
+      turnIdx: this._ctx.turnIdx,
+      messageCount: this._messages.length,
+    };
+    if (assistant.stopReason === "length") {
+      return { ...base, stopReason: "length" };
+    }
+    if (assistant.stopReason === "error") {
+      const errorMessage = assistant.errorMessage ?? "";
+      if (this._isContextOverflow(errorMessage)) {
+        return { ...base, stopReason: "error", errorMessage };
+      }
+    }
+    return null;
   }
 
   /**

@@ -11,7 +11,9 @@ export type {
   ContinuationCheckInput,
   TurnStartInput,
   TurnEndInput,
+  SteerInput,
   LlmEndInput,
+  ContextOverflowInput,
   PreToolUseInput,
   PostToolUseInput,
   UserPromptSubmitInput,
@@ -31,6 +33,7 @@ export {
   defaultTimeoutFor,
   mergeResults,
   verifyHookDependencies,
+  assertCriticalDecisionHooks,
 } from "./dispatcher.js";
 export type {
   HookFailureSink,
@@ -39,9 +42,21 @@ export type {
   HookDependencyWarning,
 } from "./dispatcher.js";
 
+// ─────────── Context-overflow 默认分类器（可经 AgentSessionOptions.isContextOverflow 覆盖） ───────────
+export { defaultIsContextOverflow } from "./context-overflow.js";
+
 // ─────────── Tool 形态 + message helpers ───────────
 export type { HarnessTool } from "./types.js";
 export { createUserMessage, createAttachmentMessage } from "./types.js";
+
+// ─────────── Session persistence (协议在内核，落盘实现在 adapter) ───────────
+export { MemorySessionStore } from "./session-store.js";
+export type {
+  SessionStore,
+  SessionEntry,
+  StoredEntry,
+  ForkLineage,
+} from "./session-store.js";
 
 // ─────────── Kernel ───────────
 export { AgentSession, findToolByName } from "./session.js";
@@ -49,6 +64,7 @@ export type {
   AgentSessionOptions,
   RunSummary,
   SessionEvent,
+  LiveEvent,
 } from "./session.js";
 
 // ─────────── HookContextImpl 实例类型（plugin / controller 偶尔需要） ───────────

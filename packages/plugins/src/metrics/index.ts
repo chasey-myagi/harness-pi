@@ -11,6 +11,12 @@ export interface MetricsOptions {
   sink: MetricsSink;
   /** 只 emit 这些 kind。undefined = 全部。 */
   kinds?: MetricKind[];
+  /**
+   * 该 session 归属的 **work-item id**（docs/09 §4.4，#11）。给定后，本插件 emit 的每条
+   * MetricEvent 都带上 `workItemId`，供 sink / 聚合器按 work-item 归账（cost / token / tool 调用）。
+   * **domain 中性**——不是 `questionId`；编排层一 session 一 work-item 时传入，业务层自行映射。
+   */
+  workItemId?: string;
 }
 
 declare module "@harness-pi/core" {
@@ -26,7 +32,14 @@ export function metrics(opts: MetricsOptions): Hook {
     !opts.kinds || opts.kinds.includes(k);
 
   const emit = (kind: MetricKind, payload: Record<string, unknown>): void => {
-    opts.sink.enqueue({ kind, ts: Date.now(), ...payload });
+    opts.sink.enqueue({
+      kind,
+      ts: Date.now(),
+      // workItemId 戳在 payload 之前展开：若将来某 kind 的 payload 自带 workItemId，让 payload 优先
+      //（更贴近事件真实归属），这是有意的优先级——当前无此 kind。
+      ...(opts.workItemId !== undefined ? { workItemId: opts.workItemId } : {}),
+      ...payload,
+    });
   };
 
   return {
@@ -129,6 +142,11 @@ export function emitMetric(ctx: HookContext, event: MetricEvent): void {
 
 export { MemorySink } from "./sinks/memory.js";
 export { NdjsonFileSink } from "./sinks/ndjson-file.js";
+export { WorkItemAggregator } from "./sinks/work-item-aggregator.js";
+export type {
+  WorkItemRollup,
+  WorkItemAggregatorOptions,
+} from "./sinks/work-item-aggregator.js";
 export { BatchingSink } from "./batching-sink.js";
 export type { BatchingSinkOptions } from "./batching-sink.js";
 export type { MetricEvent, MetricKind, MetricsSink, SinkStats } from "./types.js";
