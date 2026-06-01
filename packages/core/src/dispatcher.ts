@@ -320,6 +320,13 @@ export class HookDispatcher {
 
   /* ────────────── Around: 嵌套 ────────────── */
 
+  // ⚠️ around hook（wrapTurn / wrapToolExec）**故意不套 per-hook timeout**（docs/09 §3.7 杂项「around-hook
+  // 超时」的结论）。它们包裹 `next()`——而 next() 就是整个 turn / 单次 tool exec，时长本就合法地可变，硬
+  // race-timeout 要么误杀合法长任务、要么留下脱缰的悬空工作。正确的「太久了」机制是**协作式 abort**：
+  // ctx.abort(reason) → AbortController → signal 同时穿进 LLM stream（session 调 stream 传 signal）和
+  // tool.execute(args, ctx, signal)，让它们自己尽快停。「多久算太久」是策略，落在 watchdog 插件里
+  //（一个 wrapTurn，setTimeout 后 ctx.abort）——机制进内核、策略进插件。所以这里只做嵌套组合，不做超时。
+
   buildWrapTurn(
     ctx: HookContext,
     inner: () => Promise<void>,

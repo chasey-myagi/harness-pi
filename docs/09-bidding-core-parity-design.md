@@ -403,6 +403,14 @@ const gate: Hook = {
 //   new WorkItemAggregator({ forward? })  // MetricsSink，按 workItemId rollup（token/tool/error/duration）
 //     .rollup(id) / .all()           // 只对 llm.called/tool.called/error.observed 建 rollup；其余只透传
 // 清理：lease-decision 的 argField 由「默认 questionId」改为**必填**（清除焊进通用插件的 domain 默认）。
+
+// ── 杂项「around-hook 超时」结论 ─────────────────────────────
+// 评估后**不加内核机制**：around hook（wrapTurn/wrapToolExec）包裹 next()，而 next() 就是整个 turn /
+// 单次 tool exec，时长本就合法可变——硬 race-timeout 要么误杀合法长任务、要么留悬空工作。正确机制是
+// 协作式 ctx.abort：signal 穿进 LLM stream + tool.execute(args, ctx, signal) 让其尽快停；「多久算太久」
+// 是策略，落在 watchdog 插件（一个 setTimeout 后 ctx.abort 的 wrapTurn）。机制进内核、策略进插件，故
+// 内核**故意不**给 around hook 套 per-hook timeout。已加测试钉死（around hook 忽略 timeout 字段、
+// ctx.abort 协作式 bound turn）。ctx.state slot API 已由 TypedStateMap + HookStateRegistry 提供（已存在）。
 ```
 
 ## 附录 B · 一句话
