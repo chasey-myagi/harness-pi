@@ -418,6 +418,17 @@ const gate: Hook = {
 // track, seq, event } 交给注入的 sink.send。纯 transport、domain-free、零 ws 依赖（调用方接 ws.send）。
 // 单 pump 单 session、seq 单调（失败 send 仍占 seq → 跳号=丢失检测）；sink.send 抛错两轨一致隔离
 //（不杀 loop / 不炸 for-await），可选 onError 观测。tag 是 domain 中性 per-work-item 标签。
+
+// ── #14 subAgent / gap-explorer（controller + tool factory，§4.7，P2）─
+// subAgentTool({ sessionFactory, maxSubAgents })：一个 HarnessTool，让模型把自包含子任务委派给 bounded
+//   sub-agent（复用 AgentSession，父 signal 透传协作取消），子代理 lastMessage 文本回灌父模型、终态进
+//   details——不是顶层 meta-agent。空任务/超 maxSubAgents 预算 throw（HarnessTool 错误合约）。
+// GapExplorer({ sessionFactory, maxExplorers, promote, applyToKb })：覆盖率反馈闭环控制器。explore(gaps)：
+//   去重(_seen,按 gap.id) + budget 闸(maxExplorers) + 复用 parallel() 派 explorer(每 gap 一次 run) → 据
+//   **terminal.reason==="done"** 才进 explored（非 done=abort/max_turns/error → incomplete 桶 + 从 _seen
+//   移除可重探，绝不拿半成品补 KB；注意 done≠完整，截断/overflow 仍 done，排它在 promote 里查 stopReason）→
+//   人审 promote 闸 → applyToKb → 算 toReanswer(promoted 的 affects 并集)。domain-free：gap 判定/KB 写/
+//   promote 全在调用方回调；控制器只给 bounded fan-out + 去重 + promote 闸 + 重答清单骨架。
 ```
 
 ## 附录 B · 一句话

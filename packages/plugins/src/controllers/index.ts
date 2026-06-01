@@ -41,3 +41,14 @@ export type {
   CompactRestartFreshOptions,
   CompactRestartResult,
 } from "./compact-restart-fresh.js";
+
+export { subAgentTool } from "./sub-agent-tool.js";
+export type { SubAgentToolOptions } from "./sub-agent-tool.js";
+
+export { GapExplorer } from "./gap-explorer.js";
+export type {
+  Gap,
+  ExplorerFinding,
+  GapExplorerOptions,
+  GapExplorerResult,
+} from "./gap-explorer.js";
