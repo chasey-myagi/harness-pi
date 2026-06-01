@@ -411,6 +411,13 @@ const gate: Hook = {
 // 是策略，落在 watchdog 插件（一个 setTimeout 后 ctx.abort 的 wrapTurn）。机制进内核、策略进插件，故
 // 内核**故意不**给 around hook 套 per-hook timeout。已加测试钉死（around hook 忽略 timeout 字段、
 // ctx.abort 协作式 bound turn）。ctx.state slot API 已由 TypedStateMap + HookStateRegistry 提供（已存在）。
+
+// ── #13 Transport pump（Event Bus → WebSocket，adapter）───────
+// @harness-pi/adapters 的 EventPump：attachLive() 订阅 live 轨（session.on）+ pumpRecorded(stream)/
+// forwardRecorded() 转发 recorded 轨（runStreaming），每条包成 TransportEnvelope { sessionId, tag?,
+// track, seq, event } 交给注入的 sink.send。纯 transport、domain-free、零 ws 依赖（调用方接 ws.send）。
+// 单 pump 单 session、seq 单调（失败 send 仍占 seq → 跳号=丢失检测）；sink.send 抛错两轨一致隔离
+//（不杀 loop / 不炸 for-await），可选 onError 观测。tag 是 domain 中性 per-work-item 标签。
 ```
 
 ## 附录 B · 一句话

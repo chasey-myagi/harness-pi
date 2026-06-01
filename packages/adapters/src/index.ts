@@ -5,3 +5,11 @@ export {
   POSTGRES_SESSION_STORE_DDL,
 } from "./postgres-session-store.js";
 export type { PgClient } from "./postgres-session-store.js";
+
+// Event Bus → transport 适配器（§4.6）。
+export { EventPump } from "./event-pump.js";
+export type {
+  TransportEnvelope,
+  TransportSink,
+  EventPumpOptions,
+} from "./event-pump.js";
