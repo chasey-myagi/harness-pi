@@ -372,6 +372,11 @@ interface AgentSessionOptions {
 // #10 compactRestartFresh（插件，§4.2）：compactOnOverflow() hook 在 onContextOverflow 里
 // ctx.abort("compaction:…")，CompactRestartFresh 控制器据 isCompactionRestart(abortReason) 用 fresh
 // session 重跑同一 prompt（丢掉越界 trace）。与 LifecycleRestart 共享该谓词，但语义相反（丢历史 vs 带历史）。
+// #10 compactSummarize（插件，§4.2）：transformMessagesBeforeLlm hook，超阈值时用注入的 summarize(可调
+// LLM)把早期消息总结成一条 + recent tail；按覆盖前缀缓存(resummarizeEvery 节奏)；只改模型 view 省 token，
+// 不动 _messages。summarize 抛错被内核 pipe fail-open 吞掉 → 退化为不压缩(run 不中断)。
+// 实现说明：doc 原文「写 compaction 边界进 store」未做——HookContext 刻意无 store 写权限(护 _flushToStore
+// 高水位不变量)，store-boundary 属编排层职责。本 hook 压缩 view（与 trim-history 互补：语义压缩 vs 机械占位）。
 
 // ── #7 fail-closed 分类 ─────────────────────────────────────
 // 实现说明：草案的 `decisionHook(..., { critical })` wrapper 落地成 Hook 上的两个字段 + 一个注册期硬校验，

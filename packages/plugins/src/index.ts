@@ -41,6 +41,9 @@ export type { BatchCounterOptions } from "./batch-counter.js";
 export { leaseDecision } from "./lease-decision.js";
 export type { LeaseDecisionOptions } from "./lease-decision.js";
 
+export { compactSummarize } from "./compact-summarize.js";
+export type { CompactSummarizeOptions } from "./compact-summarize.js";
+
 export { permissionGate } from "./permission-gate.js";
 export type {
   PermissionGateOptions,
