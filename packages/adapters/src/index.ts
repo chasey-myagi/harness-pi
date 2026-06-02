@@ -13,3 +13,10 @@ export type {
   TransportSink,
   EventPumpOptions,
 } from "./event-pump.js";
+
+// TransportSink → WebSocket 适配器（§4.6 收尾）。
+export { WebSocketSink } from "./web-socket-sink.js";
+export type {
+  WebSocketLike,
+  WebSocketSinkOptions,
+} from "./web-socket-sink.js";
