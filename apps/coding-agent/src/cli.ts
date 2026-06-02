@@ -3,14 +3,22 @@
 import { createInterface } from "node:readline/promises";
 import { stdin as input, stdout as output } from "node:process";
 import { pathToFileURL } from "node:url";
+import { randomUUID } from "node:crypto";
+import { existsSync } from "node:fs";
+import { join, resolve } from "node:path";
 import {
   createCodingAgent,
+  resumeCodingAgent,
   resolveModelRuntime,
   resolveModelSpec,
   runAgentPrompt,
+  type CodingAgent,
 } from "./agent.js";
 import { renderRunReport, renderSessionEvent } from "./output.js";
 import { toolNames, type ToolName } from "@harness-pi/tools";
+import { JsonlSessionStore } from "@harness-pi/adapters";
+import { ProcessTerminal } from "@mariozechner/pi-tui";
+import { createTuiApp } from "./tui/app.js";
 
 interface CliArgs {
   cwd: string;
@@ -20,7 +28,78 @@ interface CliArgs {
   logDir?: string | undefined;
   metricsFile?: string | undefined;
   task?: string | undefined;
+  tui: boolean;
+  yolo: boolean;
+  compact: boolean;
+  resume?: string | undefined;
   help: boolean;
+}
+
+/** TUI 会话落盘文件路径:.harness-pi/sessions/<id>.jsonl（相对 cwd）。 */
+function sessionFilePath(cwd: string, sessionId: string): string {
+  return join(resolve(cwd), ".harness-pi", "sessions", `${sessionId}.jsonl`);
+}
+
+/** 该会话的 persistence 子对象（store + id 捆一起，对齐 createCodingAgent.persistence）。 */
+function persistenceFor(
+  cwd: string,
+  sessionId: string,
+): { store: JsonlSessionStore; sessionId: string } {
+  return { store: new JsonlSessionStore(sessionFilePath(cwd, sessionId)), sessionId };
+}
+
+/** 取 assistant 消息纯文本（content 可能是 string 或 block 数组）。 */
+function assistantText(msg: { content: unknown } | undefined): string {
+  if (!msg) return "";
+  const content = msg.content;
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return "";
+  return content
+    .map((b) =>
+      b && typeof b === "object" && "text" in b && typeof (b as { text: unknown }).text === "string"
+        ? (b as { text: string }).text
+        : "",
+    )
+    .join("");
+}
+
+/**
+ * `/multi` 用的只读 bounded 子代理执行器：每个子任务造一个全新的 readOnly + 限轮 agent 跑完即弃。
+ * 只读 = 只 read/grep/find/ls，并行安全、不触发审批弹窗。父 signal 透传，可被 Esc 取消整批。
+ */
+export function makeReadOnlySubAgentSpawner(
+  cwd: string,
+  model: ReturnType<typeof resolveModelRuntime>["model"],
+  llmOptions: Record<string, unknown> | undefined,
+): (task: string, signal: AbortSignal) => Promise<{ ok: boolean; text: string }> {
+  return async (task, signal) => {
+    const subOpts: Parameters<typeof createCodingAgent>[0] = {
+      cwd,
+      model,
+      readOnly: true,
+      maxTurns: 8,
+    };
+    if (llmOptions !== undefined) subOpts.llmOptions = llmOptions;
+    const sub = createCodingAgent(subOpts);
+    // 只挂监听：orchestrateMulti 在启动前就用 signal.aborted 短路了，故 spawn 永远不会收到"已 abort"的
+    // signal；在飞中途 abort 时这个监听触发 sub.session.abort()，取消正在跑的子代理。
+    const onAbort = (): void => sub.session.abort("multi parent aborted");
+    signal.addEventListener("abort", onAbort, { once: true });
+    try {
+      const report = await runAgentPrompt(sub, task);
+      const last = report.summary.lastMessage;
+      // 成功 = run 干净收尾 **且** 最后一条 assistant 是 stopReason:"stop"。光看 reason 不够：provider 把
+      // 错误/超窗当流事件报回时，内核仍以 reason:"done" 收尾（session.ts:1190），但 lastMessage.stopReason
+      // 是 "error"/"length"——那种不算成功，否则限流的子代理会被标成 ✓。
+      const ok = report.summary.reason === "done" && last?.stopReason === "stop";
+      return { ok, text: assistantText(last) || "(no output)" };
+    } catch (err) {
+      return { ok: false, text: err instanceof Error ? err.message : String(err) };
+    } finally {
+      signal.removeEventListener("abort", onAbort);
+      await sub.close();
+    }
+  };
 }
 
 export async function main(argv = process.argv.slice(2)): Promise<void> {
@@ -44,7 +123,42 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
   if (args.metricsFile !== undefined) {
     createOptions.metricsFile = args.metricsFile;
   }
-  const agent = createCodingAgent(createOptions);
+  // TUI 模式默认开 tool 审批门（bash/write/edit 需确认）；--yolo 关闭。one-shot/readline 无弹窗、不挂门。
+  if (args.tui && !args.yolo) {
+    createOptions.permission = {};
+  }
+  // TUI 模式挂上 compaction hook：默认 {}（阈值=哨兵,不自动触发,但 /compact 可手动启用）；
+  // --compact 则设一个自动阈值（长对话超阈自动把早期消息压成摘要）。one-shot/readline 不挂。
+  if (args.tui) {
+    createOptions.compaction = args.compact
+      ? { maxMessages: 60, keepRecent: 8 }
+      : {};
+  }
+
+  // TUI 会话默认落盘到 .harness-pi/sessions/<id>.jsonl（崩溃后可 --resume 续跑）。
+  // resume：从给定 id 回放历史重建 session；新 TUI：随机 id 起新会话。one-shot/readline 不落盘。
+  let agent: CodingAgent;
+  let sessionId: string | undefined;
+  if (args.resume !== undefined) {
+    sessionId = args.resume;
+    // 提前挡 typo:resume 一个从没落过盘的 id 会静默开一个空会话（store 文件不存在→历史为空），
+    // 用户还会在退出时看到误导的"Session saved"。不存在就直接报错。
+    if (!existsSync(sessionFilePath(args.cwd, sessionId))) {
+      throw new Error(
+        `No saved session "${sessionId}" at ${sessionFilePath(args.cwd, sessionId)}`,
+      );
+    }
+    agent = await resumeCodingAgent({
+      ...createOptions,
+      persistence: persistenceFor(args.cwd, sessionId),
+    });
+  } else {
+    if (args.tui) {
+      sessionId = randomUUID();
+      createOptions.persistence = persistenceFor(args.cwd, sessionId);
+    }
+    agent = createCodingAgent(createOptions);
+  }
 
   try {
     if (!args.readOnly) {
@@ -61,6 +175,28 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
       return;
     }
 
+    if (args.tui) {
+      const app = createTuiApp({
+        agent,
+        terminal: new ProcessTerminal(),
+        cwd: agent.cwd,
+        spawnReadOnlySubAgent: makeReadOnlySubAgentSpawner(
+          args.cwd,
+          runtime.model,
+          runtime.llmOptions,
+        ),
+      });
+      await app.run(); // 直到用户 Ctrl-C 退出
+      // 退出后告知 resume 句柄。落盘每 turn 用 appendFileSync（无 fsync）——进程崩溃可恢复，
+      // 但断电/内核 panic 下最后一次写可能丢，故措辞为"process-crash recoverable"而非"saved"。
+      if (sessionId) {
+        console.log(
+          `Session persisted (process-crash recoverable). Resume with: --resume ${sessionId}`,
+        );
+      }
+      return;
+    }
+
     await runInteractive(agent);
   } finally {
     await agent.close();
@@ -72,6 +208,9 @@ export function parseArgs(argv: string[]): CliArgs {
     cwd: process.cwd(),
     readOnly: false,
     disabledTools: [],
+    tui: false,
+    yolo: false,
+    compact: false,
     help: false,
   };
   const task: string[] = [];
@@ -95,6 +234,24 @@ export function parseArgs(argv: string[]): CliArgs {
     }
     if (arg === "--read-only") {
       out.readOnly = true;
+      continue;
+    }
+    if (arg === "--tui") {
+      out.tui = true;
+      continue;
+    }
+    if (arg === "--yolo") {
+      out.yolo = true;
+      continue;
+    }
+    if (arg === "--compact") {
+      out.compact = true;
+      out.tui = true; // compaction 是 TUI 特性。
+      continue;
+    }
+    if (arg === "--resume") {
+      out.resume = requireValue(argv, ++i, "--resume");
+      out.tui = true; // resume 是 TUI 崩溃续跑特性,隐含进 TUI。
       continue;
     }
     if (arg === "--disable") {
@@ -179,6 +336,13 @@ Options:
   --model <provider:id>    pi-ai model. Can also be HARNESS_PI_MODEL.
                             DashScope aliases: dashscope:qwen-plus, qwen:qwen-plus.
   --read-only              Use read/grep/find/ls only.
+  --tui                    Launch the pi-tui interactive TUI (chat UI, streaming).
+                            Persists to .harness-pi/sessions/<id>.jsonl for crash recovery.
+  --resume <id>            Resume a saved session by id. Launches the TUI unless a
+                            one-shot task is also given (then it continues that session headless).
+  --yolo                   (TUI) skip tool approval prompts — allow bash/write/edit without asking.
+  --compact                (TUI) auto-summarize early messages once the conversation grows long.
+                            Without it, /compact in the TUI triggers summarization manually.
   --disable <a,b>          Disable named first-party tools.
   --log-dir <path>         Session log dir. Defaults to .harness-pi/logs.
   --metrics-file <path>    Write metrics NDJSON.
