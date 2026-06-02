@@ -195,6 +195,8 @@ const results = await pipeline(questions, {
 - **是否要 model-authored（CC dynamic-workflows 的「模型写 JS 脚本」）？不要。** 答题的 fan-out 已知，让模型 author 编排零信息增益 + 破坏可复现性/按题归账。只取它的*声明式原语形态*，编排脚本由 harness-pi/应用写死。
 - **是把现有 controller 升级，还是新写一层？** 升级现有：把 `leaseQueue`（动态租约）/`workPool`（静态分组）统一成同一套带 `budget`/`resume`/typed-result 的声明式 API，消灭 bidding 现在两套语义不对等的 pool。
 
+**实现注记（as-built）。** 上面伪代码的单段 `pipeline(questions, {run, …})` 形态实际落地为 `parallel(items, {run, concurrency?, signal?, budget?, onProgress?})`（`@harness-pi/plugins/controllers`，每 item 必返 `ItemOutcome` ok/failed/skipped）。**另补了一个多阶段 `pipeline(items, stages[], opts)`**（相对 bidding-architecture 报告里 `parallel()/pipeline()` 提法的缺口）：每 item 独立流过有序 stages、stage 间无 barrier、失败归因到具体 stage，搭在 `parallel()` 上复用其全部并发/budget/abort/进度语义。`leaseQueue`/`workPool` 暂仍各自保留 API——把它们合并成单一声明式 API 属 bidding 迁移期工作，本轮未做。详见附录 A 的 #8 块。
+
 ### 4.2 Compaction 策略插件 〔#10，插件〕
 
 建在 §3.6 的内核 hook 点 + overflow 事件上。**至少给两种现成策略**：
@@ -341,6 +343,14 @@ namespace AgentSession {
   function resume(store: SessionStore, sessionId: string, deps: SessionDeps): Promise<AgentSession>;
 }
 
+// ── #12 SessionStore adapters（§4.5）─────────────────────────
+// 实现说明：@harness-pi/adapters 实现上面 #4 协议。JsonlSessionStore（文件，torn-tail 容错 + 形状校验）；
+//   PostgresSessionStore 经注入的最小 PgClient 接口（node-pg 的 Pool 天生满足、无需 cast），本包**零 pg
+//   运行时依赖**（任何满足 PgClient 的 driver 都行——比 §4.5「peerDep pg」更松）。测试：pg-mem 跑 SessionStore
+//   契约 + env-gated 真 PG 集成测试（POSTGRES_TEST_URL，docker postgres:16 实跑）覆盖模拟器测不了的——
+//   migrate 幂等(重跑 IF NOT EXISTS)、真 jsonb 往返、真并发 UNIQUE(session_id,seq) 兜底（断言不变量而非
+//   时序，防 flaky）。pg/@types/pg 仅 devDep；无 URL 时集成测试整段干净 skip。
+
 // ── #5 Steering（park/drain，内核机制）─────────────────────
 // 实现说明：草案的 KernelEvent "steer" 与 `steer(message: UserMessage | SystemMessage)` 落地为：
 // 一个公共方法 `AgentSession.steer(message: Message)` + 一个 hook 事件 `onSteer`。pi-ai 无独立
@@ -404,6 +414,17 @@ const gate: Hook = {
 //     .rollup(id) / .all()           // 只对 llm.called/tool.called/error.observed 建 rollup；其余只透传
 // 清理：lease-decision 的 argField 由「默认 questionId」改为**必填**（清除焊进通用插件的 domain 默认）。
 
+// ── #8 声明式编排（parallel + pipeline，§4.1）──────────────
+// 实现说明：§4.1 伪代码的单段 pipeline(items,{run}) 落地为
+//   parallel(items, {run, concurrency?, signal?, budget?{total,cost}, onProgress?}) → Array<ItemOutcome>
+//   （ok{value} / failed{error} / skipped{reason:"budget"|"aborted"}）。每 item 必 settle、按 index 有序；
+//   budget 是派发阈值非硬上限（高并发超支≈在跑的并发数）；失败 / skip 不计费。
+// 另补**多阶段** pipeline(items, stages: PipelineStage[], opts)（相对 bidding-architecture 报告的缺口）：
+//   每 item 独立流过有序 stages、stage 间**无 barrier**（A 可在 stage2 而 B 仍在 stage0）；PipelineOutcome.failed
+//   带 `stage` 下标归因；空 stages = identity(value===item)。搭在 parallel() 上（per-item「串行跑完所有 stage」
+//   = parallel 的一个 run）复用其全部语义，只外加 stage 归因（内部 StageError 载体 + instanceof 守卫）。
+//   leaseQueue/workPool 暂仍各自保留 API（统一成单一声明式 API 属 bidding 迁移期工作，未做）。
+
 // ── 杂项「around-hook 超时」结论 ─────────────────────────────
 // 评估后**不加内核机制**：around hook（wrapTurn/wrapToolExec）包裹 next()，而 next() 就是整个 turn /
 // 单次 tool exec，时长本就合法可变——硬 race-timeout 要么误杀合法长任务、要么留悬空工作。正确机制是
@@ -418,6 +439,10 @@ const gate: Hook = {
 // track, seq, event } 交给注入的 sink.send。纯 transport、domain-free、零 ws 依赖（调用方接 ws.send）。
 // 单 pump 单 session、seq 单调（失败 send 仍占 seq → 跳号=丢失检测）；sink.send 抛错两轨一致隔离
 //（不杀 loop / 不炸 for-await），可选 onError 观测。tag 是 domain 中性 per-work-item 标签。
+// WebSocketSink（同包）：把上面注入的 sink 接到 WebSocket 的现成适配器。结构化只要 { readyState; send(string) }
+//   （浏览器原生 WebSocket + node ws 包都满足，零 ws 依赖）；readyState 非 OPEN 时不 send（避免断线后每条都抛
+//   InvalidStateError）→ 干净丢 + 可选 onDrop；serialize 可注入（默认 JSON.stringify，映射前端协议）；OPEN 下
+//   serialize/send 抛错原样上抛交 EventPump.onError——预期内丢 vs 意外抛错两层互斥、不重复兜底。domain-free。
 
 // ── #14 subAgent / gap-explorer（controller + tool factory，§4.7，P2）─
 // subAgentTool({ sessionFactory, maxSubAgents })：一个 HarnessTool，让模型把自包含子任务委派给 bounded
