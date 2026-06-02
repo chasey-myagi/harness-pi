@@ -196,11 +196,44 @@ describe("defaultIsContextOverflow", () => {
     expect(defaultIsContextOverflow("EXCEEDS THE CONTEXT WINDOW")).toBe(true); // 大小写无关
   });
 
+  it("inherits pi-ai's maintained overflow patterns (not a hand-maintained subset)", () => {
+    // 以下文案在 pi-ai 0.73.1 的 OVERFLOW_PATTERNS 里、但**不在**内核旧的手维护列表里——
+    // 命中即证明 defaultIsContextOverflow 现在复用 pi-ai 的 getOverflowPatterns()，升级 pi-ai 自动跟进。
+    expect(
+      defaultIsContextOverflow(
+        "This model's maximum prompt length is 131072 but the request contains 537812 tokens",
+      ),
+    ).toBe(true); // xAI (Grok)
+    expect(
+      defaultIsContextOverflow("the request exceeds the available context size, try increasing it"),
+    ).toBe(true); // llama.cpp
+    expect(defaultIsContextOverflow("Input is too long for requested model.")).toBe(true); // Amazon Bedrock
+  });
+
+  it("keeps the kernel's Qwen addition that pi-ai's list lacks", () => {
+    // pi-ai 的列表不含 DashScope/Qwen 文案，内核作为补充保留——这条单独钉死，防 follow-up 误删。
+    expect(
+      defaultIsContextOverflow("InvalidParameter: Range of input length should be [1, 30000]"),
+    ).toBe(true);
+  });
+
   it("rejects empty and unrelated errors", () => {
     expect(defaultIsContextOverflow("")).toBe(false);
     expect(defaultIsContextOverflow("401 Unauthorized")).toBe(false);
     expect(defaultIsContextOverflow("rate limit exceeded")).toBe(false);
     expect(defaultIsContextOverflow("connection reset by peer")).toBe(false);
+  });
+
+  it("does NOT misclassify throttling that happens to mention 'too many tokens' (NON_OVERFLOW exclusion)", () => {
+    // pi-ai 的兜底 pattern /too many tokens/i 会命中 Bedrock 限流文案；委托 pi-ai 的 isContextOverflow
+    // 会先跑 NON_OVERFLOW 排除（/^Throttling error:/i 即 pi-ai formatBedrockError 产出、也是内核实际收到
+    // 的 errorMessage 格式），把它判回 false——否则会把「退避重试」的限流误升级成「丢历史 restart」。
+    // 两条都**含** "too many tokens"（命中 pi-ai 兜底 OVERFLOW pattern），靠 NON_OVERFLOW 前缀排除判回 false
+    // ——这才真正钉死排除分支（若只 getOverflowPatterns() 不排除，两条都会误判 true）。
+    expect(
+      defaultIsContextOverflow("Throttling error: too many tokens, please wait before trying again"),
+    ).toBe(false);
+    expect(defaultIsContextOverflow("Service unavailable: too many tokens this minute")).toBe(false);
   });
 
   it("does NOT false-positive on parameter-validation errors mentioning input length", () => {

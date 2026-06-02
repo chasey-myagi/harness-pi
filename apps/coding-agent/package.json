@@ -17,7 +17,7 @@
     "@harness-pi/core": "workspace:*",
     "@harness-pi/plugins": "workspace:*",
     "@harness-pi/tools": "workspace:*",
-    "@mariozechner/pi-ai": "^0.53.0"
+    "@mariozechner/pi-ai": "^0.73.1"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
