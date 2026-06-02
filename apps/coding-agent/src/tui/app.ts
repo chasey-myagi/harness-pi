@@ -10,7 +10,6 @@
  */
 
 import {
-  CombinedAutocompleteProvider,
   Container,
   Editor,
   Loader,
@@ -30,6 +29,7 @@ import { formatStatusBar, formatToolCall, formatToolCalls, formatToolResult } fr
 import { routeSubmit } from "./submit-router.js";
 import { parseSlashCommand, SLASH_COMMANDS, SLASH_HELP, type SlashCommand } from "./slash.js";
 import { formatMultiSummary, orchestrateMulti, parseMultiCommand, subTaskFor } from "./multi.js";
+import { createAutocompleteProvider } from "./autocomplete.js";
 import { color, editorTheme, markdownTheme, selectListTheme } from "./theme.js";
 
 const LIVE_TYPES: ReadonlyArray<LiveEvent["type"]> = [
@@ -125,9 +125,8 @@ export function createTuiApp(opts: TuiAppOptions): TuiApp {
   // 命令面板（P5b）：给输入框挂上 pi-tui 原生 autocomplete —— `/` 实时补全斜杠命令、`@` 补全文件路径
   // （基于 cwd）。补全只填充文本，回车才提交，最终仍走 parseSlashCommand → handleSlash。
   if (opts.cwd) {
-    editor.setAutocompleteProvider(
-      new CombinedAutocompleteProvider([...SLASH_COMMANDS], opts.cwd),
-    );
+    // 有 fd 用原生 @ 补全，没 fd 走 readdir 回退（见 createAutocompleteProvider）。
+    editor.setAutocompleteProvider(createAutocompleteProvider(SLASH_COMMANDS, opts.cwd));
   }
 
   let running = false;
@@ -140,8 +139,13 @@ export function createTuiApp(opts: TuiAppOptions): TuiApp {
   // 当前正在流式的助手组件（懒创建：谁先流先 append → thinking 在答案上方）。
   let current: { assistant?: Markdown; thinking?: Text } = {};
   // resume：把重建的历史渲进消息区（否则进来是空白屏）；seedHistory 也据此初始化 ctx-gauge。
+  // 新会话则给一行上手提示，让斜杠命令 + 退出键可发现（否则启动是空白屏）。
   if (opts.initialMessages && opts.initialMessages.length > 0) {
     seedHistory(opts.initialMessages);
+  } else {
+    append(
+      new Text(color.dim("Type a task, or /help for commands · Esc cancels · Ctrl-C exits"), 0, 0),
+    );
   }
   renderStatusBar();
 

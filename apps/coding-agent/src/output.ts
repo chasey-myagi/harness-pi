@@ -31,16 +31,28 @@ export function renderRunReport(report: RunReport): string {
   lines.push(`model: ${report.model}`);
   lines.push(`mode: ${report.readOnly ? "read-only" : "full"}`);
   lines.push(`reason: ${report.summary.reason}`);
+  // 失败终态把原因打出来——否则只剩 "reason: error"，piped/captured 的报告完全丢失原因。
+  if (report.summary.error) lines.push(`error: ${report.summary.error.message}`);
+  if (report.summary.abortReason) lines.push(`abort reason: ${report.summary.abortReason}`);
   lines.push(`turns: ${report.summary.turns}`);
   lines.push(`continuations: ${report.summary.continuations}`);
   lines.push(`run wall time: ${formatMs(report.wallTimeMs)}`);
   lines.push(`log: ${report.logPath}`);
   if (report.metricsPath) lines.push(`metrics: ${report.metricsPath}`);
-  if (report.warnings && report.warnings.length > 0) {
+
+  // 合并调用方告警 + 上下文溢出告警：stopReason "length" = 答案被窗口/输出上限截断（headless 模式
+  // 没挂 compaction，溢出会以 reason:done 静默收尾，这里显式提示答案可能不完整）。
+  const warnings = [...(report.warnings ?? [])];
+  if (report.summary.stopReason === "length") {
+    warnings.push(
+      "response hit the context/output limit — the answer may be truncated. Use --tui with /compact for long sessions.",
+    );
+  }
+  if (warnings.length > 0) {
     lines.push("");
     lines.push("Warnings");
     lines.push("--------");
-    for (const warning of report.warnings) lines.push(`- ${warning}`);
+    for (const warning of warnings) lines.push(`- ${warning}`);
   }
 
   if (report.costStats) {

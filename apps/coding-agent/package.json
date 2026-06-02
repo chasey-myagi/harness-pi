@@ -6,8 +6,12 @@
   "type": "module",
   "main": "./dist/cli.js",
   "types": "./dist/cli.d.ts",
+  "engines": {
+    "node": ">=20"
+  },
   "scripts": {
     "start": "tsx src/cli.ts",
+    "tui": "tsx src/cli.ts --tui",
     "build": "tsc -p .",
     "typecheck": "tsc -p . --noEmit",
     "test": "vitest run",
