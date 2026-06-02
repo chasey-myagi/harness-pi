@@ -39,11 +39,36 @@ export function formatToolResult(name: string, ok: boolean, output: string, dura
   return body.length > 0 ? `${head}\n${color.dim(indent(body))}` : head;
 }
 
-/** 底部状态栏单行：`qwen-turbo · ↑123 ↓45 · ¥0.0012 · 🔧 3/0`。 */
+/** 紧凑 token 计数：950 / 12k / 1.2M。给状态栏的上下文占用读数用。 */
+export function formatTokenCount(n: number): string {
+  if (n < 1000) return String(n);
+  if (n < 1_000_000) {
+    const k = n / 1000;
+    return (k < 10 ? k.toFixed(1).replace(/\.0$/, "") : Math.round(k).toString()) + "k";
+  }
+  const m = n / 1_000_000;
+  return (m < 10 ? m.toFixed(1).replace(/\.0$/, "") : Math.round(m).toString()) + "M";
+}
+
+/**
+ * 上下文占用读数：`ctx 12k/200k (6%)`。用最近一次 LLM 调用的 input tokens 近似"当前上下文大小"
+ * （它含整段历史）。逼近窗口上限时变色提醒（>90% 红、>75% 黄），是 compaction 的可视前哨。
+ */
+export function formatContextGauge(contextTokens: number, contextWindow: number): string {
+  const pct = contextWindow > 0 ? Math.round((contextTokens / contextWindow) * 100) : 0;
+  const text = `ctx ${formatTokenCount(contextTokens)}/${formatTokenCount(contextWindow)} (${pct}%)`;
+  if (pct >= 90) return color.red(text);
+  if (pct >= 75) return color.yellow(text);
+  return color.dim(text);
+}
+
+/** 底部状态栏单行：`qwen-turbo · ↑123 ↓45 · ctx 12k/200k (6%) · ¥0.0012 · 🔧 3/0`。 */
 export function formatStatusBar(p: {
   model: string;
   input?: number | undefined;
   output?: number | undefined;
+  contextTokens?: number | undefined;
+  contextWindow?: number | undefined;
   costText?: string | undefined;
   toolCalls?: number | undefined;
   toolErrors?: number | undefined;
@@ -52,6 +77,8 @@ export function formatStatusBar(p: {
   const seg: string[] = [color.cyan(p.model)];
   if (p.input !== undefined || p.output !== undefined)
     seg.push(color.dim(`↑${p.input ?? 0} ↓${p.output ?? 0}`));
+  if (p.contextTokens !== undefined && p.contextWindow !== undefined && p.contextWindow > 0)
+    seg.push(formatContextGauge(p.contextTokens, p.contextWindow));
   if (p.costText) seg.push(color.dim(p.costText));
   if (p.toolCalls !== undefined)
     seg.push(color.dim(`🔧 ${p.toolCalls}/${p.toolErrors ?? 0}`));

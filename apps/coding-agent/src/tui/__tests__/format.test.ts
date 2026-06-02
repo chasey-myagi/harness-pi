@@ -5,6 +5,8 @@ import {
   formatToolCalls,
   formatToolResult,
   formatStatusBar,
+  formatTokenCount,
+  formatContextGauge,
 } from "../format.js";
 
 // 剥 ANSI 颜色，断言结构而非具体转义码。
@@ -84,5 +86,30 @@ describe("format helpers", () => {
   it("formatStatusBar omits absent segments", () => {
     const out = strip(formatStatusBar({ model: "m" }));
     expect(out).toBe("m");
+  });
+
+  it("formatTokenCount uses compact k/M units", () => {
+    expect(formatTokenCount(0)).toBe("0");
+    expect(formatTokenCount(950)).toBe("950");
+    expect(formatTokenCount(1200)).toBe("1.2k");
+    expect(formatTokenCount(12_000)).toBe("12k");
+    expect(formatTokenCount(200_000)).toBe("200k");
+    expect(formatTokenCount(1_500_000)).toBe("1.5M");
+  });
+
+  it("formatContextGauge shows used/window and percent", () => {
+    expect(strip(formatContextGauge(12_000, 200_000))).toBe("ctx 12k/200k (6%)");
+  });
+
+  it("formatStatusBar includes the context gauge when window is known", () => {
+    const out = strip(
+      formatStatusBar({ model: "m", input: 50_000, contextTokens: 50_000, contextWindow: 200_000 }),
+    );
+    expect(out).toContain("ctx 50k/200k (25%)");
+  });
+
+  it("formatStatusBar omits the gauge when window is unknown or zero", () => {
+    expect(strip(formatStatusBar({ model: "m", contextTokens: 50_000 }))).toBe("m");
+    expect(strip(formatStatusBar({ model: "m", contextTokens: 50_000, contextWindow: 0 }))).toBe("m");
   });
 });

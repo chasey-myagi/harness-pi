@@ -54,8 +54,11 @@ export interface TuiSession {
 
 export interface TuiAgentLike {
   session: TuiSession;
-  model: { id: string };
+  /** contextWindow（若已知）用于状态栏的上下文占用读数 `ctx N/W`。 */
+  model: { id: string; contextWindow?: number };
   getCostEstimate?(): { amount: number; currency: string } | undefined;
+  /** 最近一次 run 的工具统计；用于状态栏 `🔧 calls/errors`。 */
+  getToolStats?(): { totalCalls: number; error: number } | undefined;
   /** 注入 tool 审批"问人"实现（permissionGate.onAsk 委托到它）。 */
   setApprovalHandler?(handler: (call: ToolCall) => Promise<boolean>): void;
   /** /compact：降低压缩阈值，下一 turn 起把早期消息压成摘要。未启用 compaction 时 no-op。 */
@@ -110,12 +113,18 @@ export function createTuiApp(opts: TuiAppOptions): TuiApp {
   renderStatusBar();
 
   function renderStatusBar(state?: string): void {
+    const toolStats = opts.agent.getToolStats?.();
     statusBar.setText(
       formatStatusBar({
         model: opts.agent.model.id,
         input: stats.input,
         output: stats.output,
+        // 上下文占用：用最近一次 LLM 调用的 input tokens 近似当前上下文大小（含整段历史）。
+        contextTokens: stats.input,
+        contextWindow: opts.agent.model.contextWindow,
         costText: stats.costText,
+        toolCalls: toolStats?.totalCalls,
+        toolErrors: toolStats?.error,
         state,
       }),
     );

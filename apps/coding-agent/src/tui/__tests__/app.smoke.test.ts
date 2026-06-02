@@ -107,7 +107,12 @@ describe("TUI app smoke (headless, dual-track via fake terminal)", () => {
   ];
 
   function makeApp(session: TuiSession): ReturnType<typeof createTuiApp> {
-    const agent: TuiAgentLike = { model: { id: "qwen-turbo" }, session, getCostEstimate: () => ({ amount: 0.0012, currency: "CNY" }) };
+    const agent: TuiAgentLike = {
+      model: { id: "qwen-turbo", contextWindow: 200_000 },
+      session,
+      getCostEstimate: () => ({ amount: 0.0012, currency: "CNY" }),
+      getToolStats: () => ({ totalCalls: 1, error: 0 }),
+    };
     return createTuiApp({ agent, terminal: new FakeTerminal() });
   }
 
@@ -124,7 +129,9 @@ describe("TUI app smoke (headless, dual-track via fake terminal)", () => {
     expect(out).toContain("All good."); // 末条助手（message_end 权威纠正自 "All "）
     expect(out).toContain("qwen-turbo"); // 状态栏
     expect(out).toContain("↑123 ↓45");
+    expect(out).toContain("ctx 123/200k"); // 上下文占用读数（input=123 / window=200k）
     expect(out).toContain("¥0.0012");
+    expect(out).toContain("🔧 1/0"); // 工具统计
   });
 
   it("suppresses coarse llm-end so the assistant message is rendered exactly once (no double)", async () => {
