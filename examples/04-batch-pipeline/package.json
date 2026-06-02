@@ -1,0 +1,25 @@
+{
+  "name": "@harness-pi-example/04-batch-pipeline",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Reference example: pipeline() + AgentSession + SessionStore(resume) + EventPump→WebSocketSink wired end-to-end (domain-free). Doubles as a cross-package integration test.",
+  "type": "module",
+  "scripts": {
+    "start": "tsx src/index.ts",
+    "typecheck": "tsc -p . --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "dependencies": {
+    "@harness-pi/adapters": "workspace:*",
+    "@harness-pi/core": "workspace:*",
+    "@harness-pi/plugins": "workspace:*",
+    "@mariozechner/pi-ai": "^0.53.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "tsx": "^4.0.0",
+    "typescript": "^5.6.0",
+    "vitest": "^2.1.0"
+  }
+}
