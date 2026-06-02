@@ -246,31 +246,35 @@ roadmap 已列 `sideQuestion` controller + `subAgent` tool factory。给 Hybrid 
 
 > 战略前提（roadmap 自己写的）：框架作者 = 唯一生产用户，别在真空里堆框架。**让 bidding 单题 happy-path spike 当 forcing function**。
 
+> **落地状态（截至 2026-06）**：图例 ✅ = harness-pi 机制层已落地（实现 + 测试 + 三门 + 合入 main）；🟡 = 部分落地；⬜ = 未做。
+> **要点**：能力项 #1–#14 + 杂项的**机制层已全部 ✅**；但每个 Phase 的**验收**（用 harness-pi 实际跑通 bidding 单题 / 整份 RFQ）**全部 ⬜**——因为 bidding 还跑在 1653 行 god-file 上，迁移一行未动。即「目的地已就绪，列车还没开」。
+
 **Phase 0 — spike 地基（解锁「能不能迁」）**
-- #1 Event Bus（最小：text/thinking delta + turn/tool 事件）
-- #4 SessionStore 协议 + `MemorySessionStore` + resume 重入机制
-- #2 TerminalResult
-- 验收：用 harness-pi 跑通 bidding **单题** run-through（检索→submit→judge），WS 能看到 thinking，崩溃能 resume。即 roadmap v0.1 gate 那个未勾选的「第三方/production-like spike」。
+- ✅ #1 Event Bus（recorded + live 双轨：text/thinking/toolcall delta + 生命周期事件）
+- ✅ #4 SessionStore 协议 + `MemorySessionStore` + `AgentSession.resume()` 重入机制（resume.test 15 例，含 compaction 边界裁剪 / high-water-mark / 非-done resume）
+- ✅ #2 TerminalResult（`RunSummary` 富化：reason + usage + lastMessage + stopReason）
+- ⬜ **验收：用 harness-pi 跑通 bidding 单题 run-through（检索→submit→judge），WS 看到 thinking，崩溃能 resume。**（即 roadmap v0.1 gate 未勾的「production-like spike」——待迁移）
 
 **Phase 1 — 分水岭（解锁「迁了有没有价值」）**
-- #8 声明式编排层（合并两套 pool → `parallel()/pipeline()`+budget+resume+typed result）
-- #12 `JsonlSessionStore`（先文件，PG 后置）
-- #13 WS transport pump
-- #3 per-call meta + #11 work-item 归账
-- 验收：用编排层跑通 bidding **整份 RFQ**（多题并发 + 按题归账 + benchmark 可复现），行为不弱于现状。
+- ✅ #8 声明式编排层：`parallel()` + 多阶段 `pipeline()` + budget + typed `ItemOutcome`（`leaseQueue`/`workPool` 暂仍各自保留，合并属迁移期工作）
+- ✅ #12 `JsonlSessionStore` + `PostgresSessionStore`（注入 PgClient，pg-mem 契约 + 真 PG 集成测试）
+- ✅ #13 WS transport pump（`EventPump` + `WebSocketSink`）
+- ✅ #3 per-call meta（既有 onPostToolUse）+ #11 work-item 归账（`WorkItemAggregator`）
+- ⬜ **验收：用编排层跑通 bidding 整份 RFQ（多题并发 + 按题归账 + benchmark 可复现），行为不弱于现状。**（待迁移）
 
 **Phase 2 — 收口与安全**
-- #6 overflow 事件 + #10 `compactRestartFresh`（先要这个，最便宜）
-- #5 steering（clarify 回复插队）
-- #7 fail-closed 分类 + #9 permissionGate（收敛 6 处守卫）
-- #4 `PostgresSessionStore` + lifecycleRestart 从 store resume
-- #9 杂项：ctx.state slot API、around-hook 超时、去 `questionId` domain 默认
+- ✅ #6 overflow 事件（`onContextOverflow`）+ #10 `compactRestartFresh`
+- ✅ #5 steering（`AgentSession.steer()` + `onSteer`，turn-start drain）
+- ✅ #7 fail-closed 分类 + #9 `permissionGate`（规则引擎骨架，domain 谓词由调用方给）
+- 🟡 #4 `PostgresSessionStore` ✅ ；**lifecycleRestart 从 store resume ⬜**（`AgentSession.resume()` 原语在，但没有 controller 把它接进「重启即续跑」流程——是 harness-pi 这边唯一未接的机制 glue）
+- ✅ #9 杂项：ctx.state slot API（TypedStateMap）、around-hook 超时（结论：不加内核机制，协作式 abort）、去 `questionId` domain 默认（lease-decision argField 必填）
 
 **Phase 3 — Hybrid 闭环**
-- #14 subAgent / gap-explorer + 覆盖率反馈闭环
-- #10 `compactSummarize` / cache-aware（若 benchmark 证明值得）
+- ✅ #14 subAgent（`subAgentTool`）/ gap-explorer（`GapExplorer`，bounded fan-out + 去重 + promote 闸骨架）+ 覆盖率反馈闭环骨架
+- ✅ #10 `compactSummarize`（cache-aware 变体未做，待 benchmark 证明值得）
+- ⬜ **验收：覆盖率闭环在 bidding 上跑出 KB 增益（≥3 paired / ≥200 题统计验证）。**（待迁移 + 实验）
 
-**依赖关系**：#4 是 #8 resume 的前置；#1+#4 是 Phase 0 门槛；#8 是「迁了有没有价值」门槛；#6 是 #10 的前置；#5/#7/#9 收口期一起。
+**依赖关系**：#4 是 #8 resume 的前置；#1+#4 是 Phase 0 门槛；#8 是「迁了有没有价值」门槛；#6 是 #10 的前置；#5/#7/#9 收口期一起。**机制层这些前置已全部满足，剩下的全是「把 bidding 搬上来」的迁移工程**（详见 §5 留在 bidding 侧的领域层）。
 
 ---
 
