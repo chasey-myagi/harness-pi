@@ -11,6 +11,8 @@ import {
 } from "./agent.js";
 import { renderRunReport, renderSessionEvent } from "./output.js";
 import { toolNames, type ToolName } from "@harness-pi/tools";
+import { ProcessTerminal } from "@mariozechner/pi-tui";
+import { createTuiApp } from "./tui/app.js";
 
 interface CliArgs {
   cwd: string;
@@ -20,6 +22,7 @@ interface CliArgs {
   logDir?: string | undefined;
   metricsFile?: string | undefined;
   task?: string | undefined;
+  tui: boolean;
   help: boolean;
 }
 
@@ -61,6 +64,12 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
       return;
     }
 
+    if (args.tui) {
+      const app = createTuiApp({ agent, terminal: new ProcessTerminal() });
+      await app.run(); // 直到用户 Ctrl-C 退出
+      return;
+    }
+
     await runInteractive(agent);
   } finally {
     await agent.close();
@@ -72,6 +81,7 @@ export function parseArgs(argv: string[]): CliArgs {
     cwd: process.cwd(),
     readOnly: false,
     disabledTools: [],
+    tui: false,
     help: false,
   };
   const task: string[] = [];
@@ -95,6 +105,10 @@ export function parseArgs(argv: string[]): CliArgs {
     }
     if (arg === "--read-only") {
       out.readOnly = true;
+      continue;
+    }
+    if (arg === "--tui") {
+      out.tui = true;
       continue;
     }
     if (arg === "--disable") {
@@ -179,6 +193,7 @@ Options:
   --model <provider:id>    pi-ai model. Can also be HARNESS_PI_MODEL.
                             DashScope aliases: dashscope:qwen-plus, qwen:qwen-plus.
   --read-only              Use read/grep/find/ls only.
+  --tui                    Launch the pi-tui interactive TUI (chat UI, streaming).
   --disable <a,b>          Disable named first-party tools.
   --log-dir <path>         Session log dir. Defaults to .harness-pi/logs.
   --metrics-file <path>    Write metrics NDJSON.
