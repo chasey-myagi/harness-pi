@@ -10,6 +10,7 @@
  */
 
 import {
+  CombinedAutocompleteProvider,
   Container,
   Editor,
   Loader,
@@ -26,7 +27,7 @@ import { coarseEventToActions, type TuiAction } from "./event-bridge.js";
 import { LiveStreamAccumulator, type StreamOp } from "./live-stream.js";
 import { formatStatusBar, formatToolCall, formatToolCalls, formatToolResult } from "./format.js";
 import { routeSubmit } from "./submit-router.js";
-import { parseSlashCommand, SLASH_HELP, type SlashCommand } from "./slash.js";
+import { parseSlashCommand, SLASH_COMMANDS, SLASH_HELP, type SlashCommand } from "./slash.js";
 import { color, editorTheme, markdownTheme, selectListTheme } from "./theme.js";
 
 const LIVE_TYPES: ReadonlyArray<LiveEvent["type"]> = [
@@ -73,6 +74,8 @@ export interface TuiAppOptions {
   agent: TuiAgentLike;
   /** 注入 Terminal（默认 ProcessTerminal）；测试传 fake。 */
   terminal: Terminal;
+  /** 工作目录；给了则启用输入框的 `/` 命令补全 + `@` 文件路径补全（基于此目录）。 */
+  cwd?: string;
 }
 
 export interface TuiApp {
@@ -105,6 +108,14 @@ export function createTuiApp(opts: TuiAppOptions): TuiApp {
   tui.addChild(status);
   tui.addChild(editor);
   tui.addChild(statusBar);
+
+  // 命令面板（P5b）：给输入框挂上 pi-tui 原生 autocomplete —— `/` 实时补全斜杠命令、`@` 补全文件路径
+  // （基于 cwd）。补全只填充文本，回车才提交，最终仍走 parseSlashCommand → handleSlash。
+  if (opts.cwd) {
+    editor.setAutocompleteProvider(
+      new CombinedAutocompleteProvider([...SLASH_COMMANDS], opts.cwd),
+    );
+  }
 
   let running = false;
   const stats: StatsView = {};

@@ -373,6 +373,19 @@ describe("TUI app smoke (headless, dual-track via fake terminal)", () => {
     expect(strip(app.tui.render(80).join("\n"))).toContain("not available");
   });
 
+  it("command palette: passing cwd wires the autocomplete provider without breaking submit", async () => {
+    // cwd 启用 pi-tui 原生 `/`+`@` 补全。补全是 Editor 内部行为（真实终端才跑），这里只确认
+    // 挂上 provider 不影响正常提交流程。
+    const agent: TuiAgentLike = {
+      model: { id: "qwen-turbo", contextWindow: 200_000 },
+      session: scriptedSession([{ coarse: { type: "session-end", summary } }], summary),
+    };
+    const app = createTuiApp({ agent, terminal: new FakeTerminal(), cwd: process.cwd() });
+    await app.submit("normal prompt");
+    expect(app.isRunning()).toBe(false);
+    expect(strip(app.tui.render(80).join("\n"))).toContain("normal prompt"); // 普通提交照常工作
+  });
+
   it("auto-compaction feedback: the app's compaction listener renders a '✦ compacted N' line", async () => {
     let listener: ((n: number) => void) | undefined;
     const agent: TuiAgentLike = {

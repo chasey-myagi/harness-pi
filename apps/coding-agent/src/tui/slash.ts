@@ -23,8 +23,16 @@ export function parseSlashCommand(text: string): SlashCommand | null {
   }
 }
 
-/** /help 的命令清单文本。 */
-export const SLASH_HELP = [
-  "/compact  — turn on compaction for this session (summarize earlier messages; history kept)",
-  "/help     — show this help",
-].join("\n");
+/**
+ * 命令元数据（单一事实源）：既喂给 pi-tui Editor 的 autocomplete provider 做 `/` 实时补全，
+ * 又拼出 /help 文本。形状是 pi-tui `SlashCommand` 的结构子集（{name, description}），可直接传入。
+ */
+export const SLASH_COMMANDS: ReadonlyArray<{ name: string; description: string }> = [
+  { name: "compact", description: "turn on compaction for this session (summarize earlier messages; history kept)" },
+  { name: "help", description: "show available commands" },
+];
+
+/** /help 的命令清单文本（从 SLASH_COMMANDS 派生，避免两处漂移）。 */
+export const SLASH_HELP = SLASH_COMMANDS.map(
+  (c) => `/${c.name.padEnd(8)} — ${c.description}`,
+).join("\n");

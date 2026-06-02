@@ -122,7 +122,7 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
     }
 
     if (args.tui) {
-      const app = createTuiApp({ agent, terminal: new ProcessTerminal() });
+      const app = createTuiApp({ agent, terminal: new ProcessTerminal(), cwd: agent.cwd });
       await app.run(); // 直到用户 Ctrl-C 退出
       // 退出后告知 resume 句柄。落盘每 turn 用 appendFileSync（无 fsync）——进程崩溃可恢复，
       // 但断电/内核 panic 下最后一次写可能丢，故措辞为"process-crash recoverable"而非"saved"。
