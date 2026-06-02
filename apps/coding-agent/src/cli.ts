@@ -3,14 +3,20 @@
 import { createInterface } from "node:readline/promises";
 import { stdin as input, stdout as output } from "node:process";
 import { pathToFileURL } from "node:url";
+import { randomUUID } from "node:crypto";
+import { existsSync } from "node:fs";
+import { join, resolve } from "node:path";
 import {
   createCodingAgent,
+  resumeCodingAgent,
   resolveModelRuntime,
   resolveModelSpec,
   runAgentPrompt,
+  type CodingAgent,
 } from "./agent.js";
 import { renderRunReport, renderSessionEvent } from "./output.js";
 import { toolNames, type ToolName } from "@harness-pi/tools";
+import { JsonlSessionStore } from "@harness-pi/adapters";
 import { ProcessTerminal } from "@mariozechner/pi-tui";
 import { createTuiApp } from "./tui/app.js";
 
@@ -24,7 +30,21 @@ interface CliArgs {
   task?: string | undefined;
   tui: boolean;
   yolo: boolean;
+  resume?: string | undefined;
   help: boolean;
+}
+
+/** TUI 会话落盘文件路径:.harness-pi/sessions/<id>.jsonl（相对 cwd）。 */
+function sessionFilePath(cwd: string, sessionId: string): string {
+  return join(resolve(cwd), ".harness-pi", "sessions", `${sessionId}.jsonl`);
+}
+
+/** 该会话的 persistence 子对象（store + id 捆一起，对齐 createCodingAgent.persistence）。 */
+function persistenceFor(
+  cwd: string,
+  sessionId: string,
+): { store: JsonlSessionStore; sessionId: string } {
+  return { store: new JsonlSessionStore(sessionFilePath(cwd, sessionId)), sessionId };
 }
 
 export async function main(argv = process.argv.slice(2)): Promise<void> {
@@ -52,7 +72,31 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
   if (args.tui && !args.yolo) {
     createOptions.permission = {};
   }
-  const agent = createCodingAgent(createOptions);
+
+  // TUI 会话默认落盘到 .harness-pi/sessions/<id>.jsonl（崩溃后可 --resume 续跑）。
+  // resume：从给定 id 回放历史重建 session；新 TUI：随机 id 起新会话。one-shot/readline 不落盘。
+  let agent: CodingAgent;
+  let sessionId: string | undefined;
+  if (args.resume !== undefined) {
+    sessionId = args.resume;
+    // 提前挡 typo:resume 一个从没落过盘的 id 会静默开一个空会话（store 文件不存在→历史为空），
+    // 用户还会在退出时看到误导的"Session saved"。不存在就直接报错。
+    if (!existsSync(sessionFilePath(args.cwd, sessionId))) {
+      throw new Error(
+        `No saved session "${sessionId}" at ${sessionFilePath(args.cwd, sessionId)}`,
+      );
+    }
+    agent = await resumeCodingAgent({
+      ...createOptions,
+      persistence: persistenceFor(args.cwd, sessionId),
+    });
+  } else {
+    if (args.tui) {
+      sessionId = randomUUID();
+      createOptions.persistence = persistenceFor(args.cwd, sessionId);
+    }
+    agent = createCodingAgent(createOptions);
+  }
 
   try {
     if (!args.readOnly) {
@@ -72,6 +116,13 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
     if (args.tui) {
       const app = createTuiApp({ agent, terminal: new ProcessTerminal() });
       await app.run(); // 直到用户 Ctrl-C 退出
+      // 退出后告知 resume 句柄。落盘每 turn 用 appendFileSync（无 fsync）——进程崩溃可恢复，
+      // 但断电/内核 panic 下最后一次写可能丢，故措辞为"process-crash recoverable"而非"saved"。
+      if (sessionId) {
+        console.log(
+          `Session persisted (process-crash recoverable). Resume with: --resume ${sessionId}`,
+        );
+      }
       return;
     }
 
@@ -119,6 +170,11 @@ export function parseArgs(argv: string[]): CliArgs {
     }
     if (arg === "--yolo") {
       out.yolo = true;
+      continue;
+    }
+    if (arg === "--resume") {
+      out.resume = requireValue(argv, ++i, "--resume");
+      out.tui = true; // resume 是 TUI 崩溃续跑特性,隐含进 TUI。
       continue;
     }
     if (arg === "--disable") {
@@ -204,6 +260,9 @@ Options:
                             DashScope aliases: dashscope:qwen-plus, qwen:qwen-plus.
   --read-only              Use read/grep/find/ls only.
   --tui                    Launch the pi-tui interactive TUI (chat UI, streaming).
+                            Persists to .harness-pi/sessions/<id>.jsonl for crash recovery.
+  --resume <id>            Resume a saved session by id. Launches the TUI unless a
+                            one-shot task is also given (then it continues that session headless).
   --yolo                   (TUI) skip tool approval prompts — allow bash/write/edit without asking.
   --disable <a,b>          Disable named first-party tools.
   --log-dir <path>         Session log dir. Defaults to .harness-pi/logs.

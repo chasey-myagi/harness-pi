@@ -7,6 +7,7 @@ import {
   type Model,
   type RunSummary,
   type SessionEvent,
+  type SessionStore,
   type ToolCall,
   type Usage,
 } from "@harness-pi/core";
@@ -65,6 +66,14 @@ export interface CreateCodingAgentOptions {
    * `setApprovalHandler` 注入真正的"问人"实现（TUI 弹窗）。`--yolo` 等价于不给本项。
    */
   permission?: { rules?: PermissionRule[]; timeoutMs?: number };
+  /**
+   * 会话持久化：给了即每个 turn 把新 messages append 进 store，崩溃后可用
+   * `resumeCodingAgent`（同一 store + sessionId）续跑。
+   *
+   * store 与 sessionId **故意捆成一个子对象**：sessionId 既给落盘文件命名、又是日后 resume 的唯一句柄；
+   * 二者拆开会出现"落了盘却拿不到 id（内核随机生成）从而无法 resume"的死角——合成子对象让这种非法状态不可表达。
+   */
+  persistence?: { store: SessionStore; sessionId: string };
 }
 
 export interface CodingAgent {
@@ -194,7 +203,28 @@ export function createPiAiCostModel(
   };
 }
 
-export function createCodingAgent(opts: CreateCodingAgentOptions): CodingAgent {
+/**
+ * 共享上下文：把 createCodingAgent / resumeCodingAgent 都要的 tools + hooks + deps + 装配闭包抽出来，
+ * 这样"新建 session"和"从 store resume session"复用同一套 tools/hooks/accessor 闭包，只是 session 来源不同。
+ */
+interface AgentContext {
+  /**
+   * 喂给 `new AgentSession(...)` 或 `AgentSession.resume(...,deps)` 的构造参数。Omit 掉的四个键里
+   * store/sessionId 由各入口自己补；initialMessages/resumedMessageCount 是 resume 内部独占（见
+   * session.ts:996）——把它们一并 Omit 掉，编译器就能挡住"buildAgentContext 误塞 initialMessages 却被
+   * resume 静默覆盖"这种隐患（与 `AgentSession.resume` 的 opts 形状精确对齐）。
+   */
+  deps: Omit<
+    ConstructorParameters<typeof AgentSession>[0],
+    "store" | "sessionId" | "initialMessages" | "resumedMessageCount"
+  >;
+  tools: HarnessTool[];
+  /** 用一个已就绪的 session（新建或 resume 来的）装配出对外的 CodingAgent。**只能调一次**：闭包里的
+   *  lastCostStats/approvalHandler 等是单会话可变状态，调两次会让两个 CodingAgent 共享同一份状态。 */
+  assemble(session: AgentSession): CodingAgent;
+}
+
+function buildAgentContext(opts: CreateCodingAgentOptions): AgentContext {
   const cwd = resolve(opts.cwd);
   const readOnly = opts.readOnly ?? false;
   const toolModeOptions: {
@@ -266,50 +296,86 @@ export function createCodingAgent(opts: CreateCodingAgentOptions): CodingAgent {
       : []),
   ];
 
-  const sessionOptions: ConstructorParameters<typeof AgentSession>[0] = {
+  const deps: AgentContext["deps"] = {
     model: opts.model,
     tools,
     hooks,
     systemPrompt: opts.systemPrompt ?? DEFAULT_SYSTEM_PROMPT,
   };
-  if (opts.maxTurns !== undefined) sessionOptions.maxTurns = opts.maxTurns;
-  if (opts.llmOptions !== undefined) sessionOptions.llmOptions = opts.llmOptions;
-  const session = new AgentSession(sessionOptions);
+  if (opts.maxTurns !== undefined) deps.maxTurns = opts.maxTurns;
+  if (opts.llmOptions !== undefined) deps.llmOptions = opts.llmOptions;
 
   return {
-    session,
+    deps,
     tools,
-    cwd,
-    model: opts.model,
-    costKnown,
-    warnings,
-    readOnly,
-    logPath: join(logDir, `${session.id}.ndjson`),
-    metricsPath: opts.metricsFile,
-    metricsSink,
-    async close() {
-      await closeSink(metricsSink);
-    },
-    getCostEstimate() {
-      if (dashScopeCost) return dashScopeCost.getEstimate();
-      const stats = lastCostStats;
-      if (!costKnown || !stats) return undefined;
+    assemble(session) {
       return {
-        amount: stats.costUSD,
-        currency: "USD",
-        source: "pi-ai model cost table",
+        session,
+        tools,
+        cwd,
+        model: opts.model,
+        costKnown,
+        warnings,
+        readOnly,
+        logPath: join(logDir, `${session.id}.ndjson`),
+        metricsPath: opts.metricsFile,
+        metricsSink,
+        async close() {
+          await closeSink(metricsSink);
+        },
+        getCostEstimate() {
+          if (dashScopeCost) return dashScopeCost.getEstimate();
+          const stats = lastCostStats;
+          if (!costKnown || !stats) return undefined;
+          return {
+            amount: stats.costUSD,
+            currency: "USD",
+            source: "pi-ai model cost table",
+          };
+        },
+        getCostStats() {
+          return lastCostStats;
+        },
+        getToolStats() {
+          return lastToolStats;
+        },
+        setApprovalHandler(handler) {
+          approvalHandler = handler;
+        },
       };
     },
-    getCostStats() {
-      return lastCostStats;
-    },
-    getToolStats() {
-      return lastToolStats;
-    },
-    setApprovalHandler(handler) {
-      approvalHandler = handler;
-    },
   };
+}
+
+/**
+ * 新建一个 coding agent。给了 `persistence` 即每个 turn 落盘，崩溃后可用 `resumeCodingAgent` 续跑。
+ */
+export function createCodingAgent(opts: CreateCodingAgentOptions): CodingAgent {
+  const ctx = buildAgentContext(opts);
+  const sessionOptions: ConstructorParameters<typeof AgentSession>[0] = {
+    ...ctx.deps,
+  };
+  if (opts.persistence) {
+    sessionOptions.store = opts.persistence.store;
+    sessionOptions.sessionId = opts.persistence.sessionId;
+  }
+  return ctx.assemble(new AgentSession(sessionOptions));
+}
+
+/**
+ * 从 store 的落盘历史 resume 一个 coding agent：复用同一套 tools/hooks/deps，
+ * 经 `AgentSession.resume` 重建对话历史后装配出 CodingAgent，可直接续跑。
+ * `persistence` 在此为必填（resume 必须知道从哪个 store、哪个 sessionId 回放）。
+ */
+export async function resumeCodingAgent(
+  opts: CreateCodingAgentOptions & {
+    persistence: { store: SessionStore; sessionId: string };
+  },
+): Promise<CodingAgent> {
+  const ctx = buildAgentContext(opts);
+  const { store, sessionId } = opts.persistence;
+  const session = await AgentSession.resume(store, sessionId, ctx.deps);
+  return ctx.assemble(session);
 }
 
 export async function runAgentPrompt(
