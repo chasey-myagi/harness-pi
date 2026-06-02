@@ -280,13 +280,13 @@ roadmap 已列 `sideQuestion` controller + `subAgent` tool factory。给 Hybrid 
 
 ## 7. 风险与开放问题
 
-1. **pi-ai 0.53.1 SDK 边界**：Event Bus（#1）依赖 pi-ai 的 stream 能力 + cache header；compaction cache-aware（#4.2）依赖 pi-ai cache 集成。
+1. **pi-ai SDK 边界**（核验于 0.53.1，随后升级至 **0.73.1** 并复验：类型/全量测试/真 Qwen 行为均一致、零改动）：Event Bus（#1）依赖 pi-ai 的 stream 能力 + cache header；compaction cache-aware（#4.2）依赖 pi-ai cache 集成。
 
-   **✅ 已核验（2026-06，静态读 pi-ai 0.53.1 类型 + 真实 DashScope/Qwen 探针）：**
+   **✅ 已核验（2026-06，静态读 pi-ai 类型 + 真实 DashScope/Qwen 探针，0.53.1 与 0.73.1 两版一致）：**
    - **stream 事件（#1）**：pi-ai 暴露 `start / text_start / text_delta / text_end / thinking_* / toolcall_* / done / error` 全套（`types.d.ts` 的 `AssistantMessageEvent`）；真实 qwen-turbo 流式实测发出 `start,text_start,text_delta,text_end,done`——内核 LiveEvent 的 delta 轨假设成立。
    - **error 不 sync throw（#6 命脉）**：真实 DashScope 坏请求（404）**不抛异常**，而是 resolve 成 `stopReason:"error"` + `errorMessage` 的 AssistantMessage（探针 `threwSync:false`）。内核「stopReason==='error' 时按 errorMessage 文案分类 overflow」的设计对得上真实 provider 形状。`StopReason` 含 `"length"`（截断＝无歧义 overflow）✅。
    - **usage / cache（#2/#11/#10）**：`Usage` 含 `input/output/cacheRead/cacheWrite/totalTokens/cost{}`；真实 Qwen 流式**确实返回 usage token 数**（`supportsUsageInStreaming` 成立）。`StreamOptions.cacheRetention:"none"|"short"|"long"` + `sessionId` 是 cache-aware（#10）可用的旋钮。（cost 由 `Model.cost` 驱动，DashScope 适配器另算 CNY，符合现状。）
-   - **overflow 检测归属（影响 #6）⚠️**：pi-ai 0.53.1 **自带** `isContextOverflow(message, contextWindow?)` + `getOverflowPatterns()`（`utils/overflow.js`，含维护好的 OVERFLOW_PATTERNS + 「silent overflow＝usage.input>contextWindow」检测）。内核 `defaultIsContextOverflow` 目前是**平行另写**的一套 patterns，二者**会漂移**：内核**有** Qwen 的 `"range of input length"` 而 pi-ai **没有**（pi-ai 的可靠列表不含 DashScope/Qwen）；pi-ai 则多了 silent-overflow + 更多 provider。**建议（待 follow-up，属行为变更需单独走门）**：内核改为「组合 pi-ai 的 `getOverflowPatterns()` + 内核的 Qwen 补充」或直接委托 pi-ai 的 `isContextOverflow`，以继承上游维护与 silent-overflow，同时不丢 Qwen 覆盖。
+   - **overflow 检测归属（影响 #6）✅ 已收口**：pi-ai 自带 `isContextOverflow(message, contextWindow?)` + `getOverflowPatterns()`（`utils/overflow.js`，含维护好的 OVERFLOW_PATTERNS + NON_OVERFLOW 排除 + 「silent overflow＝usage.input>contextWindow」检测）。原先内核 `defaultIsContextOverflow` 平行另写一套 patterns、会漂移。**follow-up 已落地**（同时把 pi-ai 升到 0.73.1）：`defaultIsContextOverflow` 改为**委托 pi-ai 的 `isContextOverflow`**（把 errorMessage 包成最小 `stopReason:"error"` 消息传入）+ OR 上内核对 Qwen 的补充（pi-ai 列表仍缺 `"range of input length"`）——升级 pi-ai 即自动跟进其 OVERFLOW/NON_OVERFLOW 两份列表，不再漂移。委托而非仅取 `getOverflowPatterns()` 是关键：拿回 NON_OVERFLOW 排除，否则兜底 pattern `/too many tokens/i` 会把 Bedrock 限流误判成 overflow。silent-overflow（usage 路）不在本函数职责内——内核另由 `stopReason==="length"` 直判。
 
    **残留（未验，成本所限）**：Qwen **真实** overflow 文案未实跑触发（需送 >1M token）。内核已据文档预置 `"range of input length"` 应对；待 bidding 首次真撞 Qwen overflow 时确认文案命中（或按上面建议委托 pi-ai）。
 2. **resume 与 compaction 边界的交互**（#4 × #6）：resume 重放必须跳过被 summary 替换的前缀，否则重发被压缩内容。这是四大 harness 的共识难点，要专门测。
