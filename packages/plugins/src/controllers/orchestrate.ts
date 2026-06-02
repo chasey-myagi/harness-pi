@@ -105,3 +105,105 @@ export async function parallel<I, R>(
   await Promise.all(Array.from({ length: concurrency }, () => worker()));
   return outcomes;
 }
+
+/**
+ * `pipeline()` —— 多阶段版的 `parallel()`：每个 item **独立**流过一串有序 `stages`，**stage 之间无 barrier**
+ * （item A 可以已经在 stage 2，而 item B 还在 stage 0）。并发上限管的是「同时在管线里的 item 数」，不是
+ * 每个 stage 的并发。每个 item 仍**必返回一个 typed outcome**（ok / failed / skipped），失败时额外记下
+ * **是哪个 stage 抛的**（`stage`，0-based）。budget / signal / onProgress / 有序 outcomes 语义与 `parallel()`
+ * **完全一致**——本函数就是搭在 `parallel()` 上的（per-item「跑完所有 stage」当作 parallel 的一个 run），
+ * 复用它全部已测的并发 / 派发阈值 / abort / 进度逻辑，只在外面补一层 stage 归因。
+ *
+ * 对应 docs/09 §4.1 的「benchmark 5 阶段固定 pipeline」这类多段流水：parse→answer→score→diff→report。
+ * （单题 L0→L1→L2 cascade 是 **AgentSession 回合循环内**的 ReAct，不是本原语的用法——别拿 pipeline 去套。）
+ *
+ * 语义要点：
+ *  - **第一个 stage 的 `prev` 是 item 本身**；之后每个 stage 的 `prev` 是上一个 stage 的返回值；终值 = 最后一个
+ *    stage 的返回值（空 `stages` ⇒ identity，value === item）。`prev` 类型是 `unknown`，stage 作者按管线
+ *    顺序自行收窄（这是动态原语的代价，换来不靠脆弱的变长元组类型推导）。
+ *  - **某个 stage 抛错** ⇒ 该 item `failed`、`error` 原样保留、`stage` = 抛错的 stage 下标，**其余 stage 不再跑**；
+ *    不影响其它 item。
+ *  - **abort 只挡新 item 派发**：已经进了管线的 item 会**跑完它剩下的所有 stage**（无中途取消，避免半截产物）；
+ *    stage 想响应 abort 自己 close over signal。pre-aborted ⇒ 全部 `skipped:"aborted"`，一个 stage 都不跑。
+ *  - **budget 是派发阈值**（同 `parallel()`）：`cost(终值, item)` 累加，达 `total` 后未派发的 `skipped:"budget"`；
+ *    失败的 item 不计费（没产生终值）。高并发下超支上限 ≈ 在跑的并发数（见 `parallel()` 注释）。
+ */
+export type PipelineStage<I> = (
+  prev: unknown,
+  item: I,
+  index: number,
+) => Promise<unknown>;
+
+export type PipelineOutcome<I, R> =
+  | { item: I; index: number; status: "ok"; value: R }
+  | { item: I; index: number; status: "failed"; error: unknown; stage: number }
+  | { item: I; index: number; status: "skipped"; reason: "budget" | "aborted" };
+
+export interface PipelineOptions<I, R> {
+  /** 最大并发（同时在管线里的 item 数，默认 1）。会被夹到 [1, items.length]。 */
+  concurrency?: number;
+  /** abort 后停止派发新 item；已进管线的 item 跑完剩余 stage，未派发的 settle 成 `skipped:"aborted"`。 */
+  signal?: AbortSignal;
+  /** 预算：`cost(终值, item)` 折算每个**成功**结果的花费累加，达 `total` 后停止派发（派发阈值，非硬上限）。 */
+  budget?: { total: number; cost: (value: R, item: I) => number };
+  /** 每个 item settle 后回调一次（done/total/已花费）。listener 抛错不影响编排。 */
+  onProgress?: (p: { done: number; total: number; spent: number }) => void;
+}
+
+/** 内部载体：把「哪个 stage 抛的」穿过 `parallel()` 的 catch（parallel 只给 error，拿不到 stage）。 */
+class StageError {
+  constructor(
+    readonly stage: number,
+    readonly cause: unknown,
+  ) {}
+}
+
+/**
+ * 跑完 `items`，每个 item 串行流过 `stages`，返回与输入**等长、按 index 有序**的 outcomes。
+ * 保证：每个 item 恰好一个 outcome，永不静默丢失。
+ */
+export async function pipeline<I, R = unknown>(
+  items: readonly I[],
+  stages: ReadonlyArray<PipelineStage<I>>,
+  opts: PipelineOptions<I, R> = {},
+): Promise<Array<PipelineOutcome<I, R>>> {
+  // run = per-item「串行跑完所有 stage」。其余字段透传给 parallel；exactOptionalPropertyTypes 下
+  // 只在定义时挂上去（不能把 undefined 显式塞进可选字段）。
+  const parallelOpts: ParallelOptions<I, R> = {
+    run: async (item, index) => {
+      let prev: unknown = item; // 第一个 stage 的 prev 即 item；空 stages ⇒ 终值 = item（identity）
+      for (let s = 0; s < stages.length; s++) {
+        try {
+          prev = await stages[s]!(prev, item, index);
+        } catch (cause) {
+          throw new StageError(s, cause); // 携带 stage 下标穿过 parallel 的 catch
+        }
+      }
+      return prev as R;
+    },
+  };
+  if (opts.concurrency !== undefined) parallelOpts.concurrency = opts.concurrency;
+  if (opts.signal !== undefined) parallelOpts.signal = opts.signal;
+  if (opts.budget !== undefined) parallelOpts.budget = opts.budget;
+  if (opts.onProgress !== undefined) parallelOpts.onProgress = opts.onProgress;
+
+  const outcomes = await parallel<I, R>(items, parallelOpts);
+
+  return outcomes.map((o): PipelineOutcome<I, R> => {
+    if (o.status === "failed") {
+      const e = o.error;
+      // run() 只该抛 StageError（整个 run body 就是被包住的 stage 循环）。这行 instanceof 把该不变量
+      // 从「靠注释维持」升级成「靠代码强制」并让 TS 收窄类型：未来若有人往 run body 加了会抛别的东西
+      // 的代码，宁可在此大声抛出（暴露 pipeline 内部 bug），也绝不静默产出 stage=undefined 的坏 outcome。
+      if (!(e instanceof StageError)) throw e;
+      return {
+        item: o.item,
+        index: o.index,
+        status: "failed",
+        error: e.cause,
+        stage: e.stage,
+      };
+    }
+    return o; // ok / skipped 的形状与 PipelineOutcome 完全一致，原样透传
+  });
+}

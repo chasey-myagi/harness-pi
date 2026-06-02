@@ -27,8 +27,14 @@ export type {
   ForkResult,
 } from "./fork-session.js";
 
-export { parallel } from "./orchestrate.js";
-export type { ItemOutcome, ParallelOptions } from "./orchestrate.js";
+export { parallel, pipeline } from "./orchestrate.js";
+export type {
+  ItemOutcome,
+  ParallelOptions,
+  PipelineStage,
+  PipelineOutcome,
+  PipelineOptions,
+} from "./orchestrate.js";
 
 export {
   compactOnOverflow,
