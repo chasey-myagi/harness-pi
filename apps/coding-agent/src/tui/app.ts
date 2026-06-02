@@ -16,8 +16,6 @@ import {
   Markdown,
   matchesKey,
   type Component,
-  SelectList,
-  type SelectItem,
   type Terminal,
   Text,
   TUI,
@@ -30,7 +28,7 @@ import { routeSubmit } from "./submit-router.js";
 import { parseSlashCommand, SLASH_COMMANDS, SLASH_HELP, type SlashCommand } from "./slash.js";
 import { formatMultiSummary, orchestrateMulti, parseMultiCommand, subTaskFor } from "./multi.js";
 import { createAutocompleteProvider } from "./autocomplete.js";
-import { color, editorTheme, markdownTheme, selectListTheme } from "./theme.js";
+import { color, editorTheme, markdownTheme } from "./theme.js";
 
 const LIVE_TYPES: ReadonlyArray<LiveEvent["type"]> = [
   "message_start",
@@ -132,6 +130,8 @@ export function createTuiApp(opts: TuiAppOptions): TuiApp {
   let running = false;
   // 正在跑的 /multi 编排的 abort（Esc 时取消整批）。
   let multiAbort: AbortController | undefined;
+  // 进行中的 tool 审批：输入监听据此把 y/n/Enter/Esc 当审批答复（而非普通输入/中断）。
+  let pendingApproval: { resolve: (allowed: boolean) => void } | undefined;
   // 最近一次 LLM 调用的 input tokens ≈ 当前上下文大小（含整段历史）。状态栏 ctx-gauge 用它——
   // 不能用 summary.usage.input，那是内核跨所有 assistant 消息累加的总量，多轮会高估数倍、虚报红色。
   let lastInputTokens: number | undefined;
@@ -283,28 +283,34 @@ export function createTuiApp(opts: TuiAppOptions): TuiApp {
   }
 
   /**
-   * tool 审批弹窗：返回 true=allow once / false=deny。permissionGate.onAsk 经 setApprovalHandler 委托到它。
-   * 单弹窗不叠的不变量：当前唯三走 ask 的工具（bash/write/edit）都 isConcurrencySafe:false、被内核串行执行，
-   * 故 onAsk 一次只来一个；若将来给某个 concurrency-safe 工具配 ask 规则，需在此加串行队列防叠窗抢焦点。
+   * tool 审批：**行内**提示（不是 overlay）。permissionGate.onAsk 经 setApprovalHandler 委托到它。
+   *
+   * 为什么行内而非 center overlay：本 TUI 是 inline scrollback 渲染（非备用屏），center overlay 在真实
+   * 终端、长历史下定位脆弱（headless FakeTerminal 测不出）。行内提示就是一条普通 append 消息——必然渲染，
+   * 且按键经 matchesKey 走输入监听（Kitty 协议安全）。返回 true=allow once / false=deny。
+   *
+   * 串行不变量：当前唯三走 ask 的工具（bash/write/edit）都 isConcurrencySafe:false、被内核串行执行，
+   * 故 onAsk 一次只来一个，pendingApproval 不会被并发覆盖。
    */
   function requestApproval(call: ToolCall): Promise<boolean> {
     return new Promise<boolean>((resolve) => {
-      const items: SelectItem[] = [
-        { value: "allow", label: `Allow once · ${call.name}`, description: formatToolCall(call) },
-        { value: "deny", label: "Deny", description: "block this tool call" },
-      ];
-      const list = new SelectList(items, 6, selectListTheme);
-      const handle = tui.showOverlay(list, { anchor: "center", width: "70%" });
-      const settle = (allowed: boolean): void => {
-        handle.hide();
-        tui.setFocus(editor);
-        resolve(allowed);
-        tui.requestRender();
-      };
-      list.onSelect = (item: SelectItem): void => settle(item.value === "allow");
-      list.onCancel = (): void => settle(false); // Esc = deny（安全默认）——否则审批 Promise 会挂到 600s 超时
+      pendingApproval = { resolve };
+      append(new Text(color.yellow(`⚠ Approve tool call?  ${formatToolCall(call)}`), 0, 0));
+      append(new Text(color.dim("  [y] allow once   ·   [n] deny   (Enter = allow, Esc = deny)"), 0, 0));
+      status.setMessage("waiting for approval…");
       tui.requestRender();
     });
+  }
+
+  /** 落定一次审批：清状态、渲一行结果、resolve onAsk 的 Promise。 */
+  function resolveApproval(allowed: boolean): void {
+    const p = pendingApproval;
+    if (!p) return;
+    pendingApproval = undefined;
+    append(new Text(color.dim(`  → ${allowed ? "allowed" : "denied"}`), 0, 0));
+    status.setMessage(running ? "thinking…" : "");
+    tui.requestRender();
+    p.resolve(allowed);
   }
 
   /** `/multi <指令> @file…`：对 work-list 做只读子代理有界并行扇出，聚合回灌。 */
@@ -516,12 +522,21 @@ export function createTuiApp(opts: TuiAppOptions): TuiApp {
         quit();
         return { consume: true };
       }
+      // 审批进行中：y/Enter=allow，n/Esc=deny；其余键吞掉（别漏进输入框）。优先于 Esc-中断分支。
+      if (pendingApproval) {
+        if (matchesKey(data, "escape") || data === "n" || data === "N") {
+          resolveApproval(false);
+        } else if (matchesKey(data, "enter") || data === "y" || data === "Y") {
+          resolveApproval(true);
+        }
+        return { consume: true };
+      }
       // Ctrl-D：输入框为空时作为第二退出路径（防 Ctrl-C 在某些终端被吞）。
       if (matchesKey(data, "ctrl+d") && editor.getText().length === 0) {
         quit();
         return { consume: true };
       }
-      if (matchesKey(data, "escape") && running && !tui.hasOverlay()) {
+      if (matchesKey(data, "escape") && running) {
         // 裸 Esc 且正在跑、且无 overlay。先让输入框关掉打开的补全下拉，不抢它的 Esc。
         if (editor.isShowingAutocomplete()) return undefined;
         // /multi 在跑则取消整批；否则中断在飞的 LLM run。

@@ -271,7 +271,7 @@ describe("TUI app smoke (headless, dual-track via fake terminal)", () => {
     expect(app.isRunning()).toBe(false);
   });
 
-  it("approval overlay: onAsk shows a SelectList; selecting Allow resolves true and closes it", async () => {
+  it("approval (inline): onAsk renders a visible prompt; Enter allows → resolves true", async () => {
     let captured: ((call: ToolCall) => Promise<boolean>) | undefined;
     const agent: TuiAgentLike = {
       model: { id: "qwen-turbo" },
@@ -285,16 +285,18 @@ describe("TUI app smoke (headless, dual-track via fake terminal)", () => {
     app.start(); // 经 setApprovalHandler 注入 requestApproval
 
     const decision = captured!({ type: "toolCall", id: "1", name: "bash", arguments: { command: "ls" } });
-    expect(app.tui.hasOverlay()).toBe(true); // 弹窗已起（capturing overlay）
-    // 注：overlay 内容在 TUI 私有 doRender 里合成、公共 render() 读不到，故只断行为不断文本。
+    // 行内提示在公共 render 里可见（不像旧 overlay 只能断布尔）。
+    const out = strip(app.tui.render(80).join("\n"));
+    expect(out).toContain("Approve tool call");
+    expect(out).toContain("bash(command: ls)");
 
-    term.feed("\r"); // Enter → 选中第一项 "Allow once"
+    term.feed("\r"); // Enter → allow once
     await expect(decision).resolves.toBe(true);
-    expect(app.tui.hasOverlay()).toBe(false); // 选完关闭
+    expect(strip(app.tui.render(80).join("\n"))).toContain("allowed");
     app.stop();
   });
 
-  it("approval overlay: Esc cancels as deny (resolves false, closes)", async () => {
+  it("approval (inline): Esc denies → resolves false", async () => {
     let captured: ((call: ToolCall) => Promise<boolean>) | undefined;
     const agent: TuiAgentLike = {
       model: { id: "qwen-turbo" },
@@ -308,11 +310,34 @@ describe("TUI app smoke (headless, dual-track via fake terminal)", () => {
     app.start();
 
     const decision = captured!({ type: "toolCall", id: "1", name: "bash", arguments: { command: "rm -rf x" } });
-    expect(app.tui.hasOverlay()).toBe(true);
+    expect(strip(app.tui.render(80).join("\n"))).toContain("Approve tool call");
 
-    term.feed("\x1b"); // Esc → SelectList.onCancel → deny（overlay 在，app 的 Esc 守卫不触发，转发给 overlay）
+    term.feed("\x1b"); // Esc → deny（审批进行中,输入监听优先把 Esc 当"拒绝"而非中断）
     await expect(decision).resolves.toBe(false);
-    expect(app.tui.hasOverlay()).toBe(false);
+    expect(strip(app.tui.render(80).join("\n"))).toContain("denied");
+    app.stop();
+  });
+
+  it("approval (inline): 'n' denies, 'y' allows", async () => {
+    let captured: ((call: ToolCall) => Promise<boolean>) | undefined;
+    const agent: TuiAgentLike = {
+      model: { id: "qwen-turbo" },
+      session: scriptedSession([{ coarse: { type: "session-end", summary } }], summary),
+      setApprovalHandler: (h) => {
+        captured = h;
+      },
+    };
+    const term = new FakeTerminal();
+    const app = createTuiApp({ agent, terminal: term });
+    app.start();
+
+    const denied = captured!({ type: "toolCall", id: "1", name: "bash", arguments: { command: "ls" } });
+    term.feed("n");
+    await expect(denied).resolves.toBe(false);
+
+    const allowed = captured!({ type: "toolCall", id: "2", name: "bash", arguments: { command: "ls" } });
+    term.feed("y");
+    await expect(allowed).resolves.toBe(true);
     app.stop();
   });
 
