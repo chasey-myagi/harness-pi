@@ -17,6 +17,11 @@ describe("parseSlashCommand", () => {
     expect(parseSlashCommand("/help")).toEqual({ kind: "help" });
   });
 
+  it("parses /exit and /quit to exit", () => {
+    expect(parseSlashCommand("/exit")).toEqual({ kind: "exit" });
+    expect(parseSlashCommand("/quit")).toEqual({ kind: "exit" });
+  });
+
   it("reports unknown slash commands by name", () => {
     expect(parseSlashCommand("/bogus")).toEqual({ kind: "unknown", name: "bogus" });
   });

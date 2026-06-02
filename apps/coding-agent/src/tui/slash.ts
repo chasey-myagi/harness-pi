@@ -7,6 +7,7 @@ export type SlashCommand =
   | { kind: "compact" }
   | { kind: "help" }
   | { kind: "multi"; rest: string }
+  | { kind: "exit" }
   | { kind: "unknown"; name: string };
 
 /** 解析一条斜杠命令；非斜杠输入（不以 `/` 开头）返回 null —— 交回普通 submit 流程。 */
@@ -22,6 +23,9 @@ export function parseSlashCommand(text: string): SlashCommand | null {
     case "multi":
       // 余下的整串（指令 + @文件）交给 parseMultiCommand 进一步解析。
       return { kind: "multi", rest: trimmed.slice(1 + name.length).trim() };
+    case "exit":
+    case "quit":
+      return { kind: "exit" };
     default:
       return { kind: "unknown", name };
   }
@@ -43,6 +47,7 @@ export const SLASH_COMMANDS: ReadonlyArray<{
     argumentHint: "<question/analysis> @file @file …",
   },
   { name: "help", description: "show available commands" },
+  { name: "exit", description: "quit the TUI (or press Ctrl-C)" },
 ];
 
 /** /help 的命令清单文本（从 SLASH_COMMANDS 派生，避免两处漂移）。 */

@@ -15,6 +15,7 @@ import {
   Editor,
   Loader,
   Markdown,
+  matchesKey,
   type Component,
   SelectList,
   type SelectItem,
@@ -77,6 +78,8 @@ export interface TuiAppOptions {
   terminal: Terminal;
   /** 工作目录；给了则启用输入框的 `/` 命令补全 + `@` 文件路径补全（基于此目录）。 */
   cwd?: string;
+  /** resume 时的历史消息：启动时渲进消息区，让用户看到之前的对话（否则 resume 进来是空白屏）。 */
+  initialMessages?: Message[];
   /**
    * 跑一个**只读 bounded 子代理**执行一条子任务（供 `/multi` 扇出用）。由 CLI 注入（造一个
    * readOnly + 限轮的 createCodingAgent 跑完即弃）。没给则 `/multi` 不可用。
@@ -109,6 +112,7 @@ export function createTuiApp(opts: TuiAppOptions): TuiApp {
   const tui = new TUI(opts.terminal);
   const messages = new Container();
   const status = new Loader(tui, color.cyan, color.dim, "");
+  status.stop(); // Loader 构造即开始动画；空闲时停掉，避免启动后 ~12fps 空转 churn（run 时再 start）。
   const editor = new Editor(tui, editorTheme, {});
   const statusBar = new Text("");
 
@@ -129,9 +133,16 @@ export function createTuiApp(opts: TuiAppOptions): TuiApp {
   let running = false;
   // 正在跑的 /multi 编排的 abort（Esc 时取消整批）。
   let multiAbort: AbortController | undefined;
+  // 最近一次 LLM 调用的 input tokens ≈ 当前上下文大小（含整段历史）。状态栏 ctx-gauge 用它——
+  // 不能用 summary.usage.input，那是内核跨所有 assistant 消息累加的总量，多轮会高估数倍、虚报红色。
+  let lastInputTokens: number | undefined;
   const stats: StatsView = {};
   // 当前正在流式的助手组件（懒创建：谁先流先 append → thinking 在答案上方）。
   let current: { assistant?: Markdown; thinking?: Text } = {};
+  // resume：把重建的历史渲进消息区（否则进来是空白屏）；seedHistory 也据此初始化 ctx-gauge。
+  if (opts.initialMessages && opts.initialMessages.length > 0) {
+    seedHistory(opts.initialMessages);
+  }
   renderStatusBar();
 
   function renderStatusBar(state?: string): void {
@@ -141,8 +152,8 @@ export function createTuiApp(opts: TuiAppOptions): TuiApp {
         model: opts.agent.model.id,
         input: stats.input,
         output: stats.output,
-        // 上下文占用：用最近一次 LLM 调用的 input tokens 近似当前上下文大小（含整段历史）。
-        contextTokens: stats.input,
+        // 上下文占用：用最近一次 LLM 调用的 input tokens（≈当前上下文），不是累加总量。
+        contextTokens: lastInputTokens,
         contextWindow: opts.agent.model.contextWindow,
         costText: stats.costText,
         toolCalls: toolStats?.totalCalls,
@@ -154,6 +165,37 @@ export function createTuiApp(opts: TuiAppOptions): TuiApp {
 
   function append(c: Component): void {
     messages.addChild(c);
+  }
+
+  /** 取一条消息的纯文本（content 可能是 string 或 block 数组）。 */
+  function textOfContent(content: Message["content"]): string {
+    if (typeof content === "string") return content;
+    return content
+      .map((b) => ("text" in b && typeof b.text === "string" ? b.text : ""))
+      .join("");
+  }
+
+  /** resume：把历史消息渲成气泡（user/assistant 文本 + 工具调用摘要），并标一行"已恢复 N 条"。 */
+  function seedHistory(msgs: Message[]): void {
+    for (const m of msgs) {
+      if (m.role === "user") {
+        const t = textOfContent(m.content).trim();
+        if (t.length > 0) append(new Text(`${color.cyan("›")} ${t}`, 0, 0));
+      } else if (m.role === "assistant") {
+        const t = textOfContent(m.content).trim();
+        if (t.length > 0) append(new Markdown(t, 0, 0, markdownTheme));
+        const calls = Array.isArray(m.content)
+          ? m.content.filter((b): b is ToolCall => b.type === "toolCall")
+          : [];
+        if (calls.length > 0) append(new Text(formatToolCalls(calls), 0, 0));
+        // 用历史里最后一条 assistant 的 input usage 初始化 ctx-gauge，让 resume 进来就有读数。
+        if (m.usage?.input !== undefined) lastInputTokens = m.usage.input;
+      }
+      // toolResult 等：跳过逐条重渲（可能很大）；下面的 banner 已说明历史已恢复。
+    }
+    append(
+      new Text(color.dim(`↻ resumed ${msgs.length} earlier messages — context restored`), 0, 0),
+    );
   }
 
   function applyAction(a: TuiAction): void {
@@ -367,6 +409,9 @@ export function createTuiApp(opts: TuiAppOptions): TuiApp {
       case "help":
         append(new Text(SLASH_HELP, 0, 0));
         break;
+      case "exit":
+        quit();
+        return;
       case "unknown":
         append(new Text(color.red(`unknown command: /${cmd.name} (try /help)`), 0, 0));
         break;
@@ -417,6 +462,8 @@ export function createTuiApp(opts: TuiAppOptions): TuiApp {
     try {
       const stream = opts.agent.session.runStreaming(route.text);
       for await (const ev of stream) {
+        // 记录最近一次 LLM 调用的 input tokens（≈当前上下文大小），喂状态栏 ctx-gauge。
+        if (ev.type === "llm-end") lastInputTokens = ev.msg.usage?.input ?? lastInputTokens;
         // suppressAssistant：assistant + toolCalls 已由 fine 轨渲染，coarse llm-end 不再重复。
         for (const a of coarseEventToActions(ev, { suppressAssistant: true })) applyAction(a);
         tui.requestRender();
@@ -457,13 +504,22 @@ export function createTuiApp(opts: TuiAppOptions): TuiApp {
       void submit(value);
     };
     tui.addInputListener((data: string) => {
-      if (data === "\x03") {
+      // 用 matchesKey 而非裸字节比较：ProcessTerminal 开了 Kitty 键盘协议（ghostty/kitty/WezTerm…），
+      // Esc 会变成 \x1b[27u、Ctrl-C 变成 \x1b[99;5u，裸字节 === "\x1b"/"\x03" 根本不匹配——
+      // 那样 Esc 中断失效、且 Ctrl-C（唯一退出路径）失灵会把用户困住。
+      if (matchesKey(data, "ctrl+c")) {
         // Ctrl-C：退出（先 abort 在飞 session 防泄漏）。consume 防止泄漏给父 shell。
         quit();
         return { consume: true };
       }
-      if (data === "\x1b" && running && !tui.hasOverlay()) {
-        // 裸 Esc 且正在跑、且无 overlay：中断当前 run（不退出）。有 overlay 时 Esc 交给 overlay。
+      // Ctrl-D：输入框为空时作为第二退出路径（防 Ctrl-C 在某些终端被吞）。
+      if (matchesKey(data, "ctrl+d") && editor.getText().length === 0) {
+        quit();
+        return { consume: true };
+      }
+      if (matchesKey(data, "escape") && running && !tui.hasOverlay()) {
+        // 裸 Esc 且正在跑、且无 overlay。先让输入框关掉打开的补全下拉，不抢它的 Esc。
+        if (editor.isShowingAutocomplete()) return undefined;
         // /multi 在跑则取消整批；否则中断在飞的 LLM run。
         if (multiAbort) multiAbort.abort();
         else opts.agent.session.abort?.("user interrupt");

@@ -171,6 +171,8 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
       const report = await runAgentPrompt(agent, args.task, {
         onEvent: printEvent,
       });
+      // 先打模型的正文答案——否则 one-shot 只剩事件行 + 统计报告，用户看不到任何回答。
+      printAnswer(report);
       console.log(renderRunReport(report));
       return;
     }
@@ -180,6 +182,8 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
         agent,
         terminal: new ProcessTerminal(),
         cwd: agent.cwd,
+        // resume 时把重建的历史渲进 TUI（新建会话 snapshot 为空、不渲）。
+        initialMessages: agent.session.snapshot().messages,
         spawnReadOnlySubAgent: makeReadOnlySubAgentSpawner(
           args.cwd,
           runtime.model,
@@ -312,11 +316,18 @@ async function runInteractive(
       const report = await runAgentPrompt(agent, prompt, {
         onEvent: printEvent,
       });
+      printAnswer(report);
       console.log(renderRunReport(report));
     }
   } finally {
     rl.close();
   }
+}
+
+/** 打印模型的正文答案（headless 模式下 renderSessionEvent 不渲 llm-end 文本，否则用户看不到回答）。 */
+function printAnswer(report: Awaited<ReturnType<typeof runAgentPrompt>>): void {
+  const answer = assistantText(report.summary.lastMessage).trim();
+  if (answer.length > 0) console.log(`\n${answer}\n`);
 }
 
 function printEvent(event: Parameters<typeof renderSessionEvent>[0]): void {

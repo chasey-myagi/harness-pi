@@ -36,8 +36,8 @@ class FakeTerminal implements Terminal {
   setProgress(): void {}
 }
 
-function assistant(content: AssistantMessage["content"]): AssistantMessage {
-  return { role: "assistant", content, api: "", provider: "", model: "qwen-turbo", usage: ZERO, stopReason: "stop", timestamp: 0 };
+function assistant(content: AssistantMessage["content"], usageInput = 0): AssistantMessage {
+  return { role: "assistant", content, api: "", provider: "", model: "qwen-turbo", usage: { ...ZERO, input: usageInput }, stopReason: "stop", timestamp: 0 };
 }
 
 type Step = { live: LiveEvent } | { coarse: SessionEvent } | { throw: Error };
@@ -101,7 +101,7 @@ describe("TUI app smoke (headless, dual-track via fake terminal)", () => {
     { live: { type: "text_delta", contentIndex: 0, delta: "# Done\n" } },
     { live: { type: "text_delta", contentIndex: 0, delta: "All " } },
     { live: { type: "message_end", message: assistant([{ type: "text", text: "# Done\nAll good." }]) } },
-    { coarse: { type: "llm-end", msg: assistant([{ type: "text", text: "# Done\nAll good." }]), durationMs: 4 } }, // 被 suppress
+    { coarse: { type: "llm-end", msg: assistant([{ type: "text", text: "# Done\nAll good." }], 123), durationMs: 4 } }, // 被 suppress；input=123 喂 ctx-gauge
     { coarse: { type: "turn-end", turnIdx: 1, toolResultsCount: 0, stopReason: "stop" } },
     { coarse: { type: "session-end", summary } },
   ];
@@ -521,6 +521,31 @@ describe("TUI app smoke (headless, dual-track via fake terminal)", () => {
     expect(out).toContain("1/2 succeeded"); // 一个失败被隔离
     expect(out).toContain("✓ good.ts");
     expect(out).toContain("✗ bad.ts");
+  });
+
+  it("resume: initialMessages seed the visible history (not a blank chat) + a resumed banner", async () => {
+    const history: import("@harness-pi/core").Message[] = [
+      { role: "user", content: "remember marker-77", timestamp: 0 },
+      assistant([{ type: "text", text: "Noted marker-77." }], 456),
+    ];
+    const app = createTuiApp({
+      agent: { model: { id: "qwen-turbo", contextWindow: 200_000 }, session: idleSession },
+      terminal: new FakeTerminal(),
+      initialMessages: history,
+    });
+    const out = strip(app.tui.render(80).join("\n"));
+    expect(out).toContain("remember marker-77"); // 用户历史可见
+    expect(out).toContain("Noted marker-77."); // 助手历史可见
+    expect(out).toContain("resumed 2 earlier messages"); // 恢复横幅
+    expect(out).toContain("ctx 456/200k"); // ctx-gauge 用历史最后一条 assistant 的 input 初始化
+  });
+
+  it("/exit quits the TUI", async () => {
+    const app = makeApp(scriptedSession([{ coarse: { type: "session-end", summary } }], summary));
+    const done = app.run();
+    await app.submit("/exit");
+    await done; // /exit → quit() → run() resolves
+    expect(app.isRunning()).toBe(false);
   });
 
   it("Ctrl-C: run() resolves and quit aborts the session (no request leak)", async () => {
