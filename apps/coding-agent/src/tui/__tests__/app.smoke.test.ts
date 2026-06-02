@@ -309,6 +309,80 @@ describe("TUI app smoke (headless, dual-track via fake terminal)", () => {
     app.stop();
   });
 
+  const idleSession: TuiSession = {
+    on: NOOP_ON,
+    runStreaming: () => {
+      throw new Error("runStreaming should not be called for a slash command");
+    },
+  };
+
+  it("/compact when dormant: calls requestCompaction and shows session-scoped feedback (no LLM turn)", async () => {
+    let requested = 0;
+    const agent: TuiAgentLike = {
+      model: { id: "qwen-turbo" },
+      session: idleSession,
+      getCompactionState: () => ({ enabled: false }), // 挂着但休眠 → /compact 启用它
+      requestCompaction: () => {
+        requested++;
+      },
+    };
+    const app = createTuiApp({ agent, terminal: new FakeTerminal() });
+    await app.submit("/compact");
+    expect(requested).toBe(1);
+    expect(app.isRunning()).toBe(false);
+    const out = strip(app.tui.render(80).join("\n"));
+    expect(out).toContain("compaction on for this session"); // 诚实:持续整个会话
+  });
+
+  it("/compact when already on (--compact): does NOT re-trigger, says already on", async () => {
+    let requested = 0;
+    const agent: TuiAgentLike = {
+      model: { id: "qwen-turbo" },
+      session: idleSession,
+      getCompactionState: () => ({ enabled: true }), // 已自动开
+      requestCompaction: () => {
+        requested++;
+      },
+    };
+    const app = createTuiApp({ agent, terminal: new FakeTerminal() });
+    await app.submit("/compact");
+    expect(requested).toBe(0); // 已开 → 不重复触发
+    expect(strip(app.tui.render(80).join("\n"))).toContain("already on");
+  });
+
+  it("/compact when compaction is NOT wired: no-op with a clear message", async () => {
+    let requested = 0;
+    const agent: TuiAgentLike = {
+      model: { id: "qwen-turbo" },
+      session: idleSession,
+      getCompactionState: () => undefined, // 未挂 compaction
+      requestCompaction: () => {
+        requested++;
+      },
+    };
+    const app = createTuiApp({ agent, terminal: new FakeTerminal() });
+    await app.submit("/compact");
+    expect(requested).toBe(0); // 没挂 → 不调
+    expect(strip(app.tui.render(80).join("\n"))).toContain("not available");
+  });
+
+  it("auto-compaction feedback: the app's compaction listener renders a '✦ compacted N' line", async () => {
+    let listener: ((n: number) => void) | undefined;
+    const agent: TuiAgentLike = {
+      model: { id: "qwen-turbo" },
+      session: idleSession,
+      setCompactionListener: (fn) => {
+        listener = fn;
+      },
+    };
+    const app = createTuiApp({ agent, terminal: new FakeTerminal() });
+    app.start(); // start() 里注册 listener
+    expect(listener).toBeDefined();
+    listener!(3); // 模拟内核在某 turn 实际跑了压缩
+    expect(strip(app.tui.render(80).join("\n"))).toContain("compacted 3 earlier messages");
+    app.stop();
+  });
+
   it("Ctrl-C: run() resolves and quit aborts the session (no request leak)", async () => {
     let aborted = false;
     const app = makeApp(scriptedSession([{ coarse: { type: "session-end", summary } }], summary, () => {

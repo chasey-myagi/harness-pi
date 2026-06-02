@@ -26,6 +26,7 @@ import { coarseEventToActions, type TuiAction } from "./event-bridge.js";
 import { LiveStreamAccumulator, type StreamOp } from "./live-stream.js";
 import { formatStatusBar, formatToolCall, formatToolCalls, formatToolResult } from "./format.js";
 import { routeSubmit } from "./submit-router.js";
+import { parseSlashCommand, SLASH_HELP, type SlashCommand } from "./slash.js";
 import { color, editorTheme, markdownTheme, selectListTheme } from "./theme.js";
 
 const LIVE_TYPES: ReadonlyArray<LiveEvent["type"]> = [
@@ -57,6 +58,12 @@ export interface TuiAgentLike {
   getCostEstimate?(): { amount: number; currency: string } | undefined;
   /** 注入 tool 审批"问人"实现（permissionGate.onAsk 委托到它）。 */
   setApprovalHandler?(handler: (call: ToolCall) => Promise<boolean>): void;
+  /** /compact：降低压缩阈值，下一 turn 起把早期消息压成摘要。未启用 compaction 时 no-op。 */
+  requestCompaction?(): void;
+  /** compaction 状态；未启用时 undefined。 */
+  getCompactionState?(): { enabled: boolean } | undefined;
+  /** 注册"压缩发生"回调（实际跑 summarize 时以被压缩条数调用）→ TUI 渲染一行反馈。 */
+  setCompactionListener?(listener: (coveredCount: number) => void): void;
 }
 
 export interface TuiAppOptions {
@@ -223,7 +230,52 @@ export function createTuiApp(opts: TuiAppOptions): TuiApp {
     });
   }
 
+  /** 处理斜杠命令（/compact、/help…）。这些是本地动作，不发起 LLM turn，运行中也能用。 */
+  function handleSlash(cmd: SlashCommand): void {
+    switch (cmd.kind) {
+      case "compact": {
+        const state = opts.agent.getCompactionState?.();
+        if (!state) {
+          // compaction hook 没挂（非 TUI / 未来禁用）——/compact 无从作用。
+          append(new Text(color.dim("compaction not available here"), 0, 0));
+        } else if (state.enabled) {
+          // 已在自动压缩（--compact 或之前 /compact 过）——诚实说明它本就开着、会持续整个会话。
+          append(new Text(color.dim("✦ compaction is already on for this session"), 0, 0));
+        } else {
+          opts.agent.requestCompaction?.();
+          // 诚实：这不是一次性动作——会持续到会话结束，之后每个长 turn 都会把早期消息压成摘要。
+          append(
+            new Text(
+              color.dim(
+                "✦ compaction on for this session — earlier messages summarized for the model from your next turn (full history is kept)",
+              ),
+              0,
+              0,
+            ),
+          );
+        }
+        break;
+      }
+      case "help":
+        append(new Text(SLASH_HELP, 0, 0));
+        break;
+      case "unknown":
+        append(new Text(color.red(`unknown command: /${cmd.name} (try /help)`), 0, 0));
+        break;
+      default: {
+        const _exhaustive: never = cmd;
+        void _exhaustive;
+      }
+    }
+    tui.requestRender();
+  }
+
   async function submit(text: string): Promise<void> {
+    const slash = parseSlashCommand(text);
+    if (slash) {
+      handleSlash(slash);
+      return;
+    }
     const route = routeSubmit(text, running);
     if (route.kind === "ignore") return;
     if (route.kind === "steer") {
@@ -282,6 +334,11 @@ export function createTuiApp(opts: TuiAppOptions): TuiApp {
     tui.setFocus(editor);
     // 注入审批弹窗作为 permissionGate.onAsk 的"问人"实现（仅当 agent 启用了 permission）。
     opts.agent.setApprovalHandler?.(requestApproval);
+    // 压缩实际发生时（自动或 /compact 触发的下一 turn）渲染一行反馈。
+    opts.agent.setCompactionListener?.((n) => {
+      append(new Text(color.dim(`✦ compacted ${n} earlier messages into a summary`), 0, 0));
+      tui.requestRender();
+    });
     editor.onSubmit = (value: string): void => {
       void submit(value);
     };

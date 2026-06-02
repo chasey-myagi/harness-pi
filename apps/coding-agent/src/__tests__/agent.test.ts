@@ -207,6 +207,12 @@ describe("coding-agent dogfood app", () => {
     expect(() => parseArgs(["--resume"])).toThrow(/--resume requires a value/);
   });
 
+  it("--compact sets compact and implies --tui", () => {
+    const args = parseArgs(["--compact"]);
+    expect(args.compact).toBe(true);
+    expect(args.tui).toBe(true);
+  });
+
   it("reuses one AgentSession history across interactive prompts with lifetime cost stats", async () => {
     const cwd = await tempRepo();
     const fake = createFakeModel([

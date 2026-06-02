@@ -30,6 +30,7 @@ interface CliArgs {
   task?: string | undefined;
   tui: boolean;
   yolo: boolean;
+  compact: boolean;
   resume?: string | undefined;
   help: boolean;
 }
@@ -71,6 +72,13 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
   // TUI 模式默认开 tool 审批门（bash/write/edit 需确认）；--yolo 关闭。one-shot/readline 无弹窗、不挂门。
   if (args.tui && !args.yolo) {
     createOptions.permission = {};
+  }
+  // TUI 模式挂上 compaction hook：默认 {}（阈值=哨兵,不自动触发,但 /compact 可手动启用）；
+  // --compact 则设一个自动阈值（长对话超阈自动把早期消息压成摘要）。one-shot/readline 不挂。
+  if (args.tui) {
+    createOptions.compaction = args.compact
+      ? { maxMessages: 60, keepRecent: 8 }
+      : {};
   }
 
   // TUI 会话默认落盘到 .harness-pi/sessions/<id>.jsonl（崩溃后可 --resume 续跑）。
@@ -139,6 +147,7 @@ export function parseArgs(argv: string[]): CliArgs {
     disabledTools: [],
     tui: false,
     yolo: false,
+    compact: false,
     help: false,
   };
   const task: string[] = [];
@@ -170,6 +179,11 @@ export function parseArgs(argv: string[]): CliArgs {
     }
     if (arg === "--yolo") {
       out.yolo = true;
+      continue;
+    }
+    if (arg === "--compact") {
+      out.compact = true;
+      out.tui = true; // compaction 是 TUI 特性。
       continue;
     }
     if (arg === "--resume") {
@@ -264,6 +278,8 @@ Options:
   --resume <id>            Resume a saved session by id. Launches the TUI unless a
                             one-shot task is also given (then it continues that session headless).
   --yolo                   (TUI) skip tool approval prompts — allow bash/write/edit without asking.
+  --compact                (TUI) auto-summarize early messages once the conversation grows long.
+                            Without it, /compact in the TUI triggers summarization manually.
   --disable <a,b>          Disable named first-party tools.
   --log-dir <path>         Session log dir. Defaults to .harness-pi/logs.
   --metrics-file <path>    Write metrics NDJSON.

@@ -12,6 +12,7 @@ import {
   type Usage,
 } from "@harness-pi/core";
 import {
+  compactSummarize,
   costTracker,
   emptyRunGuard,
   metrics,
@@ -21,12 +22,14 @@ import {
   sessionLog,
   toolStats,
   trimHistory,
+  type CompactSummarizeOptions,
   type CostStats,
   type CostTrackerOptions,
   type MetricsSink,
   type PermissionRule,
   type ToolStats,
 } from "@harness-pi/plugins";
+import { createModelSummarizer } from "./compaction.js";
 import { defaultPermissionRules } from "./tui/permissions.js";
 import {
   createAllTools,
@@ -74,6 +77,12 @@ export interface CreateCodingAgentOptions {
    * 二者拆开会出现"落了盘却拿不到 id（内核随机生成）从而无法 resume"的死角——合成子对象让这种非法状态不可表达。
    */
   persistence?: { store: SessionStore; sessionId: string };
+  /**
+   * 启用 compaction（compactSummarize view-transform：超阈值时把早期消息换成模型生成的摘要喂给 LLM，
+   * 不毁原始历史）。给了即挂 hook；`maxMessages` 不给 = 阈值设为大哨兵（在位但不自动触发），靠
+   * `requestCompaction()`（TUI 的 `/compact`）临时降阈强制压缩。one-shot 模式不传本项即完全不挂。
+   */
+  compaction?: { maxMessages?: number; keepRecent?: number };
 }
 
 export interface CodingAgent {
@@ -93,6 +102,12 @@ export interface CodingAgent {
   getToolStats(): ToolStats | undefined;
   /** 注入 tool 审批"问人"实现（permissionGate.onAsk 经 holder 委托到它）；返回 true=allow once。 */
   setApprovalHandler(handler: (call: ToolCall) => Promise<boolean>): void;
+  /** 手动触发压缩（/compact）：降低阈值，下一 turn 起把早期消息压成摘要。未启用 compaction 时 no-op。 */
+  requestCompaction(): void;
+  /** compaction 状态；未启用时 undefined。enabled = 阈值已降到会自动触发的程度。 */
+  getCompactionState(): { enabled: boolean; maxMessages: number; keepRecent: number } | undefined;
+  /** 注册"压缩发生"回调（每次实际跑 summarize 时以被压缩的早期消息条数调用）；用于 TUI 反馈。 */
+  setCompactionListener(listener: (coveredCount: number) => void): void;
 }
 
 export interface RunAgentPromptOptions {
@@ -262,8 +277,30 @@ function buildAgentContext(opts: CreateCodingAgentOptions): AgentContext {
   let approvalHandler: (call: ToolCall) => Promise<boolean> = async () => false;
   const permission = opts.permission;
 
+  // Compaction（P4）：用一个**可变** opts 对象——compactSummarize 在闭包里实时读 maxMessages/keepRecent，
+  // 故 requestCompaction() 直接改 maxMessages 即可让 /compact 临时降阈、下一 turn 起强制压缩。
+  // maxMessages 不给 = OFF 哨兵（hook 在位但永不自动触发，零额外 LLM 成本，专等手动 /compact）。
+  const COMPACTION_OFF = Number.MAX_SAFE_INTEGER;
+  let compactionListener: ((coveredCount: number) => void) | undefined;
+  let compactionOpts: CompactSummarizeOptions | undefined;
+  if (opts.compaction) {
+    const baseSummarize = createModelSummarizer(opts.model, opts.llmOptions);
+    compactionOpts = {
+      maxMessages: opts.compaction.maxMessages ?? COMPACTION_OFF,
+      keepRecent: opts.compaction.keepRecent ?? 8,
+      async summarize(early, ctx) {
+        const text = await baseSummarize(early, ctx.signal); // 抛错→fail-open；透传 signal 可中途取消
+        compactionListener?.(early.length); // 成功才通知 TUI（抛错时不算"压缩发生"）
+        return text;
+      },
+    };
+  }
+
   const hooks = [
     sessionLog({ dir: logDir }),
+    // compactSummarize 须排在 trimHistory 前：先把早期消息总结成 summary，再让 trimHistory 裁中段
+    // toolResult（docs/09 §3.6「先 summarize 早期、再 trim 中段」的组合顺序）。未启用 compaction 时不挂。
+    ...(compactionOpts ? [compactSummarize(compactionOpts)] : []),
     trimHistory({ keepRecent: 12 }),
     emptyRunGuard({ maxEmptyTurns: 3 }),
     repeatedCallGuard({
@@ -341,6 +378,22 @@ function buildAgentContext(opts: CreateCodingAgentOptions): AgentContext {
         },
         setApprovalHandler(handler) {
           approvalHandler = handler;
+        },
+        requestCompaction() {
+          if (!compactionOpts) return; // 未启用 compaction：no-op
+          // 降到最低有效阈值（keepRecent+1）：下一 turn 起，超出 keepRecent 的早期消息都被压成摘要。
+          compactionOpts.maxMessages = compactionOpts.keepRecent + 1;
+        },
+        getCompactionState() {
+          if (!compactionOpts) return undefined;
+          return {
+            enabled: compactionOpts.maxMessages < COMPACTION_OFF,
+            maxMessages: compactionOpts.maxMessages,
+            keepRecent: compactionOpts.keepRecent,
+          };
+        },
+        setCompactionListener(listener) {
+          compactionListener = listener;
         },
       };
     },
