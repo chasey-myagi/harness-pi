@@ -159,6 +159,20 @@ const QWEN35_FLASH_PRICING: DashScopePricingCny = {
   ],
 };
 
+const QWEN37_MAX_PRICING: DashScopePricingCny = {
+  source: PRICING_SOURCE,
+  tiers: [
+    {
+      maxInputTokens: 1_000_000,
+      inputCnyPerMillion: 12,
+      // Single output rate covers chain-of-thought + answer (思维链+回答):
+      // qwen3.7-max bills thinking and non-thinking output identically, so there
+      // is no separate (cheaper) non-thinking rate — leave thinking rate unset.
+      outputCnyPerMillion: 36,
+    },
+  ],
+};
+
 const UNKNOWN_DASHSCOPE_METADATA: DashScopeModelMetadata = {
   contextWindow: 128_000,
   maxTokens: 8192,
@@ -177,6 +191,9 @@ const DASH_SCOPE_MODELS: Record<string, DashScopeModelMetadata> = {
   "qwen-turbo-latest": qwenMetadata(1_000_000, 16_384, QWEN_TURBO_PRICING),
   "qwen-turbo-2025-07-15": qwenMetadata(1_000_000, 16_384, QWEN_TURBO_PRICING),
   "qwen-turbo-2025-04-28": qwenMetadata(1_000_000, 16_384, QWEN_TURBO_PRICING),
+
+  "qwen3.7-max": qwenMetadata(1_000_000, 65_536, QWEN37_MAX_PRICING),
+  "qwen3.7-max-2026-05-20": qwenMetadata(1_000_000, 65_536, QWEN37_MAX_PRICING),
 
   "qwen3.6-plus": qwenMetadata(1_000_000, 65_536, QWEN36_PLUS_PRICING),
   "qwen3.6-plus-2026-04-02": qwenMetadata(
@@ -255,6 +272,22 @@ export function getDashScopeModelMetadata(
   return DASH_SCOPE_MODELS[modelId] ?? UNKNOWN_DASHSCOPE_METADATA;
 }
 
+/**
+ * DashScope implicit cache (auto-enabled for Qwen, cannot be disabled): tokens
+ * that hit the cache are billed at 20% of the standard input rate.
+ * Source: help.aliyun.com/zh/model-studio/context-cache (2026-05-29).
+ */
+const IMPLICIT_CACHE_INPUT_MULTIPLIER = 0.2;
+
+/**
+ * Approximate CNY cost. One deliberate simplification: output is billed at the
+ * standard rate unless `thinking` is set. pi-ai `Usage` can't tell us whether
+ * reasoning tokens were emitted, so for a reasoning model run without an explicit
+ * reasoning effort this is a LOWER bound (thinking output rates are several×
+ * higher). Cached input IS modeled — pi-ai reports it separately as
+ * `usage.cacheRead` (already excluded from `usage.input`), billed at the 20%
+ * implicit-cache rate above.
+ */
 export function estimateDashScopeCostCny(
   modelId: string,
   usage: Usage | undefined,
@@ -263,15 +296,23 @@ export function estimateDashScopeCostCny(
   const pricing = getDashScopeModelMetadata(modelId).pricingCny;
   if (!pricing || !usage) return undefined;
 
-  const inputTokens = usage.input + usage.cacheRead;
+  const freshInputTokens = usage.input; // pi-ai already excludes cached tokens
+  const cachedInputTokens = usage.cacheRead;
   const outputTokens = usage.output;
-  const tier = selectPricingTier(pricing, inputTokens);
+  // Tier is selected by total prompt length (fresh + cached input).
+  const tier = selectPricingTier(
+    pricing,
+    freshInputTokens + cachedInputTokens,
+  );
   const outputRate =
     opts.thinking && tier.thinkingOutputCnyPerMillion !== undefined
       ? tier.thinkingOutputCnyPerMillion
       : tier.outputCnyPerMillion;
   const amount =
-    (inputTokens / 1_000_000) * tier.inputCnyPerMillion +
+    (freshInputTokens / 1_000_000) * tier.inputCnyPerMillion +
+    (cachedInputTokens / 1_000_000) *
+      tier.inputCnyPerMillion *
+      IMPLICIT_CACHE_INPUT_MULTIPLIER +
     (outputTokens / 1_000_000) * outputRate;
 
   return {

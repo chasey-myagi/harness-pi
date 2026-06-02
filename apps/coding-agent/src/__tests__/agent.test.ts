@@ -261,7 +261,19 @@ describe("coding-agent dogfood app", () => {
     });
 
     const text = renderRunReport({
-      summary: { turns: 1, continuations: 0, reason: "done" },
+      summary: {
+        turns: 1,
+        continuations: 0,
+        reason: "done",
+        usage: {
+          input: 0,
+          output: 0,
+          cacheRead: 0,
+          cacheWrite: 0,
+          totalTokens: 0,
+          cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+        },
+      },
       wallTimeMs: 1,
       cwd: agent.cwd,
       model: "dashscope:qwen-plus",
@@ -314,7 +326,19 @@ describe("coding-agent dogfood app", () => {
     });
 
     const text = renderRunReport({
-      summary: { turns: 1, continuations: 0, reason: "done" },
+      summary: {
+        turns: 1,
+        continuations: 0,
+        reason: "done",
+        usage: {
+          input: 0,
+          output: 0,
+          cacheRead: 0,
+          cacheWrite: 0,
+          totalTokens: 0,
+          cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+        },
+      },
       wallTimeMs: 1,
       cwd: agent.cwd,
       model: "dashscope:qwen-unknown-local",
@@ -336,5 +360,93 @@ describe("coding-agent dogfood app", () => {
 
     expect(text).toContain("cost: n/a");
     expect(text).not.toContain("cost: $0.000000");
+  });
+});
+
+describe("DashScope pricing math", () => {
+  const usage = (input: number, output: number, cacheRead = 0): Usage => ({
+    input,
+    output,
+    cacheRead,
+    cacheWrite: 0,
+    totalTokens: input + output + cacheRead,
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+  });
+
+  it("selects the qwen-plus pricing tier by input length", () => {
+    // tier 1 (input <= 128k): 0.8 / 2 CNY per Mtok → 0.1*0.8 + 0.05*2
+    expect(
+      estimateDashScopeCostCny("qwen-plus", usage(100_000, 50_000))?.amount,
+    ).toBeCloseTo(0.18);
+    // tier 2 (128k < input <= 256k): 2.4 / 20 → 0.2*2.4 + 0.1*20
+    expect(
+      estimateDashScopeCostCny("qwen-plus", usage(200_000, 100_000))?.amount,
+    ).toBeCloseTo(2.48);
+    // tier 3 (256k < input <= 1M): 4.8 / 48 → 0.5*4.8 + 0.1*48
+    expect(
+      estimateDashScopeCostCny("qwen-plus", usage(500_000, 100_000))?.amount,
+    ).toBeCloseTo(7.2);
+  });
+
+  it("clamps to the highest tier when input exceeds every tier ceiling", () => {
+    // input 2M > 1M ceiling → falls back to tier 3 (4.8 input rate): 2.0*4.8
+    expect(
+      estimateDashScopeCostCny("qwen-plus", usage(2_000_000, 0))?.amount,
+    ).toBeCloseTo(9.6);
+  });
+
+  it("matches the single open-ended tier for qwen-turbo", () => {
+    // qwen-turbo has one tier with no maxInputTokens: 0.3 / 0.6 → 1*0.3 + 1*0.6
+    expect(
+      estimateDashScopeCostCny("qwen-turbo", usage(1_000_000, 1_000_000))
+        ?.amount,
+    ).toBeCloseTo(0.9);
+  });
+
+  it("prices qwen3.7-max at one tier with no separate thinking rate", () => {
+    // 12 input / 36 output per Mtok: 0.1*12 + 0.05*36 = 1.2 + 1.8 = 3.0
+    const u = usage(100_000, 50_000);
+    expect(estimateDashScopeCostCny("qwen3.7-max", u)?.amount).toBeCloseTo(3.0);
+    // 思维链+回答 share the 36 rate → thinking flag must not change the cost
+    expect(
+      estimateDashScopeCostCny("qwen3.7-max", u, { thinking: true })?.amount,
+    ).toBeCloseTo(3.0);
+    // cached read still gets the 20% discount: fresh 50k@12 + cached 50k@2.4
+    expect(
+      estimateDashScopeCostCny("qwen3.7-max", usage(50_000, 0, 50_000))?.amount,
+    ).toBeCloseTo(0.72);
+  });
+
+  it("bills cached-read input at the 20% implicit-cache rate", () => {
+    // tier 1, total 100k input. fresh 50k @ 0.8 + cached 50k @ 0.8*0.2(=0.16)
+    // = 0.04 + 0.008 = 0.048 (would be 0.08 if cached were billed at full rate)
+    expect(
+      estimateDashScopeCostCny("qwen-plus", usage(50_000, 0, 50_000))?.amount,
+    ).toBeCloseTo(0.048);
+    // pure-cached read is exactly 20% of the equivalent fresh-input cost
+    expect(
+      estimateDashScopeCostCny("qwen-plus", usage(0, 0, 100_000))?.amount,
+    ).toBeCloseTo(0.016);
+  });
+
+  it("applies the thinking output rate only when requested", () => {
+    const u = usage(100_000, 50_000);
+    expect(
+      estimateDashScopeCostCny("qwen-plus", u, { thinking: false })?.amount,
+    ).toBeCloseTo(0.18);
+    // tier 1 thinking output rate is 8 (vs 2): 0.1*0.8 + 0.05*8 = 0.48
+    expect(
+      estimateDashScopeCostCny("qwen-plus", u, { thinking: true })?.amount,
+    ).toBeCloseTo(0.48);
+  });
+
+  it("returns undefined for unpriced models and missing usage", () => {
+    expect(
+      estimateDashScopeCostCny("qwen-unknown-local", usage(100, 50)),
+    ).toBeUndefined();
+    expect(
+      getDashScopeModelMetadata("qwen-unknown-local").pricingCny,
+    ).toBeUndefined();
+    expect(estimateDashScopeCostCny("qwen-plus", undefined)).toBeUndefined();
   });
 });
