@@ -7,6 +7,7 @@ import {
   type Model,
   type RunSummary,
   type SessionEvent,
+  type ToolCall,
   type Usage,
 } from "@harness-pi/core";
 import {
@@ -14,6 +15,7 @@ import {
   emptyRunGuard,
   metrics,
   NdjsonFileSink,
+  permissionGate,
   repeatedCallGuard,
   sessionLog,
   toolStats,
@@ -21,8 +23,10 @@ import {
   type CostStats,
   type CostTrackerOptions,
   type MetricsSink,
+  type PermissionRule,
   type ToolStats,
 } from "@harness-pi/plugins";
+import { defaultPermissionRules } from "./tui/permissions.js";
 import {
   createAllTools,
   readOnlyToolNames,
@@ -56,6 +60,11 @@ export interface CreateCodingAgentOptions {
   llmOptions?: Record<string, unknown>;
   maxTurns?: number;
   costModel?: CostTrackerOptions["costModel"];
+  /**
+   * 启用 tool 审批门（permissionGate）。给了即挂；onAsk 默认 deny，调用方经
+   * `setApprovalHandler` 注入真正的"问人"实现（TUI 弹窗）。`--yolo` 等价于不给本项。
+   */
+  permission?: { rules?: PermissionRule[]; timeoutMs?: number };
 }
 
 export interface CodingAgent {
@@ -73,6 +82,8 @@ export interface CodingAgent {
   getCostEstimate(): RunReport["costEstimate"];
   getCostStats(): CostStats | undefined;
   getToolStats(): ToolStats | undefined;
+  /** 注入 tool 审批"问人"实现（permissionGate.onAsk 经 holder 委托到它）；返回 true=allow once。 */
+  setApprovalHandler(handler: (call: ToolCall) => Promise<boolean>): void;
 }
 
 export interface RunAgentPromptOptions {
@@ -217,6 +228,10 @@ export function createCodingAgent(opts: CreateCodingAgentOptions): CodingAgent {
   };
   if (resolvedCostModel) costTrackerOptions.costModel = resolvedCostModel;
 
+  // 审批 holder：permissionGate.onAsk 委托到它；默认 deny（安全），TUI 经 setApprovalHandler 注入弹窗。
+  let approvalHandler: (call: ToolCall) => Promise<boolean> = async () => false;
+  const permission = opts.permission;
+
   const hooks = [
     sessionLog({ dir: logDir }),
     trimHistory({ keepRecent: 12 }),
@@ -238,6 +253,17 @@ export function createCodingAgent(opts: CreateCodingAgentOptions): CodingAgent {
       },
     }),
     ...(metricsSink ? [metrics({ sink: metricsSink })] : []),
+    ...(permission
+      ? [
+          permissionGate({
+            rules: permission.rules ?? defaultPermissionRules(),
+            fallback: "deny",
+            onAsk: (call) => approvalHandler(call),
+            // onAsk 要等用户在弹窗里拍板，远超内核 decision 默认 200ms——放大避免必然超时判 deny。
+            timeout: permission.timeoutMs ?? 600_000,
+          }),
+        ]
+      : []),
   ];
 
   const sessionOptions: ConstructorParameters<typeof AgentSession>[0] = {
@@ -279,6 +305,9 @@ export function createCodingAgent(opts: CreateCodingAgentOptions): CodingAgent {
     },
     getToolStats() {
       return lastToolStats;
+    },
+    setApprovalHandler(handler) {
+      approvalHandler = handler;
     },
   };
 }

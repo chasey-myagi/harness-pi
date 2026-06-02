@@ -23,6 +23,10 @@ export default defineConfig({
         find: /^@harness-pi\/tools$/,
         replacement: resolve(repoRoot, "packages/tools/src/index.ts"),
       },
+      {
+        find: /^@harness-pi\/adapters$/,
+        replacement: resolve(repoRoot, "packages/adapters/src/index.ts"),
+      },
     ],
   },
   test: {

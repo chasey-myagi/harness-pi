@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import type { Terminal } from "@mariozechner/pi-tui";
-import type { AssistantMessage, LiveEvent, RunSummary, SessionEvent } from "@harness-pi/core";
+import type { AssistantMessage, LiveEvent, RunSummary, SessionEvent, ToolCall } from "@harness-pi/core";
 import { createTuiApp, type TuiAgentLike, type TuiSession } from "../app.js";
 
 const ZERO = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } };
@@ -160,40 +160,6 @@ describe("TUI app smoke (headless, dual-track via fake terminal)", () => {
     expect(strip(app.tui.render(80).join("\n"))).toContain("provider exploded");
   });
 
-  it("ignores a submit while a run is in flight (P0 concurrency guard)", async () => {
-    let release!: () => void;
-    const gate = new Promise<void>((r) => {
-      release = r;
-    });
-    const agent: TuiAgentLike = {
-      model: { id: "qwen-turbo" },
-      session: {
-        on: NOOP_ON,
-        runStreaming: () => {
-          const gen = (async function* (): AsyncGenerator<SessionEvent> {
-            yield { type: "turn-start", turnIdx: 0 };
-            await gate;
-          })();
-          return Object.assign(gen, { finalSummary: gate.then(() => summary) });
-        },
-      },
-    };
-    const app = createTuiApp({ agent, terminal: new FakeTerminal() });
-
-    const first = app.submit("first prompt");
-    await new Promise((r) => setTimeout(r, 0));
-    expect(app.isRunning()).toBe(true);
-
-    await app.submit("second prompt");
-    const out = strip(app.tui.render(80).join("\n"));
-    expect(out).toContain("first prompt");
-    expect(out).not.toContain("second prompt");
-
-    release();
-    await first;
-    expect(app.isRunning()).toBe(false);
-  });
-
   it("fine-track thinking streams ABOVE the answer", async () => {
     const app = makeApp(
       scriptedSession(
@@ -237,6 +203,110 @@ describe("TUI app smoke (headless, dual-track via fake terminal)", () => {
     expect(out).toContain("partial bit"); // 已流式的部分文本保留
     expect(out).toContain("mid-stream boom"); // 错误行
     expect(app.isRunning()).toBe(false);
+  });
+
+  function gatedSession(extra: Partial<TuiSession> = {}): { session: TuiSession; release: () => void } {
+    let release!: () => void;
+    const gate = new Promise<void>((r) => {
+      release = r;
+    });
+    const session: TuiSession = {
+      on: NOOP_ON,
+      runStreaming: () => {
+        const gen = (async function* (): AsyncGenerator<SessionEvent> {
+          yield { type: "turn-start", turnIdx: 0 };
+          await gate;
+        })();
+        return Object.assign(gen, { finalSummary: gate.then(() => summary) });
+      },
+      ...extra,
+    };
+    return { session, release };
+  }
+
+  it("steering: submitting while a run is in flight calls session.steer (not ignored)", async () => {
+    const steered: string[] = [];
+    const { session, release } = gatedSession({
+      steer: (m) => steered.push(typeof m.content === "string" ? m.content : JSON.stringify(m.content)),
+    });
+    const app = createTuiApp({ agent: { model: { id: "qwen-turbo" }, session }, terminal: new FakeTerminal() });
+
+    const first = app.submit("first");
+    await new Promise((r) => setTimeout(r, 0));
+    expect(app.isRunning()).toBe(true);
+
+    await app.submit("interject me"); // 运行中 → steer
+    expect(steered.some((s) => s.includes("interject me"))).toBe(true);
+    expect(strip(app.tui.render(80).join("\n"))).toContain("queued: interject me");
+
+    release();
+    await first;
+  });
+
+  it("Esc during a run aborts the current run (not quit)", async () => {
+    let aborted = false;
+    const { session, release } = gatedSession({
+      abort: () => {
+        aborted = true;
+        release(); // abort 让 gate 放开，run 收尾
+      },
+    });
+    const term = new FakeTerminal();
+    const app = createTuiApp({ agent: { model: { id: "qwen-turbo" }, session }, terminal: term });
+    app.start();
+    const first = app.submit("go");
+    await new Promise((r) => setTimeout(r, 0));
+    expect(app.isRunning()).toBe(true);
+
+    term.feed("\x1b"); // Esc：运行中且无 overlay → 中断
+    expect(aborted).toBe(true);
+    await first;
+    expect(app.isRunning()).toBe(false);
+  });
+
+  it("approval overlay: onAsk shows a SelectList; selecting Allow resolves true and closes it", async () => {
+    let captured: ((call: ToolCall) => Promise<boolean>) | undefined;
+    const agent: TuiAgentLike = {
+      model: { id: "qwen-turbo" },
+      session: scriptedSession([{ coarse: { type: "session-end", summary } }], summary),
+      setApprovalHandler: (h) => {
+        captured = h;
+      },
+    };
+    const term = new FakeTerminal();
+    const app = createTuiApp({ agent, terminal: term });
+    app.start(); // 经 setApprovalHandler 注入 requestApproval
+
+    const decision = captured!({ type: "toolCall", id: "1", name: "bash", arguments: { command: "ls" } });
+    expect(app.tui.hasOverlay()).toBe(true); // 弹窗已起（capturing overlay）
+    // 注：overlay 内容在 TUI 私有 doRender 里合成、公共 render() 读不到，故只断行为不断文本。
+
+    term.feed("\r"); // Enter → 选中第一项 "Allow once"
+    await expect(decision).resolves.toBe(true);
+    expect(app.tui.hasOverlay()).toBe(false); // 选完关闭
+    app.stop();
+  });
+
+  it("approval overlay: Esc cancels as deny (resolves false, closes)", async () => {
+    let captured: ((call: ToolCall) => Promise<boolean>) | undefined;
+    const agent: TuiAgentLike = {
+      model: { id: "qwen-turbo" },
+      session: scriptedSession([{ coarse: { type: "session-end", summary } }], summary),
+      setApprovalHandler: (h) => {
+        captured = h;
+      },
+    };
+    const term = new FakeTerminal();
+    const app = createTuiApp({ agent, terminal: term });
+    app.start();
+
+    const decision = captured!({ type: "toolCall", id: "1", name: "bash", arguments: { command: "rm -rf x" } });
+    expect(app.tui.hasOverlay()).toBe(true);
+
+    term.feed("\x1b"); // Esc → SelectList.onCancel → deny（overlay 在，app 的 Esc 守卫不触发，转发给 overlay）
+    await expect(decision).resolves.toBe(false);
+    expect(app.tui.hasOverlay()).toBe(false);
+    app.stop();
   });
 
   it("Ctrl-C: run() resolves and quit aborts the session (no request leak)", async () => {

@@ -14,6 +14,7 @@
     "test:watch": "vitest"
   },
   "dependencies": {
+    "@harness-pi/adapters": "workspace:*",
     "@harness-pi/core": "workspace:*",
     "@harness-pi/plugins": "workspace:*",
     "@harness-pi/tools": "workspace:*",

@@ -10,6 +10,9 @@ importers:
 
   apps/coding-agent:
     dependencies:
+      '@harness-pi/adapters':
+        specifier: workspace:*
+        version: link:../../packages/adapters
       '@harness-pi/core':
         specifier: workspace:*
         version: link:../../packages/core

@@ -5,8 +5,8 @@
  * 刻意保持薄、把可测逻辑都外推到纯函数——pi-tui 需真实终端 raw mode、难自动化测；本层只做组件装配 +
  * 运行循环 + 键位，靠注入 Terminal/session 做 headless smoke test（render 出文本断言），其余手动 smoke。
  *
- * P0 范围：coarse 轨单轮闭环（输入→runStreaming→逐 SessionEvent 建组件→渲染），Ctrl-C 退出。
- * 流式 token(P1)、审批/插话(P2)、resume(P3)、compaction(P4)、状态栏富化(P5)、编排(P6) 后续叠加。
+ * 已实现：coarse+fine 双轨流式渲染（P0/P1）、permissionGate 审批弹窗 + steering 运行中插话 + Esc 中断（P2）。
+ * 后续叠加：SessionStore resume（P3）、compaction（P4）、状态栏富化（P5）、pipeline/parallel 编排（P6）。
  */
 
 import {
@@ -15,15 +15,18 @@ import {
   Loader,
   Markdown,
   type Component,
+  SelectList,
+  type SelectItem,
   type Terminal,
   Text,
   TUI,
 } from "@mariozechner/pi-tui";
-import type { LiveEvent, RunSummary, SessionEvent } from "@harness-pi/core";
+import { createUserMessage, type LiveEvent, type Message, type RunSummary, type SessionEvent, type ToolCall } from "@harness-pi/core";
 import { coarseEventToActions, type TuiAction } from "./event-bridge.js";
 import { LiveStreamAccumulator, type StreamOp } from "./live-stream.js";
-import { formatStatusBar, formatToolCalls, formatToolResult } from "./format.js";
-import { color, editorTheme, markdownTheme } from "./theme.js";
+import { formatStatusBar, formatToolCall, formatToolCalls, formatToolResult } from "./format.js";
+import { routeSubmit } from "./submit-router.js";
+import { color, editorTheme, markdownTheme, selectListTheme } from "./theme.js";
 
 const LIVE_TYPES: ReadonlyArray<LiveEvent["type"]> = [
   "message_start",
@@ -43,6 +46,8 @@ export interface TuiSession {
     type: T,
     handler: (event: Extract<LiveEvent, { type: T }>) => void,
   ): () => void;
+  /** 运行中插话：park 一条 user 消息进 steering inbox，下一 turn 安全点 drain。 */
+  steer?(message: Message): void;
   abort?(reason?: string): void;
 }
 
@@ -50,6 +55,8 @@ export interface TuiAgentLike {
   session: TuiSession;
   model: { id: string };
   getCostEstimate?(): { amount: number; currency: string } | undefined;
+  /** 注入 tool 审批"问人"实现（permissionGate.onAsk 委托到它）。 */
+  setApprovalHandler?(handler: (call: ToolCall) => Promise<boolean>): void;
 }
 
 export interface TuiAppOptions {
@@ -60,7 +67,7 @@ export interface TuiAppOptions {
 
 export interface TuiApp {
   tui: TUI;
-  /** 提交一条输入并跑完一轮（P0：运行中再提交会被忽略，steering 在 P2）。 */
+  /** 提交一条输入：空闲→跑一轮 runStreaming，运行中→steer 插进下一 turn（见 routeSubmit）。 */
   submit(text: string): Promise<void>;
   /** 接管终端、聚焦输入框、绑定键位。 */
   start(): void;
@@ -191,10 +198,42 @@ export function createTuiApp(opts: TuiAppOptions): TuiApp {
     }
   }
 
+  /**
+   * tool 审批弹窗：返回 true=allow once / false=deny。permissionGate.onAsk 经 setApprovalHandler 委托到它。
+   * 单弹窗不叠的不变量：当前唯三走 ask 的工具（bash/write/edit）都 isConcurrencySafe:false、被内核串行执行，
+   * 故 onAsk 一次只来一个；若将来给某个 concurrency-safe 工具配 ask 规则，需在此加串行队列防叠窗抢焦点。
+   */
+  function requestApproval(call: ToolCall): Promise<boolean> {
+    return new Promise<boolean>((resolve) => {
+      const items: SelectItem[] = [
+        { value: "allow", label: `Allow once · ${call.name}`, description: formatToolCall(call) },
+        { value: "deny", label: "Deny", description: "block this tool call" },
+      ];
+      const list = new SelectList(items, 6, selectListTheme);
+      const handle = tui.showOverlay(list, { anchor: "center", width: "70%" });
+      const settle = (allowed: boolean): void => {
+        handle.hide();
+        tui.setFocus(editor);
+        resolve(allowed);
+        tui.requestRender();
+      };
+      list.onSelect = (item: SelectItem): void => settle(item.value === "allow");
+      list.onCancel = (): void => settle(false); // Esc = deny（安全默认）——否则审批 Promise 会挂到 600s 超时
+      tui.requestRender();
+    });
+  }
+
   async function submit(text: string): Promise<void> {
-    const t = text.trim();
-    if (running || t.length === 0) return; // P0：运行中忽略；steering 在 P2
-    append(new Text(`${color.cyan("›")} ${t}`, 0, 0)); // 用户消息
+    const route = routeSubmit(text, running);
+    if (route.kind === "ignore") return;
+    if (route.kind === "steer") {
+      // 运行中插话：park 进 steering inbox，下一 turn 安全点被内核注入。
+      opts.agent.session.steer?.(createUserMessage(route.text));
+      append(new Text(color.dim(`↳ queued: ${route.text}`), 0, 0));
+      tui.requestRender();
+      return;
+    }
+    append(new Text(`${color.cyan("›")} ${route.text}`, 0, 0)); // 用户消息
     running = true;
     status.start();
     status.setMessage("thinking…");
@@ -210,7 +249,7 @@ export function createTuiApp(opts: TuiAppOptions): TuiApp {
     const unsubs = LIVE_TYPES.map((type) => opts.agent.session.on(type, onLive));
 
     try {
-      const stream = opts.agent.session.runStreaming(t);
+      const stream = opts.agent.session.runStreaming(route.text);
       for await (const ev of stream) {
         // suppressAssistant：assistant + toolCalls 已由 fine 轨渲染，coarse llm-end 不再重复。
         for (const a of coarseEventToActions(ev, { suppressAssistant: true })) applyAction(a);
@@ -241,13 +280,20 @@ export function createTuiApp(opts: TuiAppOptions): TuiApp {
   function start(): void {
     tui.start();
     tui.setFocus(editor);
+    // 注入审批弹窗作为 permissionGate.onAsk 的"问人"实现（仅当 agent 启用了 permission）。
+    opts.agent.setApprovalHandler?.(requestApproval);
     editor.onSubmit = (value: string): void => {
       void submit(value);
     };
     tui.addInputListener((data: string) => {
       if (data === "\x03") {
-        // Ctrl-C：退出（P0 不区分"中断运行" vs "退出"，取消在 P2）。consume 防止泄漏给父 shell。
+        // Ctrl-C：退出（先 abort 在飞 session 防泄漏）。consume 防止泄漏给父 shell。
         quit();
+        return { consume: true };
+      }
+      if (data === "\x1b" && running && !tui.hasOverlay()) {
+        // 裸 Esc 且正在跑、且无 overlay：中断当前 run（不退出）。有 overlay 时 Esc 交给 overlay。
+        opts.agent.session.abort?.("user interrupt");
         return { consume: true };
       }
       return undefined;

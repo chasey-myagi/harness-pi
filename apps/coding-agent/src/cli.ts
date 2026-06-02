@@ -23,6 +23,7 @@ interface CliArgs {
   metricsFile?: string | undefined;
   task?: string | undefined;
   tui: boolean;
+  yolo: boolean;
   help: boolean;
 }
 
@@ -46,6 +47,10 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
   if (args.logDir !== undefined) createOptions.logDir = args.logDir;
   if (args.metricsFile !== undefined) {
     createOptions.metricsFile = args.metricsFile;
+  }
+  // TUI 模式默认开 tool 审批门（bash/write/edit 需确认）；--yolo 关闭。one-shot/readline 无弹窗、不挂门。
+  if (args.tui && !args.yolo) {
+    createOptions.permission = {};
   }
   const agent = createCodingAgent(createOptions);
 
@@ -82,6 +87,7 @@ export function parseArgs(argv: string[]): CliArgs {
     readOnly: false,
     disabledTools: [],
     tui: false,
+    yolo: false,
     help: false,
   };
   const task: string[] = [];
@@ -109,6 +115,10 @@ export function parseArgs(argv: string[]): CliArgs {
     }
     if (arg === "--tui") {
       out.tui = true;
+      continue;
+    }
+    if (arg === "--yolo") {
+      out.yolo = true;
       continue;
     }
     if (arg === "--disable") {
@@ -194,6 +204,7 @@ Options:
                             DashScope aliases: dashscope:qwen-plus, qwen:qwen-plus.
   --read-only              Use read/grep/find/ls only.
   --tui                    Launch the pi-tui interactive TUI (chat UI, streaming).
+  --yolo                   (TUI) skip tool approval prompts — allow bash/write/edit without asking.
   --disable <a,b>          Disable named first-party tools.
   --log-dir <path>         Session log dir. Defaults to .harness-pi/logs.
   --metrics-file <path>    Write metrics NDJSON.
