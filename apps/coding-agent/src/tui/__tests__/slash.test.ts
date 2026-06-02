@@ -32,7 +32,7 @@ describe("parseSlashCommand", () => {
     expect(names).toContain("help");
     // 每条命令名都能被 parseSlashCommand 解析回对应 kind（autocomplete 填的文本提交后能执行）。
     for (const name of names) {
-      expect(parseSlashCommand(`/${name}`)).toEqual({ kind: name });
+      expect(parseSlashCommand(`/${name}`)?.kind).toBe(name);
     }
   });
 

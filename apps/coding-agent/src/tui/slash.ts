@@ -6,6 +6,7 @@
 export type SlashCommand =
   | { kind: "compact" }
   | { kind: "help" }
+  | { kind: "multi"; rest: string }
   | { kind: "unknown"; name: string };
 
 /** 解析一条斜杠命令；非斜杠输入（不以 `/` 开头）返回 null —— 交回普通 submit 流程。 */
@@ -18,6 +19,9 @@ export function parseSlashCommand(text: string): SlashCommand | null {
       return { kind: "compact" };
     case "help":
       return { kind: "help" };
+    case "multi":
+      // 余下的整串（指令 + @文件）交给 parseMultiCommand 进一步解析。
+      return { kind: "multi", rest: trimmed.slice(1 + name.length).trim() };
     default:
       return { kind: "unknown", name };
   }
@@ -27,8 +31,17 @@ export function parseSlashCommand(text: string): SlashCommand | null {
  * 命令元数据（单一事实源）：既喂给 pi-tui Editor 的 autocomplete provider 做 `/` 实时补全，
  * 又拼出 /help 文本。形状是 pi-tui `SlashCommand` 的结构子集（{name, description}），可直接传入。
  */
-export const SLASH_COMMANDS: ReadonlyArray<{ name: string; description: string }> = [
+export const SLASH_COMMANDS: ReadonlyArray<{
+  name: string;
+  description: string;
+  argumentHint?: string;
+}> = [
   { name: "compact", description: "turn on compaction for this session (summarize earlier messages; history kept)" },
+  {
+    name: "multi",
+    description: "analyze several @files in parallel — read-only sub-agents, cannot edit",
+    argumentHint: "<question/analysis> @file @file …",
+  },
   { name: "help", description: "show available commands" },
 ];
 

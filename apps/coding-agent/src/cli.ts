@@ -48,6 +48,60 @@ function persistenceFor(
   return { store: new JsonlSessionStore(sessionFilePath(cwd, sessionId)), sessionId };
 }
 
+/** 取 assistant 消息纯文本（content 可能是 string 或 block 数组）。 */
+function assistantText(msg: { content: unknown } | undefined): string {
+  if (!msg) return "";
+  const content = msg.content;
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return "";
+  return content
+    .map((b) =>
+      b && typeof b === "object" && "text" in b && typeof (b as { text: unknown }).text === "string"
+        ? (b as { text: string }).text
+        : "",
+    )
+    .join("");
+}
+
+/**
+ * `/multi` 用的只读 bounded 子代理执行器：每个子任务造一个全新的 readOnly + 限轮 agent 跑完即弃。
+ * 只读 = 只 read/grep/find/ls，并行安全、不触发审批弹窗。父 signal 透传，可被 Esc 取消整批。
+ */
+export function makeReadOnlySubAgentSpawner(
+  cwd: string,
+  model: ReturnType<typeof resolveModelRuntime>["model"],
+  llmOptions: Record<string, unknown> | undefined,
+): (task: string, signal: AbortSignal) => Promise<{ ok: boolean; text: string }> {
+  return async (task, signal) => {
+    const subOpts: Parameters<typeof createCodingAgent>[0] = {
+      cwd,
+      model,
+      readOnly: true,
+      maxTurns: 8,
+    };
+    if (llmOptions !== undefined) subOpts.llmOptions = llmOptions;
+    const sub = createCodingAgent(subOpts);
+    // 只挂监听：orchestrateMulti 在启动前就用 signal.aborted 短路了，故 spawn 永远不会收到"已 abort"的
+    // signal；在飞中途 abort 时这个监听触发 sub.session.abort()，取消正在跑的子代理。
+    const onAbort = (): void => sub.session.abort("multi parent aborted");
+    signal.addEventListener("abort", onAbort, { once: true });
+    try {
+      const report = await runAgentPrompt(sub, task);
+      const last = report.summary.lastMessage;
+      // 成功 = run 干净收尾 **且** 最后一条 assistant 是 stopReason:"stop"。光看 reason 不够：provider 把
+      // 错误/超窗当流事件报回时，内核仍以 reason:"done" 收尾（session.ts:1190），但 lastMessage.stopReason
+      // 是 "error"/"length"——那种不算成功，否则限流的子代理会被标成 ✓。
+      const ok = report.summary.reason === "done" && last?.stopReason === "stop";
+      return { ok, text: assistantText(last) || "(no output)" };
+    } catch (err) {
+      return { ok: false, text: err instanceof Error ? err.message : String(err) };
+    } finally {
+      signal.removeEventListener("abort", onAbort);
+      await sub.close();
+    }
+  };
+}
+
 export async function main(argv = process.argv.slice(2)): Promise<void> {
   const args = parseArgs(argv);
   if (args.help) {
@@ -122,7 +176,16 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
     }
 
     if (args.tui) {
-      const app = createTuiApp({ agent, terminal: new ProcessTerminal(), cwd: agent.cwd });
+      const app = createTuiApp({
+        agent,
+        terminal: new ProcessTerminal(),
+        cwd: agent.cwd,
+        spawnReadOnlySubAgent: makeReadOnlySubAgentSpawner(
+          args.cwd,
+          runtime.model,
+          runtime.llmOptions,
+        ),
+      });
       await app.run(); // 直到用户 Ctrl-C 退出
       // 退出后告知 resume 句柄。落盘每 turn 用 appendFileSync（无 fsync）——进程崩溃可恢复，
       // 但断电/内核 panic 下最后一次写可能丢，故措辞为"process-crash recoverable"而非"saved"。

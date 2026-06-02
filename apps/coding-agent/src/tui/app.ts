@@ -28,6 +28,7 @@ import { LiveStreamAccumulator, type StreamOp } from "./live-stream.js";
 import { formatStatusBar, formatToolCall, formatToolCalls, formatToolResult } from "./format.js";
 import { routeSubmit } from "./submit-router.js";
 import { parseSlashCommand, SLASH_COMMANDS, SLASH_HELP, type SlashCommand } from "./slash.js";
+import { formatMultiSummary, orchestrateMulti, parseMultiCommand, subTaskFor } from "./multi.js";
 import { color, editorTheme, markdownTheme, selectListTheme } from "./theme.js";
 
 const LIVE_TYPES: ReadonlyArray<LiveEvent["type"]> = [
@@ -76,6 +77,14 @@ export interface TuiAppOptions {
   terminal: Terminal;
   /** 工作目录；给了则启用输入框的 `/` 命令补全 + `@` 文件路径补全（基于此目录）。 */
   cwd?: string;
+  /**
+   * 跑一个**只读 bounded 子代理**执行一条子任务（供 `/multi` 扇出用）。由 CLI 注入（造一个
+   * readOnly + 限轮的 createCodingAgent 跑完即弃）。没给则 `/multi` 不可用。
+   */
+  spawnReadOnlySubAgent?: (
+    task: string,
+    signal: AbortSignal,
+  ) => Promise<{ ok: boolean; text: string }>;
 }
 
 export interface TuiApp {
@@ -118,6 +127,8 @@ export function createTuiApp(opts: TuiAppOptions): TuiApp {
   }
 
   let running = false;
+  // 正在跑的 /multi 编排的 abort（Esc 时取消整批）。
+  let multiAbort: AbortController | undefined;
   const stats: StatsView = {};
   // 当前正在流式的助手组件（懒创建：谁先流先 append → thinking 在答案上方）。
   let current: { assistant?: Markdown; thinking?: Text } = {};
@@ -250,9 +261,86 @@ export function createTuiApp(opts: TuiAppOptions): TuiApp {
     });
   }
 
-  /** 处理斜杠命令（/compact、/help…）。这些是本地动作，不发起 LLM turn，运行中也能用。 */
-  function handleSlash(cmd: SlashCommand): void {
+  /** `/multi <指令> @file…`：对 work-list 做只读子代理有界并行扇出，聚合回灌。 */
+  async function runMulti(rest: string): Promise<void> {
+    if (running) {
+      append(new Text(color.dim("busy — wait for the current run to finish"), 0, 0));
+      tui.requestRender();
+      return;
+    }
+    const spawn = opts.spawnReadOnlySubAgent;
+    if (!spawn) {
+      append(new Text(color.dim("/multi not available here"), 0, 0));
+      tui.requestRender();
+      return;
+    }
+    const parsed = parseMultiCommand(rest);
+    if (!parsed) {
+      append(
+        new Text(
+          color.dim("usage: /multi <instruction> @file @file …  (needs at least one @file)"),
+          0,
+          0,
+        ),
+      );
+      tui.requestRender();
+      return;
+    }
+    append(
+      new Text(
+        color.cyan(
+          `⇉ /multi (read-only) over ${parsed.targets.length} files: ${parsed.targets.join(", ")}`,
+        ),
+        0,
+        0,
+      ),
+    );
+    running = true;
+    const ac = new AbortController();
+    multiAbort = ac;
+    status.start();
+    status.setMessage(`running ${parsed.targets.length} read-only sub-agents…`);
+    renderStatusBar("multi");
+    tui.requestRender();
+    try {
+      const outcomes = await orchestrateMulti(
+        parsed.targets,
+        (target, signal) => spawn(subTaskFor(parsed.instruction, target), signal),
+        {
+          concurrency: 3,
+          signal: ac.signal,
+          onProgress: (ev) => {
+            if (ev.phase === "done")
+              append(new Text(color.dim(`  ${ev.ok ? "✓" : "✗"} ${ev.target}`), 0, 0));
+            tui.requestRender();
+          },
+        },
+      );
+      append(new Markdown(formatMultiSummary(outcomes), 0, 0, markdownTheme));
+    } catch (err) {
+      append(
+        new Text(
+          color.red(`✗ /multi: ${err instanceof Error ? err.message : String(err)}`),
+          0,
+          0,
+        ),
+      );
+    } finally {
+      multiAbort = undefined;
+      running = false;
+      status.stop();
+      status.setMessage("");
+      renderStatusBar();
+      tui.requestRender();
+    }
+  }
+
+  /** 处理斜杠命令（/compact、/help、/multi…）。本地动作，不发起普通 LLM turn。 */
+  async function handleSlash(cmd: SlashCommand): Promise<void> {
     switch (cmd.kind) {
+      case "multi":
+        await runMulti(cmd.rest);
+        return;
       case "compact": {
         const state = opts.agent.getCompactionState?.();
         if (!state) {
@@ -293,12 +381,18 @@ export function createTuiApp(opts: TuiAppOptions): TuiApp {
   async function submit(text: string): Promise<void> {
     const slash = parseSlashCommand(text);
     if (slash) {
-      handleSlash(slash);
+      await handleSlash(slash);
       return;
     }
     const route = routeSubmit(text, running);
     if (route.kind === "ignore") return;
     if (route.kind === "steer") {
+      // /multi 在跑时没有 LLM turn 可插话——steer 会错误地 park 进父 session inbox。明确提示改用 Esc。
+      if (multiAbort) {
+        append(new Text(color.dim("a /multi run is in progress — press Esc to cancel it"), 0, 0));
+        tui.requestRender();
+        return;
+      }
       // 运行中插话：park 进 steering inbox，下一 turn 安全点被内核注入。
       opts.agent.session.steer?.(createUserMessage(route.text));
       append(new Text(color.dim(`↳ queued: ${route.text}`), 0, 0));
@@ -370,7 +464,9 @@ export function createTuiApp(opts: TuiAppOptions): TuiApp {
       }
       if (data === "\x1b" && running && !tui.hasOverlay()) {
         // 裸 Esc 且正在跑、且无 overlay：中断当前 run（不退出）。有 overlay 时 Esc 交给 overlay。
-        opts.agent.session.abort?.("user interrupt");
+        // /multi 在跑则取消整批；否则中断在飞的 LLM run。
+        if (multiAbort) multiAbort.abort();
+        else opts.agent.session.abort?.("user interrupt");
         return { consume: true };
       }
       return undefined;

@@ -403,6 +403,126 @@ describe("TUI app smoke (headless, dual-track via fake terminal)", () => {
     app.stop();
   });
 
+  const idleAgent: TuiAgentLike = { model: { id: "qwen-turbo", contextWindow: 200_000 }, session: idleSession };
+
+  it("/multi: fans out one read-only sub-agent per @file, renders per-file results + summary", async () => {
+    const tasks: string[] = [];
+    const app = createTuiApp({
+      agent: idleAgent,
+      terminal: new FakeTerminal(),
+      cwd: process.cwd(),
+      spawnReadOnlySubAgent: async (task: string) => {
+        tasks.push(task);
+        return { ok: true, text: `analysis of the file` };
+      },
+    });
+    await app.submit("/multi find bugs @a.ts @b.ts");
+    expect(tasks).toHaveLength(2); // 两个 @file → 两个子代理
+    expect(tasks.every((t) => t.includes("find bugs"))).toBe(true);
+    const out = strip(app.tui.render(80).join("\n"));
+    expect(out).toContain("⇉ /multi (read-only) over 2 files");
+    expect(out).toContain("2/2 succeeded"); // 聚合摘要
+    expect(out).toContain("a.ts");
+    expect(out).toContain("b.ts");
+    expect(app.isRunning()).toBe(false);
+  });
+
+  it("/multi without @files: shows usage, spawns nothing", async () => {
+    let spawned = 0;
+    const app = createTuiApp({
+      agent: idleAgent,
+      terminal: new FakeTerminal(),
+      cwd: process.cwd(),
+      spawnReadOnlySubAgent: async () => {
+        spawned++;
+        return { ok: true, text: "x" };
+      },
+    });
+    await app.submit("/multi just some text without files");
+    expect(spawned).toBe(0);
+    expect(strip(app.tui.render(80).join("\n"))).toContain("usage: /multi");
+  });
+
+  it("/multi when not wired (no spawnReadOnlySubAgent): clear message, no-op", async () => {
+    const app = createTuiApp({ agent: idleAgent, terminal: new FakeTerminal(), cwd: process.cwd() });
+    await app.submit("/multi find bugs @a.ts");
+    expect(strip(app.tui.render(80).join("\n"))).toContain("/multi not available");
+  });
+
+  it("/multi while a normal run is in flight: busy guard, spawns nothing", async () => {
+    let spawned = 0;
+    const { session, release } = gatedSession();
+    const app = createTuiApp({
+      agent: { model: { id: "qwen-turbo" }, session },
+      terminal: new FakeTerminal(),
+      cwd: process.cwd(),
+      spawnReadOnlySubAgent: async () => {
+        spawned++;
+        return { ok: true, text: "x" };
+      },
+    });
+    const first = app.submit("go"); // 普通 run 占住 running
+    await new Promise((r) => setTimeout(r, 0));
+    expect(app.isRunning()).toBe(true);
+
+    await app.submit("/multi check @a.ts"); // 运行中的 /multi → busy 守卫
+    expect(spawned).toBe(0);
+    expect(strip(app.tui.render(80).join("\n"))).toContain("busy");
+
+    release();
+    await first;
+  });
+
+  it("Esc during /multi cancels the whole batch (in-flight sub-agents get the aborted signal)", async () => {
+    let sawAbort = false;
+    let release!: () => void;
+    const gate = new Promise<void>((r) => {
+      release = r;
+    });
+    const term = new FakeTerminal();
+    const app = createTuiApp({
+      agent: { model: { id: "qwen-turbo" }, session: idleSession },
+      terminal: term,
+      cwd: process.cwd(),
+      spawnReadOnlySubAgent: (_task, signal) =>
+        new Promise((resolve) => {
+          signal.addEventListener("abort", () => {
+            sawAbort = true;
+            resolve({ ok: false, text: "aborted" });
+          });
+          void gate.then(() => resolve({ ok: true, text: "done" }));
+        }),
+    });
+    app.start();
+    const run = app.submit("/multi check @a.ts @b.ts");
+    await new Promise((r) => setTimeout(r, 0));
+    expect(app.isRunning()).toBe(true);
+
+    term.feed("\x1b"); // Esc → 取消整批
+    await run;
+    expect(sawAbort).toBe(true); // 在飞子代理确实收到了 abort signal
+    expect(app.isRunning()).toBe(false);
+    release();
+    app.stop();
+  });
+
+  it("/multi isolates a failing sub-agent (one ✗, batch still summarized)", async () => {
+    const app = createTuiApp({
+      agent: idleAgent,
+      terminal: new FakeTerminal(),
+      cwd: process.cwd(),
+      spawnReadOnlySubAgent: async (task: string) => {
+        if (task.includes("bad.ts")) throw new Error("read failed");
+        return { ok: true, text: "ok" };
+      },
+    });
+    await app.submit("/multi check @good.ts @bad.ts");
+    const out = strip(app.tui.render(80).join("\n"));
+    expect(out).toContain("1/2 succeeded"); // 一个失败被隔离
+    expect(out).toContain("✓ good.ts");
+    expect(out).toContain("✗ bad.ts");
+  });
+
   it("Ctrl-C: run() resolves and quit aborts the session (no request leak)", async () => {
     let aborted = false;
     const app = makeApp(scriptedSession([{ coarse: { type: "session-end", summary } }], summary, () => {
