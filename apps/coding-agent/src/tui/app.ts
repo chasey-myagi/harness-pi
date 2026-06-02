@@ -19,16 +19,30 @@ import {
   Text,
   TUI,
 } from "@mariozechner/pi-tui";
-import type { RunSummary, SessionEvent } from "@harness-pi/core";
+import type { LiveEvent, RunSummary, SessionEvent } from "@harness-pi/core";
 import { coarseEventToActions, type TuiAction } from "./event-bridge.js";
+import { LiveStreamAccumulator, type StreamOp } from "./live-stream.js";
 import { formatStatusBar, formatToolCalls, formatToolResult } from "./format.js";
 import { color, editorTheme, markdownTheme } from "./theme.js";
+
+const LIVE_TYPES: ReadonlyArray<LiveEvent["type"]> = [
+  "message_start",
+  "text_delta",
+  "thinking_delta",
+  "toolcall_delta",
+  "message_end",
+];
 
 /** 运行循环只需要 session 的这点能力——便于注入 fake 做 headless 测试。 */
 export interface TuiSession {
   runStreaming(
     prompt: string,
   ): AsyncIterable<SessionEvent> & { finalSummary: Promise<RunSummary> };
+  /** 订阅 fine 轨 LiveEvent（token/thinking delta），返回退订函数。 */
+  on<T extends LiveEvent["type"]>(
+    type: T,
+    handler: (event: Extract<LiveEvent, { type: T }>) => void,
+  ): () => void;
   abort?(reason?: string): void;
 }
 
@@ -77,6 +91,8 @@ export function createTuiApp(opts: TuiAppOptions): TuiApp {
 
   let running = false;
   const stats: StatsView = {};
+  // 当前正在流式的助手组件（懒创建：谁先流先 append → thinking 在答案上方）。
+  let current: { assistant?: Markdown; thinking?: Text } = {};
   renderStatusBar();
 
   function renderStatusBar(state?: string): void {
@@ -123,6 +139,48 @@ export function createTuiApp(opts: TuiAppOptions): TuiApp {
     }
   }
 
+  function ensureAssistant(): Markdown {
+    if (!current.assistant) {
+      current.assistant = new Markdown("", 0, 0, markdownTheme);
+      append(current.assistant);
+    }
+    return current.assistant;
+  }
+  function ensureThinking(): Text {
+    if (!current.thinking) {
+      current.thinking = new Text("", 0, 0);
+      append(current.thinking);
+    }
+    return current.thinking;
+  }
+
+  /** 把 fine 轨累积器产出的 StreamOp 落到"当前流式助手组件"上（懒创建 → 谁先流先 append）。 */
+  function applyStreamOp(op: StreamOp): void {
+    switch (op.kind) {
+      case "begin":
+        current = {}; // 新助手消息；组件等首个 delta 再建
+        break;
+      case "thinking":
+        // 守卫 length>0：空 delta（理论上 provider 不发）不凭空 append 空组件。
+        if (op.text.length > 0) ensureThinking().setText(color.dim(`» ${op.text}`));
+        break;
+      case "text":
+        if (op.text.length > 0) ensureAssistant().setText(op.text);
+        break;
+      case "end":
+        // 权威定稿：非流式 provider 无 delta，靠这里据 message 建组件。
+        if (op.thinking.length > 0) ensureThinking().setText(color.dim(`» ${op.thinking}`));
+        if (op.text.length > 0) ensureAssistant().setText(op.text);
+        if (op.toolCalls.length > 0) append(new Text(formatToolCalls(op.toolCalls), 0, 0));
+        current = {};
+        break;
+      default: {
+        const _exhaustive: never = op;
+        void _exhaustive;
+      }
+    }
+  }
+
   function finalize(summary: RunSummary): void {
     stats.input = summary.usage.input;
     stats.output = summary.usage.output;
@@ -142,10 +200,20 @@ export function createTuiApp(opts: TuiAppOptions): TuiApp {
     status.setMessage("thinking…");
     renderStatusBar("running");
     tui.requestRender();
+
+    // fine 轨：先订阅再 runStreaming（否则丢首事件）。assistant 文本/thinking 经此逐 token 流入。
+    const acc = new LiveStreamAccumulator();
+    const onLive = (event: LiveEvent): void => {
+      for (const op of acc.onEvent(event)) applyStreamOp(op);
+      tui.requestRender();
+    };
+    const unsubs = LIVE_TYPES.map((type) => opts.agent.session.on(type, onLive));
+
     try {
       const stream = opts.agent.session.runStreaming(t);
       for await (const ev of stream) {
-        for (const a of coarseEventToActions(ev)) applyAction(a);
+        // suppressAssistant：assistant + toolCalls 已由 fine 轨渲染，coarse llm-end 不再重复。
+        for (const a of coarseEventToActions(ev, { suppressAssistant: true })) applyAction(a);
         tui.requestRender();
       }
       // 错误已由流内 error 事件渲染过；finalSummary 在内核 reject 路径会再抛同一个 err，
@@ -158,6 +226,8 @@ export function createTuiApp(opts: TuiAppOptions): TuiApp {
         message: err instanceof Error ? err.message : String(err),
       });
     } finally {
+      for (const unsub of unsubs) unsub();
+      current = {};
       running = false;
       status.stop();
       status.setMessage("");

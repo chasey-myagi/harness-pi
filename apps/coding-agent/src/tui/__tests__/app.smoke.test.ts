@@ -1,13 +1,12 @@
 import { describe, it, expect } from "vitest";
 import type { Terminal } from "@mariozechner/pi-tui";
-import type { AssistantMessage, RunSummary, SessionEvent } from "@harness-pi/core";
-import { createTuiApp, type TuiAgentLike } from "../app.js";
+import type { AssistantMessage, LiveEvent, RunSummary, SessionEvent } from "@harness-pi/core";
+import { createTuiApp, type TuiAgentLike, type TuiSession } from "../app.js";
 
 const ZERO = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } };
 const strip = (s: string): string => s.replace(/\x1b\[[0-9;]*m/g, "");
 
 class FakeTerminal implements Terminal {
-  output = "";
   private onInput?: (data: string) => void;
   get columns(): number {
     return 80;
@@ -21,15 +20,12 @@ class FakeTerminal implements Terminal {
   start(onInput: (data: string) => void): void {
     this.onInput = onInput;
   }
-  /** 模拟终端把按键喂给 TUI（供 Ctrl-C 等键位测试）。 */
   feed(data: string): void {
     this.onInput?.(data);
   }
   stop(): void {}
   async drainInput(): Promise<void> {}
-  write(data: string): void {
-    this.output += data;
-  }
+  write(): void {}
   moveBy(): void {}
   hideCursor(): void {}
   showCursor(): void {}
@@ -44,90 +40,121 @@ function assistant(content: AssistantMessage["content"]): AssistantMessage {
   return { role: "assistant", content, api: "", provider: "", model: "qwen-turbo", usage: ZERO, stopReason: "stop", timestamp: 0 };
 }
 
-function fakeStream(
-  events: SessionEvent[],
-  summary: RunSummary,
-): AsyncIterable<SessionEvent> & { finalSummary: Promise<RunSummary> } {
-  const gen = (async function* () {
-    for (const e of events) yield e;
-  })();
-  return Object.assign(gen, { finalSummary: Promise.resolve(summary) });
-}
+type Step = { live: LiveEvent } | { coarse: SessionEvent } | { throw: Error };
 
-function makeAgent(events: SessionEvent[], summary: RunSummary): TuiAgentLike {
-  return {
-    model: { id: "qwen-turbo" },
-    session: { runStreaming: () => fakeStream(events, summary) },
-    getCostEstimate: () => ({ amount: 0.0012, currency: "CNY" }),
+/** 同时驱动 fine 轨（session.on）+ coarse 轨（runStreaming）的脚本化 session——贴近真实内核双轨。 */
+function scriptedSession(steps: Step[], summary: RunSummary, abort?: () => void): TuiSession {
+  const listeners = new Map<string, Set<(e: LiveEvent) => void>>();
+  const session: TuiSession = {
+    on<T extends LiveEvent["type"]>(type: T, handler: (e: Extract<LiveEvent, { type: T }>) => void): () => void {
+      const set = listeners.get(type) ?? new Set<(e: LiveEvent) => void>();
+      set.add(handler as (e: LiveEvent) => void);
+      listeners.set(type, set);
+      return () => set.delete(handler as (e: LiveEvent) => void);
+    },
+    runStreaming() {
+      const gen = (async function* (): AsyncGenerator<SessionEvent> {
+        for (const s of steps) {
+          if ("live" in s) {
+            for (const cb of listeners.get(s.live.type) ?? []) cb(s.live);
+          } else if ("throw" in s) {
+            throw s.throw; // 模拟流中途抛错
+          } else {
+            yield s.coarse;
+          }
+          await Promise.resolve(); // 让两轨交错
+        }
+      })();
+      return Object.assign(gen, { finalSummary: Promise.resolve(summary) });
+    },
   };
+  if (abort) session.abort = abort;
+  return session;
 }
 
-describe("TUI app smoke (headless via fake terminal)", () => {
+const NOOP_ON: TuiSession["on"] = () => () => {};
+
+describe("TUI app smoke (headless, dual-track via fake terminal)", () => {
   const summary: RunSummary = { turns: 2, continuations: 0, reason: "done", usage: { ...ZERO, input: 123, output: 45 } };
-  const events: SessionEvent[] = [
-    { type: "session-start", sessionId: "s", source: "run", initialPrompt: "hi" },
-    { type: "turn-start", turnIdx: 0 },
+  const readCall = { type: "toolCall" as const, id: "1", name: "read", arguments: { path: "a.ts" } };
+
+  const steps: Step[] = [
+    { coarse: { type: "session-start", sessionId: "s", source: "run" } },
+    { coarse: { type: "turn-start", turnIdx: 0 } },
+    // turn 0：助手经 fine 轨流式 "let me check" + 一个 toolCall
+    { live: { type: "message_start" } },
+    { live: { type: "text_delta", contentIndex: 0, delta: "let me " } },
+    { live: { type: "text_delta", contentIndex: 0, delta: "check" } },
+    { live: { type: "message_end", message: assistant([{ type: "text", text: "let me check" }, readCall]) } },
+    { coarse: { type: "llm-end", msg: assistant([{ type: "text", text: "let me check" }, readCall]), durationMs: 5 } }, // 被 suppress
     {
-      type: "llm-end",
-      msg: assistant([
-        { type: "text", text: "let me check" },
-        { type: "toolCall", id: "1", name: "read", arguments: { path: "a.ts" } },
-      ]),
-      durationMs: 5,
+      coarse: {
+        type: "tool-end",
+        call: readCall,
+        result: { content: [{ type: "text", text: "file body here" }], isError: false },
+        durationMs: 12,
+      },
     },
-    {
-      type: "tool-end",
-      call: { type: "toolCall", id: "1", name: "read", arguments: { path: "a.ts" } },
-      result: { content: [{ type: "text", text: "file body here" }], isError: false },
-      durationMs: 12,
-    },
-    { type: "turn-start", turnIdx: 1 },
-    { type: "llm-end", msg: assistant([{ type: "text", text: "# Done\nAll good." }]), durationMs: 4 },
-    { type: "turn-end", turnIdx: 1, toolResultsCount: 0, stopReason: "stop" },
-    { type: "session-end", summary },
+    { coarse: { type: "turn-start", turnIdx: 1 } },
+    // turn 1：最终答案流式；故意只流 "All "，message_end 权威纠正成 "All good."
+    { live: { type: "message_start" } },
+    { live: { type: "text_delta", contentIndex: 0, delta: "# Done\n" } },
+    { live: { type: "text_delta", contentIndex: 0, delta: "All " } },
+    { live: { type: "message_end", message: assistant([{ type: "text", text: "# Done\nAll good." }]) } },
+    { coarse: { type: "llm-end", msg: assistant([{ type: "text", text: "# Done\nAll good." }]), durationMs: 4 } }, // 被 suppress
+    { coarse: { type: "turn-end", turnIdx: 1, toolResultsCount: 0, stopReason: "stop" } },
+    { coarse: { type: "session-end", summary } },
   ];
 
-  it("runs a full coarse-track round and renders user/toolCall/toolResult/assistant/statusbar", async () => {
-    const term = new FakeTerminal();
-    const app = createTuiApp({ agent: makeAgent(events, summary), terminal: term });
+  function makeApp(session: TuiSession): ReturnType<typeof createTuiApp> {
+    const agent: TuiAgentLike = { model: { id: "qwen-turbo" }, session, getCostEstimate: () => ({ amount: 0.0012, currency: "CNY" }) };
+    return createTuiApp({ agent, terminal: new FakeTerminal() });
+  }
 
+  it("dual-track round: streams assistant via fine track, tool result via coarse, status bar from summary", async () => {
+    const app = makeApp(scriptedSession(steps, summary));
     await app.submit("hi there");
 
     expect(app.isRunning()).toBe(false);
     const out = strip(app.tui.render(80).join("\n"));
     expect(out).toContain("hi there"); // 用户消息
-    expect(out).toContain("read(path: a.ts)"); // 工具调用摘要
-    expect(out).toContain("file body here"); // 工具结果
-    expect(out).toContain("All good."); // 末条助手消息（Markdown 渲染）
-    expect(out).toContain("qwen-turbo"); // 状态栏 model
-    expect(out).toContain("↑123 ↓45"); // 状态栏 tokens（来自 session-end 事件的 summary → finalize 读 usage）
-    expect(out).toContain("¥0.0012"); // 状态栏 cost
+    expect(out).toContain("let me check"); // 第一条助手（fine 轨流式）
+    expect(out).toContain("read(path: a.ts)"); // toolCall（fine 轨 message_end）
+    expect(out).toContain("file body here"); // 工具结果（coarse tool-end）
+    expect(out).toContain("All good."); // 末条助手（message_end 权威纠正自 "All "）
+    expect(out).toContain("qwen-turbo"); // 状态栏
+    expect(out).toContain("↑123 ↓45");
+    expect(out).toContain("¥0.0012");
+  });
+
+  it("suppresses coarse llm-end so the assistant message is rendered exactly once (no double)", async () => {
+    const app = makeApp(scriptedSession(steps, summary));
+    await app.submit("hi");
+    const out = strip(app.tui.render(80).join("\n"));
+    expect(out.split("All good.").length - 1).toBe(1); // 只出现一次
   });
 
   it("ignores empty submits (no user bubble added)", async () => {
-    const term = new FakeTerminal();
-    const app = createTuiApp({ agent: makeAgent([{ type: "session-end", summary }], summary), terminal: term });
+    const app = makeApp(scriptedSession([{ coarse: { type: "session-end", summary } }], summary));
     const before = app.tui.render(80).join("\n");
     await app.submit("   ");
-    const after = app.tui.render(80).join("\n");
-    expect(after).toBe(before);
+    expect(app.tui.render(80).join("\n")).toBe(before);
   });
 
   it("surfaces a stream error as an error line, not a throw", async () => {
-    const term = new FakeTerminal();
     const boom: TuiAgentLike = {
       model: { id: "qwen-turbo" },
       session: {
+        on: NOOP_ON,
         runStreaming: () => {
           const gen = (async function* (): AsyncGenerator<SessionEvent> {
             throw new Error("provider exploded");
           })();
-          // 真实内核即便出错也 resolve 一个 reason:"error" 的 RunSummary（不 reject）；这里 resolve 避免悬空 rejection。
           return Object.assign(gen, { finalSummary: Promise.resolve(summary) });
         },
       },
     };
-    const app = createTuiApp({ agent: boom, terminal: term });
+    const app = createTuiApp({ agent: boom, terminal: new FakeTerminal() });
     await expect(app.submit("hi")).resolves.toBeUndefined();
     expect(app.isRunning()).toBe(false);
     expect(strip(app.tui.render(80).join("\n"))).toContain("provider exploded");
@@ -141,48 +168,85 @@ describe("TUI app smoke (headless via fake terminal)", () => {
     const agent: TuiAgentLike = {
       model: { id: "qwen-turbo" },
       session: {
+        on: NOOP_ON,
         runStreaming: () => {
           const gen = (async function* (): AsyncGenerator<SessionEvent> {
             yield { type: "turn-start", turnIdx: 0 };
-            await gate; // 卡住，模拟在飞的 run
+            await gate;
           })();
           return Object.assign(gen, { finalSummary: gate.then(() => summary) });
         },
       },
     };
-    const term = new FakeTerminal();
-    const app = createTuiApp({ agent, terminal: term });
+    const app = createTuiApp({ agent, terminal: new FakeTerminal() });
 
-    const first = app.submit("first prompt"); // 启动并卡在 gate 上
-    await new Promise((r) => setTimeout(r, 0)); // 让它跑到 running=true
+    const first = app.submit("first prompt");
+    await new Promise((r) => setTimeout(r, 0));
     expect(app.isRunning()).toBe(true);
 
-    await app.submit("second prompt"); // 运行中：守卫直接 return（no-op）
+    await app.submit("second prompt");
     const out = strip(app.tui.render(80).join("\n"));
     expect(out).toContain("first prompt");
-    expect(out).not.toContain("second prompt"); // 第二条没被加成用户气泡
+    expect(out).not.toContain("second prompt");
 
     release();
     await first;
     expect(app.isRunning()).toBe(false);
   });
 
-  it("Ctrl-C: run() resolves, quit aborts the session (no request leak)", async () => {
+  it("fine-track thinking streams ABOVE the answer", async () => {
+    const app = makeApp(
+      scriptedSession(
+        [
+          { coarse: { type: "turn-start", turnIdx: 0 } },
+          { live: { type: "message_start" } },
+          { live: { type: "thinking_delta", contentIndex: 0, delta: "reasoning " } },
+          { live: { type: "thinking_delta", contentIndex: 0, delta: "step" } },
+          { live: { type: "text_delta", contentIndex: 0, delta: "the answer" } },
+          {
+            live: {
+              type: "message_end",
+              message: assistant([{ type: "thinking", thinking: "reasoning step" }, { type: "text", text: "the answer" }]),
+            },
+          },
+          { coarse: { type: "session-end", summary } },
+        ],
+        summary,
+      ),
+    );
+    await app.submit("q");
+    const out = strip(app.tui.render(80).join("\n"));
+    expect(out).toContain("reasoning step"); // thinking 渲出
+    expect(out).toContain("the answer");
+    expect(out.indexOf("reasoning step")).toBeLessThan(out.indexOf("the answer")); // thinking 在答案之上
+  });
+
+  it("error mid-stream: shows the partial streamed text AND an error line", async () => {
+    const app = makeApp(
+      scriptedSession(
+        [
+          { live: { type: "message_start" } },
+          { live: { type: "text_delta", contentIndex: 0, delta: "partial bit" } },
+          { throw: new Error("mid-stream boom") },
+        ],
+        summary,
+      ),
+    );
+    await expect(app.submit("go")).resolves.toBeUndefined();
+    const out = strip(app.tui.render(80).join("\n"));
+    expect(out).toContain("partial bit"); // 已流式的部分文本保留
+    expect(out).toContain("mid-stream boom"); // 错误行
+    expect(app.isRunning()).toBe(false);
+  });
+
+  it("Ctrl-C: run() resolves and quit aborts the session (no request leak)", async () => {
     let aborted = false;
-    const agent: TuiAgentLike = {
-      model: { id: "qwen-turbo" },
-      session: {
-        runStreaming: () => fakeStream([{ type: "session-end", summary }], summary),
-        abort: () => {
-          aborted = true;
-        },
-      },
-    };
-    const term = new FakeTerminal();
-    const app = createTuiApp({ agent, terminal: term });
-    const done = app.run(); // 接管终端、返回 exit promise
-    term.feed("\x03"); // 模拟 Ctrl-C
-    await done; // run() 在 quit() 后 resolve
-    expect(aborted).toBe(true); // quit 接线了 session.abort
+    const app = makeApp(scriptedSession([{ coarse: { type: "session-end", summary } }], summary, () => {
+      aborted = true;
+    }));
+    const done = app.run();
+    (app.tui.terminal as FakeTerminal).feed("\x03"); // 模拟 Ctrl-C
+    await done;
+    expect(aborted).toBe(true);
   });
 });

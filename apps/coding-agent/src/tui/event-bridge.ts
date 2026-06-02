@@ -51,15 +51,25 @@ export function toolResultText(result: ToolExecResult): string {
     .join("\n");
 }
 
+export interface CoarseOptions {
+  /**
+   * fine 轨（LiveEvent）激活时置 true：`llm-end` 的 assistant/toolCalls 已由 fine 轨的
+   * message_start→message_end 渲染，这里不再重复产出（否则同一条助手消息出现两次）。
+   * 其余事件（turn-start/tool-end/session-end/error）不受影响。
+   */
+  suppressAssistant?: boolean;
+}
+
 /**
  * 把一条 coarse `SessionEvent` 映射成 0..N 个 `TuiAction`。纯函数、无副作用、穷尽处理所有事件类型。
  * 注：用户自己的 prompt 不在此产出——app 在 submit 时直接插一条 user 消息（session-start 不回放它）。
  */
-export function coarseEventToActions(event: SessionEvent): TuiAction[] {
+export function coarseEventToActions(event: SessionEvent, opts: CoarseOptions = {}): TuiAction[] {
   switch (event.type) {
     case "turn-start":
       return [{ kind: "status", text: `turn ${event.turnIdx}…` }];
     case "llm-end": {
+      if (opts.suppressAssistant) return []; // fine 轨已渲染 assistant + toolCalls
       const actions: TuiAction[] = [];
       const text = assistantText(event.msg);
       const thinking = assistantThinking(event.msg);

@@ -124,6 +124,24 @@ describe("event-bridge: coarseEventToActions", () => {
     expect(actions).toEqual([{ kind: "toolCalls", calls }]);
   });
 
+  it("suppressAssistant: llm-end yields nothing (fine track owns assistant), but other events still fire", () => {
+    const llm = coarseEventToActions(
+      { type: "llm-end", msg: assistant([{ type: "text", text: "hi" }, { type: "toolCall", id: "1", name: "ls", arguments: {} }]), durationMs: 1 },
+      { suppressAssistant: true },
+    );
+    expect(llm).toEqual([]); // assistant + toolCalls 交给 fine 轨
+
+    const call: ToolCall = { type: "toolCall", id: "1", name: "ls", arguments: {} };
+    const tool = coarseEventToActions(
+      { type: "tool-end", call, result: { content: [{ type: "text", text: "ok" }] }, durationMs: 2 },
+      { suppressAssistant: true },
+    );
+    expect(tool).toEqual([{ kind: "toolResult", name: "ls", ok: true, output: "ok", durationMs: 2 }]);
+    expect(coarseEventToActions({ type: "turn-start", turnIdx: 1 }, { suppressAssistant: true })).toEqual([
+      { kind: "status", text: expect.stringContaining("1") },
+    ]);
+  });
+
   it("tool-end → a toolResult action with ok/output/duration", () => {
     const call: ToolCall = { type: "toolCall", id: "1", name: "bash", arguments: { cmd: "ls" } };
     const result: ToolExecResult = { content: [{ type: "text", text: "a.ts\nb.ts" }], isError: false };
