@@ -10,11 +10,28 @@
  * 详见 docs/06-controllers.md §3。
  */
 
-import type { AgentSession, RunSummary, Message } from "@harness-pi/core";
+import { AgentSession } from "@harness-pi/core";
+import type { RunSummary, Message, SessionStore } from "@harness-pi/core";
 
 export interface LifecycleRestartOptions {
-  /** 创建（或重建）session 的工厂；initialMessages 为续跑历史。 */
-  sessionFactory: (initialMessages?: Message[]) => AgentSession;
+  /**
+   * 创建（或重建）session 的工厂；initialMessages 为续跑历史（**内存**搬历史，仅同进程恢复）。
+   * 与 `resume` **二选一**。
+   */
+  sessionFactory?: (initialMessages?: Message[]) => AgentSession;
+  /**
+   * **持久化 resume 模式**（与 `sessionFactory` 二选一）：每次（重）启用 `AgentSession.resume(store,
+   * sessionId, deps)` 从注入的 `SessionStore` 重建历史——能跨**进程崩溃**恢复（内存搬历史做不到）。
+   * 语义：`run(prompt)` 时若该 sessionId 在 store 里**已有历史**（典型：崩溃后冷启动），则**忽略 prompt**、
+   * 直接 `continue()` 续跑那次中断的 run；否则按新 session 跑 `run(prompt)`。每次可重试 abort 后都重新
+   * resume + continue（始终从落盘历史续，不靠内存）。`deps` 即 resume 的第三参（model/tools/hooks/…，
+   * 不含 store/sessionId）。
+   */
+  resume?: {
+    store: SessionStore;
+    sessionId: string;
+    deps: Parameters<typeof AgentSession.resume>[2];
+  };
   /** 最大重启次数。默认 3。 */
   maxRetries?: number;
   /** 重启间隔（ms）。默认 2000。 */
@@ -33,6 +50,12 @@ const DEFAULT_RETRY_DELAY_MS = 2000;
 
 export class LifecycleRestart {
   constructor(private readonly opts: LifecycleRestartOptions) {
+    // 恰好二选一：内存搬历史（sessionFactory）或持久化 resume（resume），不能都给或都不给。
+    if (!!opts.sessionFactory === !!opts.resume) {
+      throw new Error(
+        "LifecycleRestart: provide exactly one of { sessionFactory, resume }",
+      );
+    }
     if ((opts.maxRetries ?? DEFAULT_MAX_RETRIES) < 0) {
       throw new Error("LifecycleRestart: maxRetries must be >= 0");
     }
@@ -47,11 +70,25 @@ export class LifecycleRestart {
     const isRetryable =
       this.opts.isRetryable ?? ((r: string) => r.startsWith("watchdog:"));
 
-    let session = this.opts.sessionFactory();
-    let attempt = 0;
-    let summary: RunSummary;
     const runOpts = opts?.signal ? { signal: opts.signal } : {};
-    summary = await session.run(prompt, runOpts);
+    let attempt = 0;
+    let session: AgentSession;
+    let summary: RunSummary;
+
+    if (this.opts.resume) {
+      const { store, sessionId, deps } = this.opts.resume;
+      session = await AgentSession.resume(store, sessionId, deps);
+      // 判据与重放结果**同源**：直接看 resume 实际重放出的 messages 是否非空，而不是 `getLeafId!==null`
+      //（leaf 可能是 resume 会忽略的 terminal entry——那是"有没有 entry"，不是"重放出有没有消息"）。
+      // 非空 = 崩溃冷启动恢复 → continue 续跑中断的那次；空（未知/全新 session）→ run(prompt)。
+      summary =
+        session.messages.length > 0
+          ? await session.continue(runOpts)
+          : await session.run(prompt, runOpts);
+    } else {
+      session = this.opts.sessionFactory!();
+      summary = await session.run(prompt, runOpts);
+    }
 
     while (
       summary.reason === "aborted" &&
@@ -61,7 +98,8 @@ export class LifecycleRestart {
       !opts?.signal?.aborted
     ) {
       attempt++;
-      const carriedMessages = [...session.messages];
+      // 内存模式在 delay 前先抓历史快照；resume 模式无需快照（历史在 store 里）。
+      const carriedMessages = this.opts.resume ? undefined : [...session.messages];
       if (delay > 0) {
         await new Promise<void>((resolve) => {
           const t = setTimeout(resolve, delay);
@@ -71,15 +109,22 @@ export class LifecycleRestart {
         });
       }
       if (opts?.signal?.aborted) break;
-      session = this.opts.sessionFactory(carriedMessages);
+      session = this.opts.resume
+        ? await AgentSession.resume(
+            this.opts.resume.store,
+            this.opts.resume.sessionId,
+            this.opts.resume.deps,
+          )
+        : this.opts.sessionFactory!(carriedMessages);
       summary = await session.continue(runOpts);
     }
 
-    // ⚠️ usage 语义：每次重试都 `sessionFactory(carriedMessages)` 造新 session 并搬入历史，
-    // 新 session 的 RunSummary.usage 是「该 session 至今全部 assistant」的累加 —— 含搬进来的
-    // 历史。因此重启间 usage **重叠累加**，这里返回的 `usage` 是「末次 session 视角的累计」而非
-    // 「各 attempt 真消耗之和」。要精确对账 budget，调用方应改累加每个 attempt 的 usage delta，
-    // 或把本字段当成上界。（内核 _accumulatedUsage 契约自洽，重叠源于这里换 session + 搬历史。）
+    // ⚠️ usage 语义：每次重试都换 session 并把历史带进去——内存模式经 `sessionFactory(carriedMessages)`
+    // 搬入，**resume 模式经 `AgentSession.resume` 重放落盘历史**。两种模式下新 session 的 RunSummary.usage
+    // 都是「该 session 至今全部 assistant」的累加（含带进来的历史），因此重启间 usage **同样重叠累加**
+    //（resume 模式别误以为干净——重叠成因是重放历史 assistant 的 usage）。这里返回的 `usage` 是「末次
+    // session 视角的累计」而非「各 attempt 真消耗之和」。要精确对账 budget，调用方应累加每个 attempt 的
+    // usage delta，或把本字段当成上界。（内核 _accumulatedUsage 契约自洽，重叠源于换 session + 带历史。）
     return { ...summary, retries: attempt };
   }
 }
