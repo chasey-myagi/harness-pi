@@ -50,7 +50,7 @@ v0.1 之前必须满足：
 这些是 `bidding-agent` 迁移前的真实 blocker：
 
 - [ ] streaming `message_update` / thinking parity：补可观察的 LLM chunk/update event，不破坏 hook 控制面。
-- [ ] auto-compaction parity：提供基于 `transformMessagesBeforeLlm` 的标准策略或 plugin，不只靠用户手写。
+- [x] auto-compaction parity：`autoCompaction` plugin（`transformMessagesBeforeLlm`，估算 token 体积触发 + 可选 `onContextOverflow`→`compactRestartFresh` 兜底），不再要业务侧手搓触发逻辑。
 - [ ] follow-up / steering parity：明确 `ask_user` 回复插队当前 turn 的模型，避免业务层绕开 kernel。
 - [ ] `ctx.state` hardening：当前 typed registry 已可用，但跨 plugin key 仍需更强约束或 slot API。
 
