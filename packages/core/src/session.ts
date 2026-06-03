@@ -70,6 +70,11 @@ export type LiveEvent =
   | { type: "text_delta"; contentIndex: number; delta: string }
   | { type: "thinking_delta"; contentIndex: number; delta: string }
   | { type: "toolcall_delta"; contentIndex: number; delta: string }
+  // `message_update`：内容块边界（text / thinking / toolcall 各自 `*_end`）发一次的「已拼好的整条
+  // 消息」快照，携带 pi-ai 的 `partial`。比逐 token delta **低频**（每块一次，非每 token，避免 O(n²)
+  // 流量），给偏好渲染整条快照而非自己累积 delta 的前端用；要 token 流的仍订阅 `*_delta`。
+  // 终态以 `message_end` 为准。
+  | { type: "message_update"; message: AssistantMessage }
   // `message_start` 与 `message_end` **严格成对**：成功路径在 try 后 emit 一次（带 message），
   // catch 路径 emit 一次（不带 message）且必 rethrow —— 两路恰好各一次，不重复、不悬空。
   // （注意：不是 try/finally；若把成功路径那次挪进 finally 会与 catch 那次造成 double-emit。）
@@ -1155,6 +1160,13 @@ export class AgentSession {
           ev.type === "toolcall_delta"
         ) {
           this._emitLive({ type: ev.type, contentIndex: ev.contentIndex, delta: ev.delta });
+        } else if (
+          ev.type === "text_end" ||
+          ev.type === "thinking_end" ||
+          ev.type === "toolcall_end"
+        ) {
+          // 内容块收尾：发一次「已拼好的整条消息」快照（pi-ai 的 partial）。低频、给快照式前端。
+          this._emitLive({ type: "message_update", message: ev.partial });
         }
       }
       assistant = await s.result();

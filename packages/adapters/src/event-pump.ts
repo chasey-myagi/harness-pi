@@ -54,6 +54,7 @@ const ALL_LIVE = [
   "text_delta",
   "thinking_delta",
   "toolcall_delta",
+  "message_update",
   "message_end",
 ] as const satisfies ReadonlyArray<LiveEvent["type"]>;
 
