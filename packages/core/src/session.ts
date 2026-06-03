@@ -733,6 +733,9 @@ export class AgentSession {
     getKernelInternals(this._ctx).setSignal(this._abortCtrl.signal);
     this._pendingAttachments = [];
     this._lastTurnError = null;
+    // persistenceErrors 是 per-run 信号（对齐 error/abortReason）：每次 run/continue 清零，
+    // 否则上一次的失败会污染本次干净 run 的 RunSummary.persistenceErrors。
+    this._persistenceErrors = [];
     // 注意：_steerInbox **故意不在此清空**——park 的 steer 是「等下次跑起来时插队」的用户意图，
     // 应跨 run/continue 边界存活、在首个 turn 的安全点 drain；这与 transient 的 _pendingAttachments
     // （上次 run 的残渣、每次清零）语义相反。别"顺手"加 `this._steerInbox = []` 求对称。
@@ -1016,18 +1019,21 @@ export class AgentSession {
    * 未真正完成（persistedOk=false）则把 reason 改 "error" 并补 error。persistedOk 用「最终 flush+terminal
    * 是否成功」这个真实完成信号，而非「是否出现过 error」——故 best-effort 下的瞬时错误若已重试成功，strict
    * 不会误判。
+   *
+   * **只提级 `done`**：strict 仅把「本应成功(done)却落盘不全」这一危险情形提级为 error；已是非 done 终态
+   * （aborted/error/max_turns/max_continuations）**不被覆盖**——它们本就非干净成功、调用方不会误信，且
+   * persistenceErrors 已如实暴露失败。这避免 strict 用 "error" 盖掉合法的 aborted/max_turns 信号，
+   * 也保留某 turn 自然抛错时的原始 `summary.error`（不被 "strict persistence failed" 顶替）。
    */
   private _finalizePersistence(summary: RunSummary, persistedOk: boolean): void {
     if (this._persistenceErrors.length > 0) {
       summary.persistenceErrors = [...this._persistenceErrors];
     }
-    if (this._strictPersistence && !persistedOk) {
+    if (this._strictPersistence && !persistedOk && summary.reason === "done") {
       summary.reason = "error";
-      if (!summary.error) {
-        summary.error = new Error(
-          `strict persistence failed: ${this._persistenceErrors.join("; ") || "store append did not complete"}`,
-        );
-      }
+      summary.error = new Error(
+        `strict persistence failed: ${this._persistenceErrors.join("; ") || "store append did not complete"}`,
+      );
     }
   }
 
