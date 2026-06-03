@@ -12,6 +12,14 @@
  * 与 `compactSummarize` 的关系：两者互补、可二选一。条数阈值直观；token 阈值贴近真实窗口压力，
  * 是 Claude Code 式 auto-compaction 的「自动」所在。summary 后端仍由调用方 `summarize` 提供（与
  * `compactSummarize` 同契约）；本插件负责的是「何时压缩」这条标准策略，不再要业务侧手搓触发逻辑。
+ *
+ * **语义：view-only（#16 的结论）。** 本插件是**只读、非破坏**的——`transformMessagesBeforeLlm` 只压缩
+ * 「本 turn 发给 LLM 的 view」，**绝不改写 `session.messages`**，故完整原始历史**天然**留在 store 里
+ * （by construction 满足 #2「原始历史保留在 store」）。这与 `compactSummarize` 同款。
+ * 因此 resume 时会重放全量历史、模型每 turn 看到的是重新总结的 view，本插件**不写** `compaction_boundary`
+ * store 条目——那是另一条路径（**persistent boundary**）的职责：由 `compactRestartFresh` 控制器把 summary
+ * 持久化进 store、resume 从 summary 起算、丢弃边界前缀，经 `abortOnOverflow` 抵达。两条路径分工明确，
+ * 本插件刻意不再叠加写 store 的机制（会与 `compactRestartFresh` 冗余、并破坏内核 _flushToStore 不变量）。
  */
 
 import type { Hook, HookContext } from "@harness-pi/core";
@@ -30,7 +38,10 @@ export interface AutoCompactionOptions {
     earlyMessages: Message[],
     ctx: HookContext,
   ) => string | Promise<string>;
-  /** token 估算器。默认按消息文本字符数 / 4 粗估（保守、零依赖；接入真 tokenizer 可覆盖）。 */
+  /**
+   * token 估算器。默认 {@link estimateTokensByChars}：CJK 感知（≈ 1 token/字）+ 图片感知（每图扁平估值），
+   * 整体偏**保守高估**（低估会漏触发压缩→窗口溢出，是安全 bug）；零依赖。接入真 tokenizer 可覆盖。
+   */
   estimateTokens?: (messages: Message[]) => number;
   /**
    * 「想覆盖的前缀」比上次缓存增长达到这么多条才重算 summary；默认 = keepRecent。
@@ -46,20 +57,79 @@ export interface AutoCompactionOptions {
   abortOnOverflow?: boolean;
 }
 
-function messageText(m: Message): string {
-  if (typeof m.content === "string") return m.content;
-  return m.content
-    .map((b) => ("text" in b && typeof b.text === "string" ? b.text : JSON.stringify(b)))
-    .join("");
+/**
+ * 单个 CJK 码点判定（含统一表意文字 + 常见 CJK 标点 / 全角字符）。这些码点在主流 tokenizer 里普遍
+ * ≈ 1 token/字，远稠密于 ASCII 的 ≈ 4 char/token，故单独计数。**非 global**，用于逐码点 `.test`：
+ * 　-〿 CJK 符号与标点、㐀-䶿 扩展 A、一-鿿 统一表意文字、豈-﫿 兼容表意文字、＀-￯ 全角/半角形式，
+ * 以及 \u{20000}-\u{2ffff} 扩展 B–F（代理对，需 /u flag + 按码点迭代才能正确命中，否则被当 2 个 ASCII）。
+ */
+const CJK_CP = /[　-〿㐀-䶿一-鿿豈-﫿＀-￯]|[\u{20000}-\u{2ffff}]/u;
+
+/** 单张图片的保守、扁平 token 估算（issue #14）：宁可高估、不可低估，避免漏触发→窗口溢出。 */
+const IMAGE_TOKENS = 1000;
+
+/**
+ * 估算单条文本的 token：CJK 码点按 ≈ 1 token/字计，其余字符按 ≈ 1/4 token 计（向上取整）。
+ * 偏向**高估**——本数用于压缩触发判据，低估的代价是漏触发后 context 溢出（安全 bug，见 #14）。
+ *
+ * **按码点迭代**（`for...of`）而非按 `.length`（UTF-16 码元）：这样扩展 B+ 的代理对 CJK（如 𠀀）算 1 个
+ * 码点 = 1 token（否则 `.length===2` 会被当 2 个 ASCII 字符），且 CJK/ASCII 混排时 `rest` 计数单位一致。
+ */
+function estimateText(text: string): number {
+  let cjk = 0;
+  let rest = 0;
+  for (const ch of text) {
+    if (CJK_CP.test(ch)) cjk++;
+    else rest++;
+  }
+  return cjk + Math.ceil(rest / 4);
 }
 
-/** 默认 token 估算：所有消息文本字符数 / 4 向上取整。粗但单调、零依赖。 */
+/**
+ * 默认 token 估算：CJK 感知 + 图片感知，整体偏保守（高估）。粗但单调、确定、零依赖。
+ *
+ * - **CJK**：每个 CJK 码点 ≈ 1 token（不是 chars/4）。`你好世界` → ≈ 4 token，不再被 4× 低估。
+ * - **图片**：image content block（pi-ai 判别式 `type === "image"`）贡献**扁平** {@link IMAGE_TOKENS} token，
+ *   既不按短 ref 的字符数低估、也不按内联 base64 `data` 的字符数疯狂高估。
+ * - **其余文本**（ASCII 等）：≈ 1/4 token/字符（向上取整），故纯英文仍 ≈ chars/4。
+ *
+ * 想接真 tokenizer：覆盖 `estimateTokens` 选项即可。
+ */
 export function estimateTokensByChars(messages: Message[]): number {
-  let chars = 0;
-  for (const m of messages) chars += messageText(m).length;
-  return Math.ceil(chars / 4);
+  let tokens = 0;
+  for (const m of messages) {
+    if (typeof m.content === "string") {
+      tokens += estimateText(m.content);
+      continue;
+    }
+    for (const b of m.content) {
+      if (b.type === "image") {
+        tokens += IMAGE_TOKENS;
+      } else if ("text" in b && typeof b.text === "string") {
+        tokens += estimateText(b.text);
+      } else {
+        // 其余块（thinking / toolCall 等）按其 JSON 序列化长度粗估，仍走 1/4 规则。
+        tokens += estimateText(JSON.stringify(b));
+      }
+    }
+  }
+  return tokens;
 }
 
+/**
+ * 构造一个 autoCompaction hook。三条**使用须知**（issue #13，违反会得到悄无声息的错误压缩）：
+ *
+ * 1. **Hook 顺序**：本插件从 `transformMessagesBeforeLlm` 收到的 `messages`（≈ `session.messages`）估算
+ *    token，故它必须排在 `trimHistory` 这类**内容裁剪型** transform **之前**。若 `trimHistory` 先跑、把
+ *    旧 toolResult 换成了占位符，autoCompaction 读到的体积就是裁剪**后**的、与真实 context 不符的**陈旧值**，
+ *    可能漏触发。准则：压缩型 hook 排在裁剪型 hook 前面。
+ * 2. **与 compactSummarize 共存**：两者是**二选一**（pick one）。同一 session 的 hook 链里**同时**挂两个，
+ *    会顺序各跑、各自维护**独立缓存**，产生**未定义的压缩边界**（谁先压、压到哪、summary 互相覆盖均无保证）。
+ *    选一个用。
+ * 3. **每 session 一个实例**：闭包缓存（`coveredCount` + summary 文本）假设**一个 hook 实例只服务一个 session**。
+ *    把同一个实例**跨 session 复用**会让 `coveredCount` 被另一个 session 的前缀长度污染，导致 view 错位。
+ *    每个 session 各 `autoCompaction(...)` 一次。
+ */
 export function autoCompaction(opts: AutoCompactionOptions): Hook {
   if (!(opts.maxContextTokens > 0)) {
     throw new Error("autoCompaction: maxContextTokens must be > 0");
