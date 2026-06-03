@@ -29,6 +29,10 @@
     "./metrics/sinks/ndjson-file": {
       "types": "./dist/metrics/sinks/ndjson-file.d.ts",
       "default": "./dist/metrics/sinks/ndjson-file.js"
+    },
+    "./metrics/sinks/postgres": {
+      "types": "./dist/metrics/sinks/postgres.d.ts",
+      "default": "./dist/metrics/sinks/postgres.js"
     }
   },
   "files": ["dist", "src", "README.md", "!**/__tests__/**", "!**/*.test.*"],
@@ -46,6 +50,7 @@
   "devDependencies": {
     "typescript": "^5.6.0",
     "vitest": "^2.1.0",
-    "@types/node": "^22.0.0"
+    "@types/node": "^22.0.0",
+    "pg-mem": "^3.0.14"
   }
 }

@@ -56,7 +56,7 @@ v0.1 之前必须满足：
 
 ## Adapter 候选
 
-- [ ] `PostgresSink`（metrics）：peerDep on `pg`，提供 DDL 示例。
+- [x] `PostgresSink`（metrics）：通过最小 `PgClient` 注入（零 `pg` 依赖，与 `PostgresSessionStore` 同构），导出 `POSTGRES_METRICS_SINK_DDL`，子路径 `@harness-pi/plugins/metrics/sinks/postgres`。
 - [ ] `OtelSink`（metrics）：peerDep on `@opentelemetry/api`。
 
 触发条件：真实部署需要 dashboard 查询或统一 observability stack。
