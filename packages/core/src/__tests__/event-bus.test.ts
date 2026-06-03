@@ -1,7 +1,9 @@
 import { describe, it, expect } from "vitest";
 import { AgentSession } from "../session.js";
+import type { LiveEvent } from "../session.js";
 import { createFakeModel } from "../testing.js";
 import type { HarnessTool } from "../types.js";
+import type { AssistantMessage } from "@mariozechner/pi-ai";
 
 const noopTool: HarnessTool = {
   name: "noop",
@@ -293,6 +295,107 @@ describe("Event Bus · live token deltas via on()", () => {
     session.on("message_update", () => updates++);
     await session.run("hi");
     expect(updates).toBe(2); // thinking_end + text_end
+    fake.teardown();
+  });
+});
+
+/* ──────────────── LiveEvent 契约：穷尽 switch + 负向/边界行为 ──────────────── */
+
+describe("LiveEvent · 契约硬化", () => {
+  // 编译期穷尽 switch：镜像 phase3-capabilities.test.ts 里对 SessionEvent 的 smoke。
+  // 将来给 LiveEvent 加 arm 而不更新这里，`const _: never = e` 会让 tsc 报错。
+  it("compile-time exhaustive switch (smoke) —— 也真跑一遍每个 arm", () => {
+    const handle = (e: LiveEvent): string => {
+      switch (e.type) {
+        case "message_start":
+          return "ms";
+        case "text_delta":
+          return "td";
+        case "thinking_delta":
+          return "kd";
+        case "toolcall_delta":
+          return "cd";
+        case "message_update":
+          return "mu";
+        case "message_end":
+          return "me";
+        default: {
+          const _: never = e;
+          void _;
+          return "?";
+        }
+      }
+    };
+
+    // 不只编译，喂每个 arm 真跑，确保 handle 是 total 的、且各分支可达。
+    const msg = { role: "assistant", content: [] } as unknown as AssistantMessage;
+    const all: LiveEvent[] = [
+      { type: "message_start" },
+      { type: "text_delta", contentIndex: 0, delta: "x" },
+      { type: "thinking_delta", contentIndex: 0, delta: "x" },
+      { type: "toolcall_delta", contentIndex: 0, delta: "x" },
+      { type: "message_update", message: msg },
+      { type: "message_end", message: msg },
+    ];
+    expect(all.map(handle)).toEqual(["ms", "td", "kd", "cd", "mu", "me"]);
+  });
+
+  // 负向：message_update 绝不在同一块的 *_delta 之间穿插；它只在块边界（*_end）发一次，
+  // 即每块的所有 delta 都排在该块那条 update 之前。
+  it("never fires message_update interleaved between deltas of the same block (only at *_end)", async () => {
+    const fake = createFakeModel([
+      {
+        content: [{ type: "text", text: "answer" }],
+        thinkingDeltas: ["mu", "ll"],
+        textDeltas: ["ans", "wer"],
+      },
+    ]);
+    const session = new AgentSession({ model: fake, tools: [] });
+    const seq: string[] = [];
+    session.on("thinking_delta", () => seq.push("kd"));
+    session.on("text_delta", () => seq.push("td"));
+    session.on("message_update", () => seq.push("mu"));
+    await session.run("hi");
+
+    // thinking 块：两条 kd 后才有一条 mu；text 块同理。绝无 kd→mu→kd 或 td→mu→td 穿插。
+    expect(seq).toEqual(["kd", "kd", "mu", "td", "td", "mu"]);
+    // 显式断言：任意 mu 之前不会再出现「与它同块、本该排在它前面」的 delta 被它隔开——
+    // 即每条 mu 都紧跟在其块全部 delta 之后。
+    const firstMu = seq.indexOf("mu");
+    expect(seq.slice(0, firstMu).every((t) => t === "kd")).toBe(true); // 第一块（thinking）的 delta 全在第一条 mu 之前
+    fake.teardown();
+  });
+
+  // 边界：仅含 toolCall 的回合（无 text/thinking）。message_update 在 toolcall_end 发一次。
+  it("toolcall-only turn: message_update fires once for the toolcall block, between start and end", async () => {
+    const fake = createFakeModel([
+      {
+        content: [{ type: "toolCall", name: "noop", arguments: { a: 1 } }],
+        toolcallDeltas: ['{"a":', "1}"],
+      },
+      { content: [{ type: "text", text: "done" }] },
+    ]);
+    const session = new AgentSession({ model: fake, tools: [noopTool] });
+    const seq: string[] = [];
+    let updates = 0;
+    let snapshot: AssistantMessage | undefined;
+    session.on("message_start", () => seq.push("start"));
+    session.on("toolcall_delta", () => seq.push("cd"));
+    session.on("message_update", (e) => {
+      seq.push("update");
+      updates++;
+      snapshot = e.message;
+    });
+    session.on("message_end", () => seq.push("end"));
+    await session.run("hi");
+
+    // 第一回合（toolcall-only）的子序列：start → cd* → update（toolcall_end）→ end。
+    // 取到第一个 end 为止即第一回合。
+    const firstTurn = seq.slice(0, seq.indexOf("end") + 1);
+    expect(firstTurn).toEqual(["start", "cd", "cd", "update", "end"]);
+    expect(updates).toBe(1); // 整个回合只为 toolcall 块发了一次 update
+    // 快照里确有 toolCall 块（即 update 携带的是这条 toolcall-only 消息的 partial）。
+    expect(snapshot?.content.some((b) => b.type === "toolCall")).toBe(true);
     fake.teardown();
   });
 });

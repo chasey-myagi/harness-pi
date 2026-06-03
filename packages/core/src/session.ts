@@ -64,16 +64,26 @@ export type SessionEvent =
  * 这里是回合**进行中**的细粒度 token/thinking/toolcall delta，经 `session.on(type, cb)` 订阅。
  * 它们**可丢**（UI 丢几帧无所谓），不进 transcript；listener 抛错被内核隔离，绝不影响 loop
  * （借鉴 kimi LoopEventDispatcher 的 durable/live 双轨 + live listener 容错）。
+ *
+ * 这个 union 显式列出，让消费者用 discriminated switch 处理。新加 arm 时记得
+ * 同步更新 event-bus.test.ts 的 LiveEvent exhaustive-switch 测试。
  */
 export type LiveEvent =
   | { type: "message_start" }
   | { type: "text_delta"; contentIndex: number; delta: string }
   | { type: "thinking_delta"; contentIndex: number; delta: string }
   | { type: "toolcall_delta"; contentIndex: number; delta: string }
-  // `message_update`：内容块边界（text / thinking / toolcall 各自 `*_end`）发一次的「已拼好的整条
-  // 消息」快照，携带 pi-ai 的 `partial`。比逐 token delta **低频**（每块一次，非每 token，避免 O(n²)
-  // 流量），给偏好渲染整条快照而非自己累积 delta 的前端用；要 token 流的仍订阅 `*_delta`。
-  // 终态以 `message_end` 为准。
+  // `message_update`：**回合进行中**的「中间态、逐块快照」。在每个内容块边界（text / thinking /
+  // toolcall 各自 `*_end`）各发一次，携带 pi-ai 截至此刻**已拼好的 `partial`**。比逐 token delta
+  // **低频**（每块一次，非每 token，避免 O(n²) 流量）。
+  //
+  // **契约（务必看清）**：
+  //   - 它是**中间快照**，不是终态。`message.content` 只含「已收尾的块」，回合还没结束。
+  //   - **终态、权威**的整条消息以 `message_end`（源自 `stream().result()`）为准。
+  //   - 需要终态的消费者**必须**用 `message_end`；把 `message_update.message` 当终态（例如在 mid-abort
+  //     时拿最后一帧 update 当成最终结果）是**错的**——它可能缺少尚未收尾的块。
+  //   - 偏好「渲染整条快照」的 UI **主动**订阅 `message_update`；偏好「自己累积 delta」的 UI **忽略**它、
+  //     只订阅 `*_delta`。两类消费者互不依赖。
   | { type: "message_update"; message: AssistantMessage }
   // `message_start` 与 `message_end` **严格成对**：成功路径在 try 后 emit 一次（带 message），
   // catch 路径 emit 一次（不带 message）且必 rethrow —— 两路恰好各一次，不重复、不悬空。
