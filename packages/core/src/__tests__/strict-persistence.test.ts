@@ -15,7 +15,7 @@ import type { HarnessTool } from "../types.js";
 class FailingStore extends MemorySessionStore {
   calls = 0;
   constructor(
-    private readonly opts: {
+    private opts: {
       failKind?: SessionEntry["kind"];
       failKinds?: SessionEntry["kind"][];
       failFirstCall?: boolean;
@@ -23,6 +23,10 @@ class FailingStore extends MemorySessionStore {
     } = {},
   ) {
     super();
+  }
+  /** 恢复健康（清掉所有失败规则）——受支持的测试 API，避免靠反射改私有字段。 */
+  heal(): void {
+    this.opts = {};
   }
   override async appendEntry(sessionId: string, entry: SessionEntry) {
     this.calls++;
@@ -275,11 +279,74 @@ describe("strict persistence + surfaced persistenceErrors", () => {
     const r1 = await session.run("q1");
     expect(r1.persistenceErrors!.length).toBeGreaterThan(0); // R1 有失败
 
-    // 让 store 恢复健康（清掉 failKind），第二次 run 走干净路径。
-    delete (badStore as unknown as { opts: { failKind?: string } }).opts.failKind;
+    // 让 store 恢复健康，第二次 run 走干净路径。
+    badStore.heal();
     const r2 = await session.run("q2");
     expect(r2.reason).toBe("done");
     expect(r2.persistenceErrors).toBeUndefined(); // 不带 R1 的陈旧错误
+    fake.teardown();
+  });
+
+  it("strict 不覆盖自然 max_turns（非 done 终态不提级）", async () => {
+    // toolCall → toolUse → 想续跑，但 maxTurns=1 截断 → reason 自然为 'max_turns'。
+    // 配 terminal 落盘失败 + strict：reason 仍 'max_turns'（不被盖成 error），persistenceErrors 仍暴露。
+    const store = new FailingStore({ failKind: "terminal" });
+    const fake = createFakeModel([
+      { content: [{ type: "toolCall", name: "noop", arguments: {} }] },
+    ]);
+    const session = new AgentSession({
+      model: fake,
+      tools: [noopTool],
+      store,
+      strictPersistence: true,
+      maxTurns: 1,
+      consoleSink: sink,
+    });
+    const summary = await session.run("q");
+
+    expect(summary.reason).toBe("max_turns"); // strict 不把合法 max_turns 盖成 error
+    expect(summary.persistenceErrors!.some((e) => e.includes("appendEntry(terminal)"))).toBe(true);
+    fake.teardown();
+  });
+
+  it("strict + 健康 store：不误伤干净 run（reason done、无 persistenceErrors、落盘完整）", async () => {
+    // 基线：strict 开着但一切正常，绝不无脑改写——证明提级只针对真实失败。
+    const store = new MemorySessionStore();
+    const fake = createFakeModel([{ content: [{ type: "text", text: "a" }] }]);
+    const session = new AgentSession({
+      model: fake,
+      tools: [],
+      store,
+      strictPersistence: true,
+      consoleSink: sink,
+    });
+    const summary = await session.run("q");
+
+    expect(summary.reason).toBe("done");
+    expect(summary.persistenceErrors).toBeUndefined();
+    const path = await store.getPathToLeaf(session.id);
+    expect(path.at(-1)!.entry.kind).toBe("terminal"); // transcript + terminal 都落了
+    fake.teardown();
+  });
+
+  it("strict message-fail：store 里 transcript 确实不全（messages 一条没落）——钉住 strict 要防的核心事实", async () => {
+    // 只断言返回的 summary 不够；这里直查 store：message append 全失败 → 落盘 0 条 message，
+    // 「done 但 transcript 不全」正是 strict 要拦的危险情形，这条把它从数据层钉死。
+    const store = new FailingStore({ failKind: "message" });
+    const fake = createFakeModel([{ content: [{ type: "text", text: "a" }] }]);
+    const session = new AgentSession({
+      model: fake,
+      tools: [],
+      store,
+      strictPersistence: true,
+      consoleSink: sink,
+    });
+    const summary = await session.run("q");
+
+    expect(summary.reason).toBe("error"); // done 被提级
+    const path = await store.getPathToLeaf(session.id);
+    const msgs = path.filter((e) => e.entry.kind === "message");
+    expect(msgs).toHaveLength(0); // transcript 一条没落 = 落盘不全
     fake.teardown();
   });
 });
