@@ -421,7 +421,7 @@ describe("AgentSession edge cases", () => {
     expect(isErrors).toEqual([false, true, false]);
   });
 
-  it("safe + unsafe mixed: unsafe runs sequentially after safe batch", async () => {
+  it("safe + unsafe mixed: an unsafe call is a barrier — preserves model order (#11.1)", async () => {
     const events: string[] = [];
     const safeTool: HarnessTool = {
       name: "safe",
@@ -462,19 +462,18 @@ describe("AgentSession edge cases", () => {
       tools: [safeTool, unsafeTool],
     });
     await session.run("go");
-    // Safe 批两个并发执行（start-start-end-end 交错）
-    const safeStarts = events.filter((e) => e.startsWith("safe-") && e.endsWith("-start"));
-    expect(safeStarts).toHaveLength(2);
-    // 两个 safe start 应该相邻（中间没 end）
-    const s1StartIdx = events.indexOf("safe-s1-start");
-    const s2StartIdx = events.indexOf("safe-s2-start");
-    // 在 s1 结束前 s2 应该已经 start
-    const s1EndIdx = events.indexOf("safe-s1-end");
-    expect(s2StartIdx).toBeLessThan(s1EndIdx);
-    // Unsafe 严格顺序
-    const u1End = events.indexOf("unsafe-u1-end");
-    const u2Start = events.indexOf("unsafe-u2-start");
-    expect(u2Start).toBeGreaterThan(u1End);
+    // [safe, unsafe, safe, unsafe]：每个 safe 都被 unsafe barrier 隔开、互不相邻 → 不并发，
+    // 严格按模型顺序执行。修复前 s1/s2 会被提到一批并发、u1 抢在 s2 前跑（#11.1）。
+    expect(events).toEqual([
+      "safe-s1-start",
+      "safe-s1-end",
+      "unsafe-u1-start",
+      "unsafe-u1-end",
+      "safe-s2-start",
+      "safe-s2-end",
+      "unsafe-u2-start",
+      "unsafe-u2-end",
+    ]);
   });
 
   it("aborting in middle of session: onSessionEnd still fires once with reason=aborted", async () => {

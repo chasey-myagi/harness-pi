@@ -8,6 +8,15 @@ import { AgentSession } from "../session.js";
 import type { HarnessTool, Hook, HookContext } from "../index.js";
 import { createFakeModel } from "../testing.js";
 
+/** Read the first text block of a toolResult message. */
+function resultText(m: { content: unknown }): string {
+  const c = m.content;
+  if (Array.isArray(c) && c[0] && typeof c[0] === "object" && "text" in c[0]) {
+    return String((c[0] as { text: unknown }).text);
+  }
+  return "";
+}
+
 const echoTool: HarnessTool = {
   name: "echo",
   description: "echo back",
@@ -433,6 +442,95 @@ describe("Integration: Parallel tool execution (isConcurrencySafe)", () => {
     if (toolResults[1]?.role === "toolResult") {
       expect(toolResults[1].toolCallId).toBe("tc-2");
     }
+  });
+
+  it("an unsafe write is a barrier: a later safe read observes the write (#11.1)", async () => {
+    let state = "old";
+    const write: HarnessTool = {
+      name: "write_state",
+      description: "unsafe write",
+      parameters: Type.Object({}),
+      isConcurrencySafe: () => false,
+      async execute() {
+        await new Promise<void>((r) => setTimeout(r, 30));
+        state = "new";
+        return { content: [{ type: "text", text: "wrote" }] };
+      },
+    };
+    const read: HarnessTool = {
+      name: "read_state",
+      description: "safe read",
+      parameters: Type.Object({}),
+      isConcurrencySafe: () => true,
+      async execute() {
+        return { content: [{ type: "text", text: state }] };
+      },
+    };
+    const model = createFakeModel([
+      {
+        content: [
+          { type: "toolCall", id: "w", name: "write_state", arguments: {} },
+          { type: "toolCall", id: "r", name: "read_state", arguments: {} },
+        ],
+      },
+      { content: [{ type: "text", text: "done" }] },
+    ]);
+    const session = new AgentSession({ model, tools: [write, read] });
+    await session.run("go");
+    const r = session.messages.find(
+      (m) => m.role === "toolResult" && m.toolCallId === "r",
+    );
+    // read ran AFTER the write barrier completed — must see "new", not stale "old"
+    expect(r ? resultText(r) : "").toBe("new");
+  });
+
+  it("only contiguous safe runs parallelize; unsafe calls are barriers (#11.1)", async () => {
+    const ev: string[] = [];
+    const mk = (id: string, safe: boolean, ms: number): HarnessTool => ({
+      name: id,
+      description: id,
+      parameters: Type.Object({}),
+      isConcurrencySafe: () => safe,
+      async execute() {
+        ev.push(`start-${id}`);
+        await new Promise<void>((r) => setTimeout(r, ms));
+        ev.push(`end-${id}`);
+        return { content: [{ type: "text", text: id }] };
+      },
+    });
+    const model = createFakeModel([
+      {
+        content: [
+          { type: "toolCall", id: "A", name: "A", arguments: {} },
+          { type: "toolCall", id: "B", name: "B", arguments: {} },
+          { type: "toolCall", id: "W", name: "W", arguments: {} },
+          { type: "toolCall", id: "C", name: "C", arguments: {} },
+          { type: "toolCall", id: "D", name: "D", arguments: {} },
+        ],
+      },
+      { content: [{ type: "text", text: "done" }] },
+    ]);
+    const session = new AgentSession({
+      model,
+      tools: [
+        mk("A", true, 30),
+        mk("B", true, 30),
+        mk("W", false, 10),
+        mk("C", true, 30),
+        mk("D", true, 30),
+      ],
+    });
+    await session.run("go");
+    const at = (e: string): number => ev.indexOf(e);
+    // A,B are a concurrent run: B starts before A ends
+    expect(at("start-B")).toBeLessThan(at("end-A"));
+    // W is a barrier: starts only after A and B both finished
+    expect(at("start-W")).toBeGreaterThan(at("end-A"));
+    expect(at("start-W")).toBeGreaterThan(at("end-B"));
+    // C,D resume concurrency only after W finished
+    expect(at("start-C")).toBeGreaterThan(at("end-W"));
+    expect(at("start-D")).toBeGreaterThan(at("end-W"));
+    expect(at("start-D")).toBeLessThan(at("end-C"));
   });
 });
 

@@ -76,6 +76,40 @@ describe("LifecycleRestart", () => {
     expect(initialMessagesSeen[0]?.length).toBeGreaterThan(0);
   });
 
+  it("abort during the retry delay exits promptly, not after the full delay (#11.4)", async () => {
+    const slowTool: HarnessTool = {
+      name: "slow",
+      description: "slow",
+      parameters: Type.Object({}),
+      async execute() {
+        await new Promise<void>((r) => setTimeout(r, 100));
+        return { content: [{ type: "text", text: "ok" }] };
+      },
+    };
+    const model = createFakeModel([
+      { content: [{ type: "toolCall", name: "slow", arguments: {} }] },
+    ]);
+    const ctrl = new LifecycleRestart({
+      maxRetries: 1,
+      retryDelayMs: 10_000, // huge: if abort doesn't wake the sleep, the run would block ~10s
+      sessionFactory: (im) =>
+        new AgentSession({
+          model,
+          tools: [slowTool],
+          hooks: [watchdog({ turnTimeoutMs: 20 })],
+          ...(im ? { initialMessages: im } : {}),
+        }),
+    });
+    const ac = new AbortController();
+    const t0 = Date.now();
+    // first run watchdog-aborts (~20ms) → enters the 10s retry delay → abort during it
+    setTimeout(() => ac.abort(), 200);
+    const res = await ctrl.run("hi", { signal: ac.signal });
+    const elapsed = Date.now() - t0;
+    expect(elapsed).toBeLessThan(3_000); // promptly, NOT ~10s
+    expect(res.reason).toBe("aborted");
+  });
+
   it("non-retryable abortReason stops immediately", async () => {
     const model = createFakeModel([
       { content: [{ type: "text", text: "ok" }] },
