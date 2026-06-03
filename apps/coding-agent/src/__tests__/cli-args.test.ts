@@ -45,6 +45,24 @@ describe("parseArgs — v0.1.0 flags", () => {
     expect(a.task).toBe("do a thing");
   });
 
+  it("--no-log sets noLog", () => {
+    expect(parseArgs(["--no-log"]).noLog).toBe(true);
+  });
+
+  it("--log-args parses redacted | full | none", () => {
+    expect(parseArgs(["--log-args", "redacted"]).logArgs).toBe("redacted");
+    expect(parseArgs(["--log-args", "full"]).logArgs).toBe("full");
+    expect(parseArgs(["--log-args", "none"]).logArgs).toBe("none");
+  });
+
+  it("--log-args defaults to undefined (agent applies the default)", () => {
+    expect(parseArgs([]).logArgs).toBeUndefined();
+  });
+
+  it("--log-args with an invalid value throws", () => {
+    expect(() => parseArgs(["--log-args", "bogus"])).toThrow(/Invalid --log-args/);
+  });
+
   it("rejects unknown options", () => {
     expect(() => parseArgs(["--nope"])).toThrow(/Unknown option/);
   });

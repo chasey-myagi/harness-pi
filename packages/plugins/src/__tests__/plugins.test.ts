@@ -298,6 +298,67 @@ describe("session-log", () => {
     rmSync(tmp, { recursive: true, force: true });
   });
 
+  it("redactToolArgs 给定时，preToolUse 记脱敏后的 args（原始值不落盘）", async () => {
+    const model = createFakeModel([
+      { content: [{ type: "toolCall", name: "echo", arguments: { msg: "secret-value" } }] },
+      { content: [{ type: "text", text: "done" }] },
+    ]);
+    let seenArgs: unknown;
+    const session = new AgentSession({
+      model,
+      tools: [echoTool],
+      hooks: [
+        sessionLog({
+          dir: tmp,
+          redactToolArgs: (name, args) => {
+            seenArgs = args; // 证明 redactor 拿到的是**原始** args（脱敏发生在落盘前）
+            return { tool: name, redacted: true };
+          },
+        }),
+      ],
+    });
+    await session.run("hi");
+    await new Promise((r) => setTimeout(r, 30));
+
+    // redactor 收到的是未脱敏的原始 args
+    expect(seenArgs).toEqual({ msg: "secret-value" });
+    const content = readFileSync(join(tmp, `${session.id}.ndjson`), "utf-8");
+    const pre = content
+      .trim()
+      .split("\n")
+      .map((l) => JSON.parse(l))
+      .find((e) => e.event === "preToolUse");
+    expect(pre).toBeDefined();
+    expect(pre.args).toEqual({ tool: "echo", redacted: true });
+    // 原始 arg 值不应出现在整份日志里
+    expect(content).not.toContain("secret-value");
+    rmSync(tmp, { recursive: true, force: true });
+  });
+
+  it("未给 redactToolArgs 时，preToolUse 记原始 args（库层默认不脱敏）", async () => {
+    const model = createFakeModel([
+      { content: [{ type: "toolCall", name: "echo", arguments: { msg: "raw-value" } }] },
+      { content: [{ type: "text", text: "done" }] },
+    ]);
+    const session = new AgentSession({
+      model,
+      tools: [echoTool],
+      hooks: [sessionLog({ dir: tmp })],
+    });
+    await session.run("hi");
+    await new Promise((r) => setTimeout(r, 30));
+
+    const content = readFileSync(join(tmp, `${session.id}.ndjson`), "utf-8");
+    const pre = content
+      .trim()
+      .split("\n")
+      .map((l) => JSON.parse(l))
+      .find((e) => e.event === "preToolUse");
+    expect(pre).toBeDefined();
+    expect(pre.args).toEqual({ msg: "raw-value" });
+    rmSync(tmp, { recursive: true, force: true });
+  });
+
   it("dead 状态：stream error 后 status 转 dead，dropped 累加，永不回 ok", async () => {
     const model = createFakeModel([
       { content: [{ type: "toolCall", name: "echo", arguments: { msg: "1" } }] },

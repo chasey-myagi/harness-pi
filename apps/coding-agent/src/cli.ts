@@ -33,6 +33,8 @@ interface CliArgs {
   readOnly: boolean;
   disabledTools: ToolName[];
   logDir?: string | undefined;
+  noLog?: boolean | undefined;
+  logArgs?: "redacted" | "full" | "none" | undefined;
   metricsFile?: string | undefined;
   task?: string | undefined;
   tui: boolean;
@@ -167,6 +169,8 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
     createOptions.llmOptions = runtime.llmOptions;
   }
   if (args.logDir !== undefined) createOptions.logDir = args.logDir;
+  if (args.noLog === true) createOptions.log = false;
+  if (args.logArgs !== undefined) createOptions.logArgs = args.logArgs;
   if (args.metricsFile !== undefined) {
     createOptions.metricsFile = args.metricsFile;
   }
@@ -338,6 +342,14 @@ export function parseArgs(argv: string[]): CliArgs {
       out.logDir = requireValue(argv, ++i, "--log-dir");
       continue;
     }
+    if (arg === "--no-log") {
+      out.noLog = true;
+      continue;
+    }
+    if (arg === "--log-args") {
+      out.logArgs = parseLogArgs(requireValue(argv, ++i, "--log-args"));
+      continue;
+    }
     if (arg === "--metrics-file") {
       out.metricsFile = requireValue(argv, ++i, "--metrics-file");
       continue;
@@ -366,6 +378,15 @@ export function parseDisabledTools(value: string): ToolName[] {
       }
       return part as ToolName;
     });
+}
+
+export function parseLogArgs(value: string): "redacted" | "full" | "none" {
+  if (value !== "redacted" && value !== "full" && value !== "none") {
+    throw new Error(
+      `Invalid --log-args "${value}". Expected one of: redacted, full, none.`,
+    );
+  }
+  return value;
 }
 
 function requireValue(argv: string[], index: number, flag: string): string {
@@ -492,6 +513,8 @@ Options:
   --disable <a,b>          Disable named first-party tools (read,bash,edit,write,grep,find,ls).
   --env-file <path>        Load env vars from a .env file (./.env is auto-loaded too).
   --log-dir <path>         Session log directory. Defaults to .harness-pi/logs.
+  --no-log                 Disable the session log entirely.
+  --log-args <mode>        Tool-arg logging: redacted (default) | full | none.
   --metrics-file <path>    Write run metrics as NDJSON.
   --list-providers         List supported providers and their API-key env vars.
   --list-models <provider> List model ids for a provider.

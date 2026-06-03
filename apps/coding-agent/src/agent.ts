@@ -30,6 +30,7 @@ import {
   type ToolStats,
 } from "@harness-pi/plugins";
 import { createModelSummarizer } from "./compaction.js";
+import { redactCodingToolArgs } from "./log-redaction.js";
 import { defaultPermissionRules } from "./tui/permissions.js";
 import {
   createAllTools,
@@ -58,6 +59,15 @@ export interface CreateCodingAgentOptions {
   readOnly?: boolean;
   disabledTools?: ToolName[];
   logDir?: string;
+  /**
+   * session log 是否挂载。默认 true；false ⇒ 完全不挂 sessionLog（不落盘任何 event）。
+   */
+  log?: boolean;
+  /**
+   * session log 里 tool args 的记录方式。默认 "redacted"：write 内容 / edit 文本 / bash 命令仅记长度、
+   * 不落原文（见 log-redaction.ts）。"full" ⇒ 记原始 args（仅本地调试）；"none" ⇒ 不记 args。
+   */
+  logArgs?: "redacted" | "full" | "none";
   metricsFile?: string;
   systemPrompt?: string;
   toolsOptions?: ToolsOptions;
@@ -296,8 +306,16 @@ function buildAgentContext(opts: CreateCodingAgentOptions): AgentContext {
     };
   }
 
+  // session log：默认挂；`log:false` 完全不挂。logArgs 控制 tool args 记录方式（默认 redacted 脱敏，
+  // 防止 write 内容 / edit 文本 / bash 命令含密钥静默落盘到 .harness-pi/logs）。
+  const logArgs = opts.logArgs ?? "redacted";
+  const sessionLogOptions: Parameters<typeof sessionLog>[0] = { dir: logDir };
+  if (logArgs === "redacted") sessionLogOptions.redactToolArgs = redactCodingToolArgs;
+  else if (logArgs === "none") sessionLogOptions.redactToolArgs = () => "[args omitted]";
+  // logArgs === "full"：不设 redactToolArgs，记原始 args。
+
   const hooks = [
-    sessionLog({ dir: logDir }),
+    ...(opts.log === false ? [] : [sessionLog(sessionLogOptions)]),
     // compactSummarize 须排在 trimHistory 前：先把早期消息总结成 summary，再让 trimHistory 裁中段
     // toolResult（docs/09 §3.6「先 summarize 早期、再 trim 中段」的组合顺序）。未启用 compaction 时不挂。
     ...(compactionOpts ? [compactSummarize(compactionOpts)] : []),
