@@ -44,6 +44,9 @@ export type { LeaseDecisionOptions } from "./lease-decision.js";
 export { compactSummarize } from "./compact-summarize.js";
 export type { CompactSummarizeOptions } from "./compact-summarize.js";
 
+export { autoCompaction, estimateTokensByChars } from "./auto-compaction.js";
+export type { AutoCompactionOptions } from "./auto-compaction.js";
+
 export { permissionGate } from "./permission-gate.js";
 export type {
   PermissionGateOptions,
@@ -58,6 +61,8 @@ export {
   emitMetric,
   MemorySink,
   NdjsonFileSink,
+  PostgresSink,
+  POSTGRES_METRICS_SINK_DDL,
   WorkItemAggregator,
   BatchingSink,
 } from "./metrics/index.js";
@@ -72,6 +77,8 @@ export type {
   CoreMetricKind,
   WorkItemRollup,
   WorkItemAggregatorOptions,
+  PostgresSinkOptions,
+  PgClient,
 } from "./metrics/all.js";
 
 export { costTracker, getCostStats } from "./cost-tracker.js";
