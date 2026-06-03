@@ -226,6 +226,11 @@ export function isDashScopeProviderAlias(provider: string): boolean {
   return provider === "dashscope" || provider === "qwen";
 }
 
+/** All known DashScope/Qwen model ids (for `--list-models qwen`). */
+export function dashScopeModelIds(): string[] {
+  return Object.keys(DASH_SCOPE_MODELS);
+}
+
 export function resolveDashScopeModel(
   modelId: string,
   env: DashScopeEnv,

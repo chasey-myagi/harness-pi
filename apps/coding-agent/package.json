@@ -1,8 +1,7 @@
 {
   "name": "@harness-pi/coding-agent",
   "version": "0.1.0",
-  "private": true,
-  "description": "Dogfood coding agent built on harness-pi",
+  "description": "Dogfood coding agent built on harness-pi — usable pi-tui CLI showcasing the harness-pi kernel",
   "license": "MIT",
   "repository": {
     "type": "git",
@@ -14,10 +13,21 @@
   "type": "module",
   "main": "./dist/cli.js",
   "types": "./dist/cli.d.ts",
+  "bin": {
+    "hpi": "./dist/cli.js"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/cli.d.ts",
+      "default": "./dist/cli.js"
+    }
+  },
+  "files": ["dist", "README.md", "!**/__tests__/**", "!**/*.test.*"],
   "engines": {
     "node": ">=20"
   },
   "scripts": {
+    "prepublishOnly": "pnpm run build",
     "start": "tsx src/cli.ts",
     "tui": "tsx src/cli.ts --tui",
     "build": "tsc -p .",

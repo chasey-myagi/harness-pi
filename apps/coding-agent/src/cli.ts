@@ -4,7 +4,7 @@ import { createInterface } from "node:readline/promises";
 import { stdin as input, stdout as output } from "node:process";
 import { pathToFileURL } from "node:url";
 import { randomUUID } from "node:crypto";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import {
   createCodingAgent,
@@ -15,6 +15,13 @@ import {
   type CodingAgent,
 } from "./agent.js";
 import { renderRunReport, renderSessionEvent } from "./output.js";
+import {
+  detectDefaultModel,
+  envVarForProvider,
+  formatModelList,
+  formatProviderList,
+  loadDotEnv,
+} from "./config.js";
 import { toolNames, type ToolName } from "@harness-pi/tools";
 import { JsonlSessionStore } from "@harness-pi/adapters";
 import { ProcessTerminal } from "@mariozechner/pi-tui";
@@ -29,9 +36,14 @@ interface CliArgs {
   metricsFile?: string | undefined;
   task?: string | undefined;
   tui: boolean;
+  repl: boolean;
   yolo: boolean;
   compact: boolean;
   resume?: string | undefined;
+  envFile?: string | undefined;
+  listProviders: boolean;
+  listModels?: string | undefined;
+  version: boolean;
   help: boolean;
 }
 
@@ -104,12 +116,47 @@ export function makeReadOnlySubAgentSpawner(
 
 export async function main(argv = process.argv.slice(2)): Promise<void> {
   const args = parseArgs(argv);
+
+  // .env: explicit --env-file first, then ./.env in the launch dir. Never overrides real env vars.
+  if (args.envFile !== undefined) loadDotEnv(args.envFile);
+  loadDotEnv(join(process.cwd(), ".env"));
+
   if (args.help) {
     printHelp();
     return;
   }
+  if (args.version) {
+    console.log(readVersion());
+    return;
+  }
+  if (args.listProviders) {
+    console.log(formatProviderList());
+    return;
+  }
+  if (args.listModels !== undefined) {
+    console.log(formatModelList(args.listModels));
+    return;
+  }
 
-  const runtime = resolveModelRuntime(resolveModelSpec(args.model));
+  // Mode default: no task and not explicitly TUI → prefer the TUI on a real terminal (the headline
+  // experience); --repl forces the plain readline REPL; piped/no-TTY with no task can't drive an
+  // interactive prompt, so show help instead of silently hanging on a readline that never returns.
+  if (!args.task && !args.tui && !args.repl) {
+    if (process.stdin.isTTY) {
+      args.tui = true;
+    } else {
+      printHelp();
+      return;
+    }
+  }
+
+  const spec = resolveModelSpecOrDetect(args.model);
+  let runtime: ReturnType<typeof resolveModelRuntime>;
+  try {
+    runtime = resolveModelRuntime(spec);
+  } catch (err) {
+    throw augmentKeyError(err, spec);
+  }
   const createOptions: Parameters<typeof createCodingAgent>[0] = {
     cwd: args.cwd,
     model: runtime.model,
@@ -213,19 +260,44 @@ export function parseArgs(argv: string[]): CliArgs {
     readOnly: false,
     disabledTools: [],
     tui: false,
+    repl: false,
     yolo: false,
     compact: false,
+    listProviders: false,
+    version: false,
     help: false,
   };
   const task: string[] = [];
 
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
+    // `--` is ignored (not a flag-stopper): supports the `pnpm start -- --flags` dev workflow,
+    // where pnpm injects a leading `--` before the user's flags, which must still be parsed.
     if (arg === "--") {
       continue;
     }
     if (arg === "--help" || arg === "-h") {
       out.help = true;
+      continue;
+    }
+    if (arg === "--version" || arg === "-V") {
+      out.version = true;
+      continue;
+    }
+    if (arg === "--list-providers") {
+      out.listProviders = true;
+      continue;
+    }
+    if (arg === "--list-models") {
+      out.listModels = requireValue(argv, ++i, "--list-models");
+      continue;
+    }
+    if (arg === "--env-file") {
+      out.envFile = requireValue(argv, ++i, "--env-file");
+      continue;
+    }
+    if (arg === "--repl") {
+      out.repl = true;
       continue;
     }
     if (arg === "--cwd") {
@@ -310,7 +382,7 @@ async function runInteractive(
   const rl = createInterface({ input, output });
   try {
     while (true) {
-      const prompt = (await rl.question("harness-pi> ")).trim();
+      const prompt = (await rl.question("hpi> ")).trim();
       if (!prompt) continue;
       if (prompt === "exit" || prompt === "quit") break;
       const report = await runAgentPrompt(agent, prompt, {
@@ -335,28 +407,95 @@ function printEvent(event: Parameters<typeof renderSessionEvent>[0]): void {
   if (line) console.log(line);
 }
 
+const NO_MODEL_MESSAGE = [
+  "No model specified and no provider API key detected.",
+  "  • Pass one:     hpi --model anthropic:claude-sonnet-4-0   (or qwen:qwen-plus)",
+  "  • Or set a key:  export ANTHROPIC_API_KEY=...   then just run  hpi",
+  "  • See options:   hpi --list-providers",
+].join("\n");
+
+/** Resolve the model spec from --model/HARNESS_PI_MODEL; if neither is set, auto-detect one from
+ *  a present provider API key. Throws an actionable message when nothing can be resolved. */
+function resolveModelSpecOrDetect(cliModel: string | undefined): string {
+  try {
+    return resolveModelSpec(cliModel);
+  } catch (err) {
+    // Only the "missing model" case should fall back to auto-detection; rethrow anything else.
+    if (err instanceof Error && !/Missing model/.test(err.message)) throw err;
+    const detected = detectDefaultModel();
+    if (!detected) throw new Error(NO_MODEL_MESSAGE);
+    console.warn(
+      `No --model given; using ${detected.spec} (${detected.envVar} detected). Override with --model or HARNESS_PI_MODEL.`,
+    );
+    return detected.spec;
+  }
+}
+
+/** Turn pi-ai's generic "Missing API credentials" into an actionable message naming the exact
+ *  env var to set. Other errors pass through unchanged. Preserves the original via `cause`. */
+function augmentKeyError(err: unknown, spec: string): Error {
+  const e = err instanceof Error ? err : new Error(String(err));
+  if (!/Missing API credentials for provider/.test(e.message)) return e;
+  const idx = spec.indexOf(":");
+  const provider = idx === -1 ? spec : spec.slice(0, idx);
+  const envVar = envVarForProvider(provider);
+  const how = envVar
+    ? `Set ${envVar} (e.g. export ${envVar}=sk-...).`
+    : "Set the provider's API key environment variable.";
+  return new Error(
+    `Missing API key for provider "${provider}". ${how} Run \`hpi --list-providers\` to see options.`,
+    { cause: e },
+  );
+}
+
+/** Read this package's version from package.json next to dist/ (works in dist and via tsx). */
+function readVersion(): string {
+  try {
+    const pkg = JSON.parse(
+      readFileSync(new URL("../package.json", import.meta.url), "utf8"),
+    ) as { version?: string };
+    return pkg.version ?? "unknown";
+  } catch {
+    return "unknown";
+  }
+}
+
 function printHelp(): void {
-  console.log(`@harness-pi/coding-agent
+  console.log(`hpi — @harness-pi/coding-agent
+
+A usable coding agent on the harness-pi kernel: streaming TUI, tool approval,
+crash-resume, context compaction, and parallel read-only sub-agents.
 
 Usage:
-  pnpm --filter @harness-pi/coding-agent start -- --cwd . --model provider:model "task"
-  pnpm --filter @harness-pi/coding-agent start -- --cwd . --model provider:model
+  hpi                           Launch the interactive TUI (default on a terminal).
+  hpi "fix the failing test"    One-shot: run a single task headless, print the answer.
+  hpi --model <provider:id>     Pick a model explicitly.
+
+Setup — pick a provider and set its API key, then just run hpi:
+  export ANTHROPIC_API_KEY=...        # Anthropic Claude
+  export OPENAI_API_KEY=...           # OpenAI
+  export DASHSCOPE_API_KEY=...        # Alibaba Qwen (use --model qwen:qwen-plus)
+  hpi --list-providers                # all providers + which key you have set
+  hpi --list-models anthropic         # model ids for a provider
+With a key set, hpi auto-picks a default model; override with --model or HARNESS_PI_MODEL.
 
 Options:
-  --cwd <path>             Workspace directory. Defaults to process cwd.
-  --model <provider:id>    pi-ai model. Can also be HARNESS_PI_MODEL.
-                            DashScope aliases: dashscope:qwen-plus, qwen:qwen-plus.
-  --read-only              Use read/grep/find/ls only.
-  --tui                    Launch the pi-tui interactive TUI (chat UI, streaming).
-                            Persists to .harness-pi/sessions/<id>.jsonl for crash recovery.
-  --resume <id>            Resume a saved session by id. Launches the TUI unless a
-                            one-shot task is also given (then it continues that session headless).
-  --yolo                   (TUI) skip tool approval prompts — allow bash/write/edit without asking.
-  --compact                (TUI) auto-summarize early messages once the conversation grows long.
-                            Without it, /compact in the TUI triggers summarization manually.
-  --disable <a,b>          Disable named first-party tools.
-  --log-dir <path>         Session log dir. Defaults to .harness-pi/logs.
-  --metrics-file <path>    Write metrics NDJSON.
+  --model <provider:id>    pi-ai model, e.g. anthropic:claude-sonnet-4-0, qwen:qwen-plus.
+                            Or set HARNESS_PI_MODEL. Auto-detected from your API keys if omitted.
+  --tui                    Force the interactive TUI (chat UI, streaming, approval, /commands).
+  --repl                   Plain readline REPL instead of the TUI.
+  --cwd <path>             Workspace directory. Defaults to the current directory.
+  --read-only              Restrict tools to read/grep/find/ls (no edits, no bash).
+  --resume <id>            Resume a saved TUI session (.harness-pi/sessions/<id>.jsonl).
+  --yolo                   (TUI) skip tool-approval prompts — allow bash/write/edit unattended.
+  --compact                (TUI) auto-summarize early messages when the conversation grows long.
+  --disable <a,b>          Disable named first-party tools (read,bash,edit,write,grep,find,ls).
+  --env-file <path>        Load env vars from a .env file (./.env is auto-loaded too).
+  --log-dir <path>         Session log directory. Defaults to .harness-pi/logs.
+  --metrics-file <path>    Write run metrics as NDJSON.
+  --list-providers         List supported providers and their API-key env vars.
+  --list-models <provider> List model ids for a provider.
+  --version                Print the version.
   --help                   Show this help.
 `);
 }
