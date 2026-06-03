@@ -27,6 +27,11 @@ export interface SessionLogOptions {
   events?: SessionLogEventName[];
   /** 文件名（默认 `<sessionId>.ndjson`）。 */
   filenameFor?: (sessionId: string) => string;
+  /**
+   * 可选：preToolUse 写日志前对 tool args 脱敏。给定后，`onPreToolUse` 记录 `redactToolArgs(name, args)`
+   * 的返回值而非原始 `call.arguments`。库层默认**不脱敏**（保持通用）；脱敏策略由消费者（如 coding-agent）注入。
+   */
+  redactToolArgs?: (toolName: string, args: unknown) => unknown;
 }
 
 interface StreamState {
@@ -212,7 +217,9 @@ export function sessionLog(opts: SessionLogOptions): Hook {
       if (includes("preToolUse")) {
         write(ctx, "preToolUse", {
           tool: input.call.name,
-          args: input.call.arguments,
+          args: opts.redactToolArgs
+            ? opts.redactToolArgs(input.call.name, input.call.arguments)
+            : input.call.arguments,
         });
       }
     },

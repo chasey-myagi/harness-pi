@@ -65,6 +65,7 @@ pnpm --filter @harness-pi/coding-agent start -- --cwd . --model dashscope:qwen-p
 - 默认 full mode 挂 `read/bash/edit/write/grep/find/ls`；`--read-only` 只挂 `read/grep/find/ls`。
 - `--disable bash,write` 可以关闭指定基础 tool。
 - 默认 log 目录是 `.harness-pi/logs`；`--metrics-file path.ndjson` 可写 metrics。
+- 默认对 session log 里的高危 tool args 脱敏（`write` 内容、`edit` 文本、`bash` 命令仅记长度，不落原文，避免密钥/源码静默写进 `.harness-pi/logs`）；`--log-args full` 记原始 args（仅本地调试）；`--log-args none` 完全不记 args；`--no-log` 关闭整个 session log。
 - **安全边界**：`bash` 是 host shell，不是 sandbox。full mode 只应在你明确允许修改的 workspace 里运行。
 
 ## Layout
