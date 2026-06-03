@@ -43,7 +43,13 @@
 
 `harness-pi` 现在处在 **v0.1 readiness** 阶段：core loop、hook dispatcher、standard plugins、controllers、first-party tools、dogfood coding agent、offline examples 和测试都已经落地，足够做 spike/review。
 
-还不应直接全量替换 `bidding-agent`：这个框架尚未经过第三方 production 验证，streaming `message_update`/thinking parity、完整 auto-compaction、PG sink 仍是迁移 blocker。当前建议是先把 `bidding-agent` 内部接口形状对齐，再用 worktree 做最小 happy-path spike。
+判断成熟度时区分三个层级，别把它们混为一谈：
+
+1. **机制已实现**（mechanism implemented，代码 + 本地测试通过）：包括 streaming `message_update` / thinking parity、完整 auto-compaction、PG sink——这些**都已经落地并有本地测试覆盖**，不再是迁移 blocker。
+2. **provider 已验证**（provider-verified）：用真实 provider 跑 streaming / error / overflow 的 smoke。**尚未完成。**
+3. **bidding-migration 已验证**（bidding-migration-validated）：用真实 `bidding-agent` 做一次 spike 跑通。**尚未完成。**
+
+结论：harness-pi 已经 **spike-ready**，但**还不是 `bidding-agent` 的生产替代品**。剩下的差距是「真实 provider 在规模下的验证」+「一次 bidding-agent 迁移 spike」，**不是缺机制**。当前建议仍是先把 `bidding-agent` 内部接口形状对齐，再用 worktree 做最小 happy-path spike。
 
 ## Dogfood Agent
 
