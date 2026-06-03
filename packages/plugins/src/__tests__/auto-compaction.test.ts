@@ -67,6 +67,34 @@ describe("autoCompaction", () => {
     expect(view!.length).toBe(3);
   });
 
+  it("default estimator counts CJK codepoints as ~1 token each (much higher than chars/4)", () => {
+    // 50 个 CJK 字（无 ASCII）：新公式 ≈ 50 token；旧的 chars/4 只会给 ≈ 13，4× 低估（issue #14 的安全 bug）。
+    const cjk = "你好世界，这是一段中文。".repeat(5); // 12 字/段 * 5 = 60 码点（含全角逗号/句号）
+    const est = estimateTokensByChars([m(cjk)]);
+    const charsOver4 = Math.ceil(cjk.length / 4);
+    expect(est).toBe(cjk.length); // 每个 CJK 码点 ≈ 1 token
+    expect(est).toBeGreaterThan(charsOver4 * 3); // 远高于 chars/4
+  });
+
+  it("default estimator counts an image block as a flat conservative estimate (not tiny ref nor huge base64)", () => {
+    // 短 ref 风格的 image 块（data 很短）：按字符数会被严重低估；扁平估值兜底 ≈ 1000。
+    const imageMsg: Message = {
+      role: "user",
+      content: [{ type: "image", data: "abc", mimeType: "image/png" }],
+      timestamp: 0,
+    };
+    const est = estimateTokensByChars([imageMsg]);
+    expect(est).toBe(1000); // 扁平、保守
+
+    // 内联 base64（data 极长）：若按 data 字符数会疯狂高估；仍是扁平 1000，不随 data 长度膨胀。
+    const inlineMsg: Message = {
+      role: "user",
+      content: [{ type: "image", data: "A".repeat(50_000), mimeType: "image/png" }],
+      timestamp: 0,
+    };
+    expect(estimateTokensByChars([inlineMsg])).toBe(1000);
+  });
+
   it("caches the summary by covered prefix until it grows by resummarizeEvery", async () => {
     let calls = 0;
     const compact = autoCompaction({
@@ -139,6 +167,39 @@ describe("autoCompaction", () => {
     expect(textOf(view[0]!)).toContain("RECAP");
     expect(textOf(view[2]!)).toBe("go");
     expect(session.messages.length).toBe(8); // full history intact (6 + "go" + assistant)
+    fake.teardown();
+  });
+
+  it("end-to-end: a summarize() failure degrades to NO compaction (kernel pipe fail-open), run still completes", async () => {
+    // #13: summarize 抛错 → transform 被内核 fail-open 吞掉 → 模型收到未压缩全量、run 不中断、history 不变。
+    const initial = [m("h1"), m("a1"), m("h2"), m("a2"), m("h3"), m("a3")]; // 6
+    const fake = createFakeModel([
+      { content: [{ type: "text", text: "ok" }], stopReason: "stop" },
+    ]);
+    const session = new AgentSession({
+      model: fake,
+      tools: [],
+      initialMessages: initial,
+      hooks: [
+        autoCompaction({
+          maxContextTokens: 100,
+          triggerRatio: 0.8, // threshold 80
+          keepRecent: 2,
+          estimateTokens: (msgs) => msgs.length * 50, // 7 msgs * 50 = 350 > 80 → 会尝试压缩
+          summarize: () => {
+            throw new Error("summary backend down");
+          },
+        }),
+      ],
+    });
+    const summary = await session.run("go");
+
+    expect(summary.reason).toBe("done"); // 压缩失败不杀 run（不是 "error"）
+    // fail-open：模型收到未压缩全量（6 初始 + "go" = 7），而不是压缩后的视图。
+    expect(fake.getCalls()[0]!.messages.length).toBe(7);
+    expect(textOf(fake.getCalls()[0]!.messages[6]!)).toBe("go");
+    // 完整历史未被破坏：6 初始 + "go" + assistant = 8。
+    expect(session.messages.length).toBe(8);
     fake.teardown();
   });
 });
