@@ -25,12 +25,14 @@ pnpm --filter @harness-pi-example/02-with-plugins start
 pnpm --filter @harness-pi-example/03-tools start
 ```
 
-明确不做：
+明确不做（v0.1 当时的范围划定 —— 历史口径，部分已超出）：
 
-- 不做 `bidding-agent` 全量迁移。
-- 不引入 PG sink。
-- 不实现完整 auto-compaction。
-- 不把 streaming `message_update` / thinking parity 塞进 tools scope。
+- 不做 `bidding-agent` 全量迁移。（仍然成立。）
+- ~~不引入 PG sink。~~ —— 已实现，见下「Adapter 候选」`PostgresSink [x]`。
+- ~~不实现完整 auto-compaction。~~ —— 已实现，见下「下一轮 core parity」`autoCompaction [x]`。
+- ~~不把 streaming `message_update` / thinking parity 塞进 tools scope。~~ —— 已实现（独立于 tools scope），见下「下一轮 core parity」`message_update [x]`。
+
+> 注：上面三条删除线是 v0.1 当时画的范围线；这些机制后来都已落地（见下文 `[x]` 项），此处保留作为历史记录，不代表当前状态。
 
 ## v0.1 gate
 

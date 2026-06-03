@@ -225,72 +225,56 @@ export class NdjsonFileSink extends BatchingSink {
 
 **用途**：本地开发、容器化部署到带挂载 volume 的环境。
 
-### 4.3 PostgresSink（peerDep on `pg`）
+### 4.3 PostgresSink（零 `pg` 依赖，注入 `PgClient`）
+
+实现见 `packages/plugins/src/metrics/sinks/postgres.ts`。与 `PostgresSessionStore` 同构：**本包零 `pg` 依赖**，通过最小 `PgClient` 接口注入查询能力，node-postgres 的 `Pool` / `Client` 天然满足它。继承 `BatchingSink`，复用批量 / 重试 / overflow 语义，只实现 `write(batch)`。
 
 ```ts
-// 假设用户自己装了 pg
-import type { Pool } from "pg";
-import { BatchingSink } from "./batching-sink.js";
+import { PostgresSink } from "@harness-pi/plugins/metrics/sinks/postgres";
+import { Pool } from "pg";  // 调用方自带 pg；本包不依赖
 
-export interface PostgresSinkOptions {
-  pool: Pool;          // 用户传入已建好的连接池
-  table?: string;      // 默认 "metrics_events"
-  batchSize?: number;
-  flushIntervalMs?: number;
+const client = new Pool({ connectionString: process.env.DATABASE_URL });
+const sink = new PostgresSink({ client });  // 注入 PgClient，Pool / Client 都满足
+await sink.migrate();                       // 幂等建表，首次使用前调一次
+```
+
+构造参数 `PostgresSinkOptions extends BatchingSinkOptions`，只多一个 `client: PgClient`：
+
+```ts
+/** node-postgres 的 Pool/Client 满足的最小查询接口。 */
+export interface PgClient {
+  query(
+    text: string,
+    params?: unknown[],
+  ): Promise<{ rows: Array<Record<string, unknown>> }>;
 }
 
-export class PostgresSink extends BatchingSink {
-  constructor(private pgOpts: PostgresSinkOptions) {
-    super(pgOpts);
-  }
-
-  protected async write(batch: MetricEvent[]): Promise<void> {
-    const table = this.pgOpts.table ?? "metrics_events";
-    // 简化的 bulk insert（实际要用 unnest 或 pg-format 防 SQL 注入）
-    const values = batch.map((e, i) => {
-      const offset = i * 5;
-      return `($${offset + 1}, $${offset + 2}, $${offset + 3}, $${offset + 4}, $${offset + 5})`;
-    }).join(", ");
-    const params = batch.flatMap(e => [
-      e.kind,
-      e.sessionId ?? null,
-      e.turnIdx ?? null,
-      new Date(e.ts),
-      JSON.stringify(e),
-    ]);
-    await this.pgOpts.pool.query(
-      `INSERT INTO ${table} (kind, session_id, turn_idx, ts, payload) VALUES ${values}`,
-      params,
-    );
-  }
+export interface PostgresSinkOptions extends BatchingSinkOptions {
+  client: PgClient;
 }
 ```
+
+`write(batch)` 的要点（不必逐行复述，照源码即可）：
+
+- 表名固定为 `metrics_events`，**无 `table` 选项**。
+- 把 `kind / session_id / turn_idx / work_item_id / ts` 提升为可索引列，其余字段进 `payload` jsonb（这些被提升的列从 `payload` 里 `...rest` 剥掉，不重复存）。
+- `payload` 用永不抛错的 `safeStringify` 序列化：`BigInt → 字符串`、循环引用 → `"[Circular]"`，再 catch 兜底成 `{_unserializable:true}`——避免一条坏 payload 把整个 sink 毒死（否则 `write()` 抛错会被无限重排队、最终 overflow 丢整批）。
+- 单条 `INSERT` 按 `MAX_ROWS_PER_INSERT = 10000` 分块，避免触到 Postgres 65535 bind-param 上限（6 binds/row）。
 
 **用途**：production agent 后台，dashboard 查询。
 
-**peerDep 声明**（`packages/plugins/package.json`）：
-
-```json
-{
-  "peerDependencies": {
-    "pg": "^8.0.0"
-  },
-  "peerDependenciesMeta": {
-    "pg": { "optional": true }
-  }
-}
-```
-
-用户：
+**安装与导入**（本包不声明 `pg` peerDep，因为运行时根本不 import 它；调用方自带 `pg` 或任何满足 `PgClient` 的 driver）：
 
 ```bash
 npm install @harness-pi/plugins pg
-# 然后才能 import { PostgresSink } from "@harness-pi/plugins/metrics/sinks/postgres"
+# PostgresSink / POSTGRES_METRICS_SINK_DDL 既从包根导出，也从子路径导出：
+# import { PostgresSink } from "@harness-pi/plugins";
+# import { PostgresSink } from "@harness-pi/plugins/metrics/sinks/postgres";
 ```
 
 **Schema（包内提供 DDL）**：
 
-PostgresSink 导出幂等的 `POSTGRES_METRICS_SINK_DDL` 并提供 `migrate()`（按 `;` 拆条执行）——与 `PostgresSessionStore` 同构，**本包零 `pg` 依赖**（注入 `PgClient`，node-postgres 的 `Pool`/`Client` 满足）。首次使用前 `await sink.migrate()` 建表即可；也可以把这段 DDL 接进你自己的 migration 工具（drizzle/prisma/raw SQL）。
+PostgresSink 导出幂等的 `POSTGRES_METRICS_SINK_DDL` 并提供 `migrate()`（按 `;` 拆条执行，兼容只支持单语句的 driver）。首次使用前 `await sink.migrate()` 建表即可；也可以把这段 DDL 接进你自己的 migration 工具（drizzle/prisma/raw SQL）。
 
 DDL（`ts` 用 `bigint` = epoch 毫秒，对齐 `MetricEvent.ts: number`；索引按「等值过滤列 + 时间」复合，服务「按 kind + 时间窗 + session/work-item 聚合」的典型查询）：
 
@@ -363,7 +347,7 @@ export class OtelSink extends BatchingSink {
 Controller 跑多 session 时，**一个 sink 实例服务所有 session**：
 
 ```ts
-const sharedSink = new PostgresSink({ pool, table: "metrics_events" });
+const sharedSink = new PostgresSink({ client });
 
 // workPool / leaseQueue 里每个 worker 的 session 都注入这个 sink
 workerFactory: async (...) => {
