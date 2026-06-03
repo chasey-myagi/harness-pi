@@ -31,7 +31,7 @@
       "default": "./dist/metrics/sinks/ndjson-file.js"
     }
   },
-  "files": ["dist", "src", "README.md"],
+  "files": ["dist", "src", "README.md", "!**/__tests__/**", "!**/*.test.*"],
   "scripts": {
     "prepublishOnly": "pnpm run build",
     "build": "tsc -p .",
