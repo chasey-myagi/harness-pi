@@ -2,9 +2,9 @@
 
 import { createInterface } from "node:readline/promises";
 import { stdin as input, stdout as output } from "node:process";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath } from "node:url";
 import { randomUUID } from "node:crypto";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, realpathSync } from "node:fs";
 import { join, resolve } from "node:path";
 import {
   createCodingAgent,
@@ -500,7 +500,22 @@ Options:
 `);
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+/**
+ * True when this module is the process entry point. Compares the *real* paths of both sides so
+ * the npm `bin` symlink (node_modules/.bin/hpi → dist/cli.js) is recognized — a plain
+ * `import.meta.url === pathToFileURL(argv[1])` check fails through a symlink (Node resolves the
+ * module URL to the real file while argv[1] stays the symlink), which would make `hpi` a no-op.
+ */
+export function isMainModule(metaUrl: string, argv1: string | undefined): boolean {
+  if (!argv1) return false;
+  try {
+    return realpathSync(fileURLToPath(metaUrl)) === realpathSync(argv1);
+  } catch {
+    return false;
+  }
+}
+
+if (isMainModule(import.meta.url, process.argv[1])) {
   main().catch((err) => {
     console.error(err instanceof Error ? err.message : String(err));
     process.exit(1);

@@ -1,5 +1,9 @@
-import { describe, expect, it } from "vitest";
-import { parseArgs } from "../cli.js";
+import { afterEach, describe, expect, it } from "vitest";
+import { mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { pathToFileURL } from "node:url";
+import { isMainModule, parseArgs } from "../cli.js";
 
 describe("parseArgs — v0.1.0 flags", () => {
   it("defaults: no tui/repl/version/list flags set", () => {
@@ -49,5 +53,38 @@ describe("parseArgs — v0.1.0 flags", () => {
     const a = parseArgs(["--", "--model", "qwen:qwen-plus", "--tui"]);
     expect(a.model).toBe("qwen:qwen-plus");
     expect(a.tui).toBe(true);
+  });
+});
+
+describe("isMainModule — recognizes the npm bin symlink", () => {
+  const dirs: string[] = [];
+  function tmp(): string {
+    const d = mkdtempSync(join(tmpdir(), "hpi-main-"));
+    dirs.push(d);
+    return d;
+  }
+  afterEach(() => {
+    while (dirs.length > 0) rmSync(dirs.pop()!, { recursive: true, force: true });
+  });
+
+  it("matches when argv[1] is a symlink to the module (the .bin/hpi case)", () => {
+    const dir = tmp();
+    const real = join(dir, "cli.js");
+    writeFileSync(real, "// entry");
+    const link = join(dir, "hpi");
+    symlinkSync(real, link); // mimics node_modules/.bin/hpi -> dist/cli.js
+    // metaUrl is the resolved real file (as Node sets import.meta.url); argv[1] is the symlink.
+    expect(isMainModule(pathToFileURL(real).href, link)).toBe(true);
+  });
+
+  it("matches a direct invocation and rejects unrelated / missing argv[1]", () => {
+    const dir = tmp();
+    const real = join(dir, "cli.js");
+    writeFileSync(real, "// entry");
+    const other = join(dir, "other.js");
+    writeFileSync(other, "// other");
+    expect(isMainModule(pathToFileURL(real).href, real)).toBe(true);
+    expect(isMainModule(pathToFileURL(real).href, other)).toBe(false);
+    expect(isMainModule(pathToFileURL(real).href, undefined)).toBe(false);
   });
 });
