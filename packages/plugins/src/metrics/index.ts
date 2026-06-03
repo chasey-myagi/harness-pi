@@ -142,6 +142,8 @@ export function emitMetric(ctx: HookContext, event: MetricEvent): void {
 
 export { MemorySink } from "./sinks/memory.js";
 export { NdjsonFileSink } from "./sinks/ndjson-file.js";
+export { PostgresSink, POSTGRES_METRICS_SINK_DDL } from "./sinks/postgres.js";
+export type { PostgresSinkOptions, PgClient } from "./sinks/postgres.js";
 export { WorkItemAggregator } from "./sinks/work-item-aggregator.js";
 export type {
   WorkItemRollup,
