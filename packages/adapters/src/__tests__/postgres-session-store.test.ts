@@ -32,6 +32,25 @@ describe("PostgresSessionStore specifics", () => {
   // `IF NOT EXISTS` DDL（第二次会抛 "AST not supported"），故不在此用 pg-mem 验证幂等——那是
   // 模拟器的局限、不是 adapter 的行为。每个契约测试都已成功跑过一次 migrate()，覆盖建表路径。
 
+  it("新 INSERT...SELECT...RETURNING：空 session 首条 parent_id 为 SQL NULL，第二条链到第一条", async () => {
+    // 定向钉死单条 INSERT...SELECT（leaf/seq 走 FROM 子句 LEFT JOIN）的语义：空 session 时 leaf 子查询
+    // 无行 → RETURNING parent_id 必为 SQL NULL（归一化成 JS null，非字符串 "null"）；seq 从 COALESCE(MAX,0)+1
+    // 起算；第二条经 leaf LEFT JOIN 取到上一条 id 作 parent。
+    const store = await freshStore();
+    const a = await store.appendEntry("s1", {
+      kind: "message",
+      message: { role: "user", content: "hi" } as never,
+    });
+    expect(a.parentId).toBeNull();
+    expect(a.seq).toBe(1);
+    const b = await store.appendEntry("s1", {
+      kind: "message",
+      message: { role: "assistant", content: "yo" } as never,
+    });
+    expect(b.parentId).toBe(a.id);
+    expect(b.seq).toBe(2);
+  });
+
   it("persists jsonb entry content faithfully (terminal RunSummary deep round-trip)", async () => {
     const store = await freshStore();
     const terminal: SessionEntry = {
