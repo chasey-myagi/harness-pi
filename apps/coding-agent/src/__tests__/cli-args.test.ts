@@ -63,6 +63,20 @@ describe("parseArgs — v0.1.0 flags", () => {
     expect(() => parseArgs(["--log-args", "bogus"])).toThrow(/Invalid --log-args/);
   });
 
+  it("--log-args is case-sensitive (大写非法值抛错，避免大小写漏脱敏)", () => {
+    expect(() => parseArgs(["--log-args", "Redacted"])).toThrow(/Invalid --log-args/);
+    expect(() => parseArgs(["--log-args", "FULL"])).toThrow(/Invalid --log-args/);
+  });
+
+  it("--log-args with empty string throws", () => {
+    // requireValue 把 "" 当缺值（空串 falsy）→ 报 requires a value，而非进 parseLogArgs。
+    expect(() => parseArgs(["--log-args", ""])).toThrow(/requires a value/);
+  });
+
+  it("--log-args with no value throws", () => {
+    expect(() => parseArgs(["--log-args"])).toThrow(/requires a value/);
+  });
+
   it("rejects unknown options", () => {
     expect(() => parseArgs(["--nope"])).toThrow(/Unknown option/);
   });

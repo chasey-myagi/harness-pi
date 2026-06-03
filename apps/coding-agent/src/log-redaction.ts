@@ -9,29 +9,49 @@
  */
 
 /**
+ * 把 `clone` 里一个**存在的**高危字段就地脱敏：字符串记长度，非字符串只记一个无值标记。
+ *
+ * 为何非字符串也脱敏：tool schema 虽声明这些字段是 string，但模型可能发来错误类型（如对象/数组），
+ * 内核不保证落盘前已 schema 校验。若只对 string 脱敏，一个 `content: { secret: ... }` 会原文落盘——
+ * 这正是泄密点。故只要 key 存在就脱敏，类型不对也不放过（堵住对象/数组内容泄漏）。
+ * 字段不存在则不动（不引入 undefined 字段，例如 edit 只给单边）。
+ */
+function redactField(
+  clone: Record<string, unknown>,
+  key: string,
+  label: string,
+): void {
+  if (!(key in clone)) return;
+  const v = clone[key];
+  clone[key] =
+    typeof v === "string"
+      ? `[redacted ${label}, ${v.length} chars]`
+      : `[redacted ${label}]`;
+}
+
+/**
  * 默认脱敏器：注入给 `sessionLog({ redactToolArgs })`。
  *
- * 行为：`args` 是非空对象时浅拷贝，只替换高危字符串字段，其余一律保留：
- * - `write.content` → `[redacted content, N chars]`
+ * 行为：`args` 是非数组的非空对象时浅拷贝，只替换高危字段（存在即脱敏，含非字符串），其余一律保留：
+ * - `write.content` → `[redacted content, N chars]`（非字符串 → `[redacted content]`）
  * - `edit.oldText` / `edit.newText` → `[redacted text, N chars]`
  * - `bash.command` → `[redacted command, N chars]`
  *
- * 其它工具、非字符串字段、以及非对象 args 一律原样返回。
+ * 其它工具、低危字段（path/pattern/glob…）、数组与非对象 args 一律原样返回。**无副作用**：浅拷贝后改副本，
+ * 不原地 mutate 传入的 `args`（避免脱敏污染下游 tool 执行）。
  */
 export function redactCodingToolArgs(toolName: string, args: unknown): unknown {
-  if (typeof args !== "object" || args === null) return args;
+  if (typeof args !== "object" || args === null || Array.isArray(args)) {
+    return args;
+  }
   const clone: Record<string, unknown> = { ...(args as Record<string, unknown>) };
-  if (toolName === "write" && typeof clone["content"] === "string") {
-    clone["content"] = `[redacted content, ${clone["content"].length} chars]`;
+  if (toolName === "write") {
+    redactField(clone, "content", "content");
   } else if (toolName === "edit") {
-    if (typeof clone["oldText"] === "string") {
-      clone["oldText"] = `[redacted text, ${clone["oldText"].length} chars]`;
-    }
-    if (typeof clone["newText"] === "string") {
-      clone["newText"] = `[redacted text, ${clone["newText"].length} chars]`;
-    }
-  } else if (toolName === "bash" && typeof clone["command"] === "string") {
-    clone["command"] = `[redacted command, ${clone["command"].length} chars]`;
+    redactField(clone, "oldText", "text");
+    redactField(clone, "newText", "text");
+  } else if (toolName === "bash") {
+    redactField(clone, "command", "command");
   }
   return clone;
 }
