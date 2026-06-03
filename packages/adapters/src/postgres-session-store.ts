@@ -7,10 +7,11 @@
  *
  * DDL 见导出的 `POSTGRES_SESSION_STORE_DDL`；`migrate()` 会执行它（IF NOT EXISTS，幂等）。
  *
- * **并发契约**：协议要求同一 sessionId 的 appendEntry / fork 串行。本实现的 appendEntry 是
- * read-leaf → insert → upsert-leaf 的读改写——并发写同一 session 会读到同一个 leaf、生成 parentId
- * 相同的两条 entry。`session_entries(session_id, seq)` 的 UNIQUE 约束会让并发写中的一方插入失败
- * （seq 撞号），是兜底而非协调；真要并发写同一 session，调用方应包事务 + 行锁（见 DDL 注释）。
+ * **并发契约**：协议要求同一 sessionId 的 appendEntry / fork 串行。appendEntry 的 leaf+seq 现在
+ * 并入 INSERT 自身的同一条语句（单条 INSERT...SELECT...RETURNING）读取，在该语句自己的快照里算出
+ * parent_id 与 seq，**消除了原先 getLeafId + SELECT MAX 多次往返的 read-modify-write 窗口**。
+ * `session_entries(session_id, seq)` 的 UNIQUE 约束仍是**跨进程真并发**写同一 session 的兜底
+ * （协议本就禁止——同 session 的 append 由调用方串行）：并发写中撞号的一方插入失败，是兜底而非协调。
  * 不同 sessionId 之间可并发。
  */
 
@@ -92,18 +93,24 @@ export class PostgresSessionStore implements SessionStore {
     sessionId: string,
     entry: SessionEntry,
   ): Promise<StoredEntry> {
-    const parentId = await this.getLeafId(sessionId);
-    const seqRes = await this.client.query(
-      `SELECT COALESCE(MAX(seq), 0) + 1 AS next FROM session_entries WHERE session_id = $1`,
-      [sessionId],
-    );
-    const seq = Number(seqRes.rows[0]!.next);
     const id = randomUUID();
-    await this.client.query(
+    // 单条 INSERT...SELECT...RETURNING：parent_id（当前 leaf）与 seq（MAX+1）在 INSERT 自身的
+    // 快照里算出并写入，消除原先 getLeafId + SELECT MAX 多次往返的 read-modify-write 窗口。
+    // leaf / max(seq) 用 FROM 子句的 LEFT JOIN（而非 SELECT-list 标量子查询）取值——两者在真 PG 等价
+    // （单行源 LEFT JOIN 恰产一行），但 pg-mem 会把 SELECT-list 里的标量子查询错当成 record 行包裹，
+    // 故走 FROM 子查询绕开模拟器这一限制，语义不变。
+    const insRes = await this.client.query(
       `INSERT INTO session_entries (id, session_id, parent_id, seq, entry)
-       VALUES ($1, $2, $3, $4, $5::jsonb)`,
-      [id, sessionId, parentId, seq, JSON.stringify(entry)],
+       SELECT $1, $2, l.leaf_id, COALESCE(m.mx, 0) + 1, $3::jsonb
+       FROM (SELECT 1) AS one
+       LEFT JOIN (SELECT leaf_id FROM session_leaf WHERE session_id = $2) AS l ON true
+       LEFT JOIN (SELECT MAX(seq) AS mx FROM session_entries WHERE session_id = $2) AS m ON true
+       RETURNING parent_id, seq`,
+      [id, sessionId, JSON.stringify(entry)],
     );
+    const row = insRes.rows[0]!;
+    const parentId = row.parent_id === null ? null : String(row.parent_id);
+    const seq = Number(row.seq);
     await this.client.query(
       `INSERT INTO session_leaf (session_id, leaf_id) VALUES ($1, $2)
        ON CONFLICT (session_id) DO UPDATE SET leaf_id = EXCLUDED.leaf_id`,

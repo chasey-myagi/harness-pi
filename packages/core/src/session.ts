@@ -140,6 +140,14 @@ export interface AgentSessionOptions {
   /** 覆盖自动生成的 session id。`AgentSession.resume` 用它把新 session 绑回同一 lineage。 */
   sessionId?: string;
   /**
+   * 持久化失败的处理模式。默认 false = best-effort（store I/O 失败只记日志 + 计入 RunSummary.persistenceErrors，
+   * 不改终态，下次 flush 从 HWM 重试）。true = strict：若 run 结束时持久化未真正完成（最终 flush 或 terminal
+   * append 失败），把 RunSummary.reason 改写为 "error" 并填 error，让依赖 durable resume/复现的调用方不会
+   * 把「done 但落盘不全」当成功。注意 strict 判定在 onSessionEnd 之后（terminal 持久化发生在 session 结束后），
+   * 故 onSessionEnd 仍观察到 loop 的自然 reason；strict 只改写**返回的** RunSummary。
+   */
+  strictPersistence?: boolean;
+  /**
    * 内核内部用：resume 时声明前 N 条 initialMessages 已在 store 里、不要重复 append。
    * 普通调用者不要设。
    */
@@ -223,6 +231,8 @@ export interface RunSummary {
   stopReason?: StopReason;
   error?: Error;
   abortReason?: string;
+  /** 持久化（SessionStore）失败记录。两种模式下都会**如实暴露**（非空才出现）；strict 模式还会把 reason 改 error。 */
+  persistenceErrors?: string[];
 }
 
 const DEFAULT_MAX_TURNS = 200;
@@ -264,12 +274,17 @@ export class AgentSession {
   /** 可选会话存储 + 已 append 进 store 的 messages 数（避免重复落盘）。 */
   private readonly _store: SessionStore | undefined;
   private _persistedCount: number;
+  /** strict 持久化模式：run 结束落盘不全则把返回的 RunSummary.reason 改 error（见选项注释）。 */
+  private readonly _strictPersistence: boolean;
+  /** 本 session 累积的持久化失败记录；两种模式下都如实挂上 RunSummary.persistenceErrors。 */
+  private _persistenceErrors: string[] = [];
   /** error-stopReason → 是否 context-overflow 的判定（可经选项覆盖，默认内置启发式）。 */
   private readonly _isContextOverflow: (errorMessage: string) => boolean;
 
   constructor(opts: AgentSessionOptions) {
     this.id = opts.sessionId ?? randomUUID();
     this._store = opts.store;
+    this._strictPersistence = opts.strictPersistence ?? false;
     // resume 时前 N 条 initialMessages 已在 store，不重复 append；普通构造从 0 起。
     // 夹到 initialMessages 长度，防止误传过大值导致首批新消息漏落盘。
     this._persistedCount = Math.min(
@@ -791,7 +806,8 @@ export class AgentSession {
             "onUserPromptSubmit halted";
           summary.abortReason = reasonText;
           await this._fireSessionEnd(0, 0, summary.reason);
-          await this._persistTerminal(summary);
+          const persistedOk = await this._persistTerminal(summary);
+          this._finalizePersistence(summary, persistedOk);
           return summary;
         }
         if (upsOut?.systemMessage) {
@@ -843,7 +859,8 @@ export class AgentSession {
       // 退出 loop：恰好 fire 一次 onSessionEnd（无论 done / aborted / error / max_turns / max_continuations）
       await this._fireSessionEnd(turnIdx, continuations, reason);
       const summary = this._buildSummary(turnIdx, continuations, reason);
-      await this._persistTerminal(summary);
+      const persistedOk = await this._persistTerminal(summary);
+      this._finalizePersistence(summary, persistedOk);
       return summary;
     } finally {
       cleanupCallerForward();
@@ -933,14 +950,21 @@ export class AgentSession {
     return summary;
   }
 
-  /** best-effort 持久化：store I/O 失败**不**劫持控制流/终态，记日志即可（下次 flush 从未成功处重试）。 */
+  /**
+   * 记录一次 store I/O 失败：写日志 + 计入 `_persistenceErrors`（两种模式都记，最终都挂上 RunSummary）。
+   * best-effort 下失败不劫持控制流（下次 flush 从未成功处重试）；strict 下由 `_finalizePersistence`
+   * 据「最终是否真正落盘完成」改写终态，故此处只如实记录、不改控制流。
+   */
   private _reportStoreError(op: string, err: unknown): void {
-    this._consoleSink(
-      `[session-store] ${op} failed (best-effort persistence, will retry next flush): ${
-        err instanceof Error ? err.message : String(err)
-      }`,
-      { sessionId: this.id, turnIdx: this._ctx.turnIdx },
-    );
+    const msg = err instanceof Error ? err.message : String(err);
+    this._persistenceErrors.push(`${op}: ${msg}`);
+    const note = this._strictPersistence
+      ? "strict persistence"
+      : "best-effort persistence, will retry next flush";
+    this._consoleSink(`[session-store] ${op} failed (${note}): ${msg}`, {
+      sessionId: this.id,
+      turnIdx: this._ctx.turnIdx,
+    });
   }
 
   /**
@@ -951,9 +975,11 @@ export class AgentSession {
    * （store 是 append-only、不去重，重复 append 会让 resume 读出重复消息）。
    * best-effort：append 失败被 catch，不抛给控制流（持久化失败不该杀掉 run）。
    * 依赖 `_messages` **append-only、索引稳定**（内核只 push，从不 splice/reorder）—— HWM 才成立。
+   *
+   * 返回是否全部 flush 成功（无 store 视为成功）；调用方据此判断持久化是否真正完成。
    */
-  private async _flushToStore(): Promise<void> {
-    if (!this._store) return;
+  private async _flushToStore(): Promise<boolean> {
+    if (!this._store) return true;
     try {
       for (; this._persistedCount < this._messages.length; this._persistedCount++) {
         await this._store.appendEntry(this.id, {
@@ -961,19 +987,47 @@ export class AgentSession {
           message: this._messages[this._persistedCount]!,
         });
       }
+      return true;
     } catch (err) {
       this._reportStoreError("appendEntry(message)", err);
+      return false;
     }
   }
 
-  /** run 结束：flush 剩余 messages + append 一条 terminal entry（终态元数据）。best-effort，无 store 即 no-op。 */
-  private async _persistTerminal(summary: RunSummary): Promise<void> {
-    if (!this._store) return;
-    await this._flushToStore(); // best-effort（不会抛）
+  /**
+   * run 结束：flush 剩余 messages + append 一条 terminal entry（终态元数据）。无 store 即 no-op。
+   * 返回「最终 flush + terminal append 是否都成功」这个真实完成信号，供 `_finalizePersistence` 裁决。
+   */
+  private async _persistTerminal(summary: RunSummary): Promise<boolean> {
+    if (!this._store) return true;
+    const flushed = await this._flushToStore();
+    let terminalAppendedOk = true;
     try {
       await this._store.appendEntry(this.id, { kind: "terminal", result: summary });
     } catch (err) {
       this._reportStoreError("appendEntry(terminal)", err);
+      terminalAppendedOk = false;
+    }
+    return flushed && terminalAppendedOk;
+  }
+
+  /**
+   * run 返回前对持久化结果做最终裁决：把累积的 persistenceErrors 如实挂上 summary；strict 模式下若持久化
+   * 未真正完成（persistedOk=false）则把 reason 改 "error" 并补 error。persistedOk 用「最终 flush+terminal
+   * 是否成功」这个真实完成信号，而非「是否出现过 error」——故 best-effort 下的瞬时错误若已重试成功，strict
+   * 不会误判。
+   */
+  private _finalizePersistence(summary: RunSummary, persistedOk: boolean): void {
+    if (this._persistenceErrors.length > 0) {
+      summary.persistenceErrors = [...this._persistenceErrors];
+    }
+    if (this._strictPersistence && !persistedOk) {
+      summary.reason = "error";
+      if (!summary.error) {
+        summary.error = new Error(
+          `strict persistence failed: ${this._persistenceErrors.join("; ") || "store append did not complete"}`,
+        );
+      }
     }
   }
 
