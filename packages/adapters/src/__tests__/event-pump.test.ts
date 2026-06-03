@@ -25,6 +25,10 @@ describe("EventPump", () => {
     expect(types).toContain("message_start");
     expect(types.filter((t) => t === "text_delta").length).toBe(2);
     expect(types).toContain("message_end");
+    // message_update snapshot is forwarded by default (at the text block boundary)
+    expect(types).toContain("message_update");
+    const upd = sink.sent.find((e) => e.event.type === "message_update");
+    expect((upd!.event as { message?: { role?: string } }).message?.role).toBe("assistant");
     expect(sink.sent.every((e) => e.track === "live")).toBe(true);
     expect(sink.sent.every((e) => e.sessionId === "S1")).toBe(true);
     expect(sink.sent.every((e) => e.tag === "q1")).toBe(true);
@@ -255,9 +259,9 @@ describe("EventPump", () => {
     await session.run("hi");
     detach();
 
-    // message_start(seq0), text_delta(1,丢), text_delta(2,丢), message_end(3)
-    // → 投递到的是 [0,3]，seq 1/2 缺失 = 消费端可见的跳号（丢失检测）。
-    expect(delivered).toEqual([0, 3]);
+    // message_start(0), text_delta(1,丢), text_delta(2,丢), message_update(3), message_end(4)
+    // → 投递到的是 [0,3,4]，seq 1/2 缺失 = 消费端可见的跳号（丢失检测）。
+    expect(delivered).toEqual([0, 3, 4]);
     fake.teardown();
   });
 

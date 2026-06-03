@@ -257,4 +257,42 @@ describe("Event Bus · live token deltas via on()", () => {
     expect(logs.some((m) => m.includes("[event-bus]"))).toBe(true); // throwers were logged
     fake.teardown();
   });
+
+  it("emits message_update at a content-block boundary carrying the assembled message", async () => {
+    const fake = createFakeModel([
+      { content: [{ type: "text", text: "hi" }], textDeltas: ["h", "i"] },
+    ]);
+    const session = new AgentSession({ model: fake, tools: [] });
+    const seq: string[] = [];
+    let snapshot: unknown;
+    session.on("message_start", () => seq.push("start"));
+    session.on("text_delta", () => seq.push("delta"));
+    session.on("message_update", (e) => {
+      seq.push("update");
+      snapshot = e.message;
+    });
+    session.on("message_end", () => seq.push("end"));
+    await session.run("hi");
+    // one snapshot, fired at text_end — after the deltas, before message_end
+    expect(seq).toEqual(["start", "delta", "delta", "update", "end"]);
+    // the snapshot is the assembled assistant message (same object that lands in history)
+    expect(snapshot).toBe(session.messages.at(-1));
+    fake.teardown();
+  });
+
+  it("emits one message_update per content block (thinking + text => two snapshots)", async () => {
+    const fake = createFakeModel([
+      {
+        content: [{ type: "text", text: "answer" }],
+        thinkingDeltas: ["mull"],
+        textDeltas: ["ans", "wer"],
+      },
+    ]);
+    const session = new AgentSession({ model: fake, tools: [] });
+    let updates = 0;
+    session.on("message_update", () => updates++);
+    await session.run("hi");
+    expect(updates).toBe(2); // thinking_end + text_end
+    fake.teardown();
+  });
 });

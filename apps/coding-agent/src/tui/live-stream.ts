@@ -37,6 +37,8 @@ export class LiveStreamAccumulator {
         return [{ kind: "thinking", text: this.thinking }];
       case "toolcall_delta":
         return []; // P1 不渲染 live toolcall 增量；最终 toolCalls 在 message_end 权威取
+      case "message_update":
+        return []; // 快照轨：本累积器靠 delta 打字机 + message_end 定稿，不消费 message_update 快照
       case "message_end": {
         const text = event.message ? assistantText(event.message) : this.text;
         const thinking = event.message ? assistantThinking(event.message) : this.thinking;

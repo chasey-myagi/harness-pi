@@ -49,7 +49,7 @@ v0.1 之前必须满足：
 
 这些是 `bidding-agent` 迁移前的真实 blocker：
 
-- [ ] streaming `message_update` / thinking parity：补可观察的 LLM chunk/update event，不破坏 hook 控制面。
+- [x] streaming `message_update` / thinking parity：thinking delta 本已在 live 轨；新增 `message_update` LiveEvent（内容块边界 `*_end` 发「已拼好整条消息」快照，携带 pi-ai `partial`，低频）+ EventPump 默认转发。
 - [x] auto-compaction parity：`autoCompaction` plugin（`transformMessagesBeforeLlm`，估算 token 体积触发 + 可选 `onContextOverflow`→`compactRestartFresh` 兜底），不再要业务侧手搓触发逻辑。
 - [ ] follow-up / steering parity：明确 `ask_user` 回复插队当前 turn 的模型，避免业务层绕开 kernel。
 - [ ] `ctx.state` hardening：当前 typed registry 已可用，但跨 plugin key 仍需更强约束或 slot API。
