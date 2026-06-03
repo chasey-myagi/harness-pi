@@ -266,19 +266,26 @@ describe("Event Bus · live token deltas via on()", () => {
     ]);
     const session = new AgentSession({ model: fake, tools: [] });
     const seq: string[] = [];
-    let snapshot: unknown;
+    let snapshot: AssistantMessage | undefined;
+    let final: AssistantMessage | undefined;
     session.on("message_start", () => seq.push("start"));
     session.on("text_delta", () => seq.push("delta"));
     session.on("message_update", (e) => {
       seq.push("update");
       snapshot = e.message;
     });
-    session.on("message_end", () => seq.push("end"));
+    session.on("message_end", (e) => {
+      seq.push("end");
+      final = e.message as AssistantMessage;
+    });
     await session.run("hi");
     // one snapshot, fired at text_end — after the deltas, before message_end
     expect(seq).toEqual(["start", "delta", "delta", "update", "end"]);
-    // the snapshot is the assembled assistant message (same object that lands in history)
-    expect(snapshot).toBe(session.messages.at(-1));
+    // 契约：message_update 携带的是「中间态、逐块 partial 快照」——一个**独立对象**，**不是**落进 history 的
+    // 权威终态对象（即便单块回合下二者内容恰好相等，对象身份也不同）。要终态对象/终态判定请用 message_end。
+    expect(final).toBe(session.messages.at(-1)); // message_end 才是落 history 的权威终态对象
+    expect(snapshot).not.toBe(final); // update 是独立 partial 快照，绝非终态对象（不能 ===）
+    expect(snapshot!.content).toEqual(final!.content); // 单块回合：该块收尾后 partial 内容 == 终态内容
     fake.teardown();
   });
 
@@ -396,6 +403,158 @@ describe("LiveEvent · 契约硬化", () => {
     expect(updates).toBe(1); // 整个回合只为 toolcall 块发了一次 update
     // 快照里确有 toolCall 块（即 update 携带的是这条 toolcall-only 消息的 partial）。
     expect(snapshot?.content.some((b) => b.type === "toolCall")).toBe(true);
+    fake.teardown();
+  });
+
+  // 头号契约（test-review #2/#3）：一帧 message_update 的 content 是「截至此刻已收尾块」的 partial，
+  // 早期帧**严格少于**终态——把早期 update 当终态会丢块。这里用 [text, toolCall] 两块回合直接证伪
+  // 「update == 终态」：text_end 那帧只有 1 块（text），而 message_end 终态有 2 块（text+toolCall）。
+  it("an early message_update snapshot has FEWER blocks than the final (update ⊊ message_end)", async () => {
+    const fake = createFakeModel([
+      {
+        content: [
+          { type: "text", text: "ans" },
+          { type: "toolCall", name: "noop", arguments: { a: 1 } },
+        ],
+        textDeltas: ["an", "s"],
+        toolcallDeltas: ['{"a":', "1}"],
+      },
+      { content: [{ type: "text", text: "done" }] },
+    ]);
+    const session = new AgentSession({ model: fake, tools: [noopTool] });
+    const frames: AssistantMessage[] = [];
+    let final: AssistantMessage | undefined;
+    session.on("message_update", (e) => frames.push(e.message as AssistantMessage));
+    session.on("message_end", (e) => {
+      if (e.message && !final) final = e.message as AssistantMessage; // 抓第一回合终态
+    });
+    await session.run("hi");
+
+    // 第一回合两块 → 两帧 update：第 1 帧（text_end）只含 text，第 2 帧（toolcall_end）含 text+toolCall。
+    const first = frames[0]!;
+    const second = frames[1]!;
+    expect(first.content.map((b) => b.type)).toEqual(["text"]); // 早期帧：1 块
+    expect(second.content.map((b) => b.type)).toEqual(["text", "toolCall"]); // 后续帧：2 块
+    // 终态（message_end）有 2 块；早期 update 帧块数 < 终态 → 拿早期帧当终态会丢 toolCall 块。
+    expect(final!.content.length).toBe(2);
+    expect(first.content.length).toBeLessThan(final!.content.length);
+    // 且每帧 update 都是独立 partial 对象，不是落 history 的终态对象。
+    expect(first).not.toBe(final);
+    expect(second).not.toBe(final);
+    fake.teardown();
+  });
+
+  // 状态组合（test-review #3）：跨块快照内容**单调增长**——thinking 帧只含 thinking，text 帧含 thinking+text。
+  // 锁住「partial 逐块累积」而非「每帧都是同一份终态」。
+  it("message_update snapshots grow monotonically across blocks (thinking → thinking+text)", async () => {
+    const fake = createFakeModel([
+      {
+        content: [{ type: "text", text: "answer" }],
+        thinkingDeltas: ["mull"],
+        textDeltas: ["ans", "wer"],
+      },
+    ]);
+    const session = new AgentSession({ model: fake, tools: [] });
+    const frames: AssistantMessage[] = [];
+    session.on("message_update", (e) => frames.push(e.message as AssistantMessage));
+    await session.run("hi");
+
+    expect(frames).toHaveLength(2);
+    expect(frames[0]!.content.map((b) => b.type)).toEqual(["thinking"]); // 第 1 帧（thinking_end）
+    expect(frames[1]!.content.map((b) => b.type)).toEqual(["thinking", "text"]); // 第 2 帧（text_end）
+    // 第 1 帧是独立快照，不会被后续 push 回填成 2 块（证明每帧 content 是当时的拷贝、互不别名）。
+    expect(frames[0]!.content).toHaveLength(1);
+    expect(frames[0]).not.toBe(frames[1]);
+    fake.teardown();
+  });
+
+  // 头号契约 mid-abort（test-review #1）：流被中途打断时，最后一帧 message_update 只含**已收尾块**、
+  // 缺尚未流出的块；终态（含 stopReason:"aborted"）只能由 message_end 得知，绝不能拿最后一帧 update 当终态。
+  it("on mid-stream abort, the last message_update lacks the unstreamed block; message_end carries the aborted final", async () => {
+    const fake = createFakeModel([
+      {
+        // 脚本本想发 thinking + text 两块，但在 thinking 收尾后 abort：text 永不流出。
+        content: [{ type: "text", text: "never streamed" }],
+        thinkingDeltas: ["reason"],
+        textDeltas: ["wont", "happen"],
+        abortAfterBlock: "thinking",
+      },
+    ]);
+    const session = new AgentSession({ model: fake, tools: [], consoleSink: () => {} });
+    const frames: AssistantMessage[] = [];
+    let final: AssistantMessage | undefined;
+    session.on("message_update", (e) => frames.push(e.message as AssistantMessage));
+    session.on("message_end", (e) => (final = e.message as AssistantMessage | undefined));
+    await session.run("hi");
+
+    // 只为已收尾的 thinking 块发了一帧 update；text 块从未收尾 → 内核绝不为它臆造 update。
+    expect(frames).toHaveLength(1);
+    expect(frames[0]!.content.map((b) => b.type)).toEqual(["thinking"]); // 最后一帧缺 text 块
+    // 终态由 message_end 携带，且 stopReason 标记 aborted——这是「中途打断」的唯一权威信号，
+    // message_update 不带 stopReason，拿它当终态既缺块也判不出 aborted。
+    expect(final).toBeDefined();
+    expect(final!.stopReason).toBe("aborted");
+    fake.teardown();
+  });
+
+  // 隔离（test-review #4）：message_update 是块边界单独 emit 的代码路径，不能假设它和 delta 共享隔离行为。
+  // 一个 message_update listener 抛错：loop 仍跑完、其他 message_update listener 仍收快照、错误经 consoleSink 记 [event-bus]。
+  it("isolates a throwing message_update listener: loop completes, other update listeners still fire, error logged", async () => {
+    const fake = createFakeModel([
+      { content: [{ type: "text", text: "hi" }], textDeltas: ["h", "i"] },
+    ]);
+    const logs: string[] = [];
+    const session = new AgentSession({ model: fake, tools: [], consoleSink: (m) => logs.push(m) });
+    const good: AssistantMessage[] = [];
+    session.on("message_update", () => {
+      throw new Error("boom in update");
+    });
+    session.on("message_update", (e) => good.push(e.message as AssistantMessage));
+    const summary = await session.run("hi");
+    expect(summary.reason).toBe("done"); // 抛错的 update listener 没拖垮 run
+    expect(good).toHaveLength(1); // 另一个 update listener 仍拿到那帧快照
+    expect(good[0]!.content.map((b) => b.type)).toEqual(["text"]);
+    expect(logs.some((m) => m.includes("[event-bus]"))).toBe(true); // 抛错被记
+    fake.teardown();
+  });
+
+  // 错误路径（test-review #5）：错误回合没有任何块收尾 → 不应有任何 message_update。
+  // 覆盖两条 provider 失败路径：sync-throw（建流即抛）与 runtime error 事件（result resolve 出 error 终态）。
+  it("emits no message_update on an error turn (no block ever completes) — both sync-throw and error-event paths", async () => {
+    // 路径 A：stream() 同步抛。
+    const fa = createFakeModel([{ content: [], streamThrows: new Error("boom") }]);
+    const sa = new AgentSession({ model: fa, tools: [], consoleSink: () => {} });
+    let ua = 0;
+    sa.on("message_update", () => ua++);
+    const ra = await sa.run("hi");
+    expect(ra.reason).toBe("error");
+    expect(ua).toBe(0); // 无块收尾 → 无 update
+    fa.teardown();
+
+    // 路径 B：runtime error 事件 → result() resolve 出 stopReason:"error" 终态（不 reject）。
+    const fb = createFakeModel([{ content: [], throwError: new Error("api 500") }]);
+    const sb = new AgentSession({ model: fb, tools: [], consoleSink: () => {} });
+    let ub = 0;
+    sb.on("message_update", () => ub++);
+    await sb.run("hi");
+    expect(ub).toBe(0); // 同样无块收尾 → 无 update
+    fb.teardown();
+  });
+
+  // 多回合归属（test-review #6）：toolcall 回合 + text 回合，每回合各发一次 update，整轮共 2 次、不串块。
+  it("attributes message_update per turn across a multi-turn run (one per turn, no cross-turn leakage)", async () => {
+    const fake = createFakeModel([
+      { content: [{ type: "toolCall", name: "noop", arguments: {} }], toolcallDeltas: ["{}"] },
+      { content: [{ type: "text", text: "done" }], textDeltas: ["do", "ne"] },
+    ]);
+    const session = new AgentSession({ model: fake, tools: [noopTool] });
+    const frames: AssistantMessage[] = [];
+    session.on("message_update", (e) => frames.push(e.message as AssistantMessage));
+    await session.run("hi");
+
+    expect(frames).toHaveLength(2); // 整轮共两帧：每回合各一帧
+    expect(frames[0]!.content.map((b) => b.type)).toEqual(["toolCall"]); // 第 1 回合：toolcall 块
+    expect(frames[1]!.content.map((b) => b.type)).toEqual(["text"]); // 第 2 回合：text 块（不含上一回合的 toolCall）
     fake.teardown();
   });
 });

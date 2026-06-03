@@ -64,6 +64,14 @@ export interface FakeAssistantResponse {
    * 用于测试 message_start/message_end 在异常下仍严格配对。
    */
   streamThrows?: Error;
+  /**
+   * 在指定内容块的 `*_end` 之后**注入一次 mid-stream abort**：fake 不再发后续块，直接以
+   * 「截至此刻的 partial」为内容 push 一个 `stopReason:"aborted"` 终态（对齐 pi-ai faux provider 的
+   * `createAbortedMessage(partial)` 语义）。用于测 `message_update` 契约——证明流被中途打断时，最后一帧
+   * `message_update` 只含**已收尾的块**、缺尚未流出的块，且终态须由 `message_end`（携 `stopReason:"aborted"`）
+   * 判定，而非把最后一帧 update 当终态。确定性、无时序竞争（abort 由 fake 在块边界自行注入，不靠外部 signal 抢跑）。
+   */
+  abortAfterBlock?: "thinking" | "text" | "toolcall";
 }
 
 /**
@@ -201,28 +209,49 @@ export function createFakeModel(
             timestamp: Date.now(),
           };
           // 可选：push 流式 delta 事件（供 Event Bus 测试）。在 end() 之前。
+          //
+          // **忠实复刻 pi-ai 的 `partial` 语义**（对齐 providers/faux.js + anthropic/google 等真实 provider）：
+          // `partial` 是「截至当前已收尾块」的**渐进式快照**，每条事件携带一份**独立拷贝**（content 数组逐块增长），
+          // 而非全程复用最终 `assistant`。kernel 只在 `*_end` 转发 `partial` 作 `message_update`，故只有 `*_end`
+          // 上的 partial 会被消费——但 start/delta 也照发独立快照，避免「假 partial」给测试错误的安全感。
+          // 最终 `result()` 仍是完整 `assistant`（done 事件携带），与 partial 是不同对象、内容是其超集。
+          const built: AssistantMessage["content"] = [];
+          const snap = (): AssistantMessage => ({ ...assistant, content: built.slice() });
+          // 在某块 `*_end` 后注入 mid-stream abort：以「截至此刻 partial」为内容 finish 成 aborted 终态，不再发后续块。
+          const abortHere = (block: NonNullable<FakeAssistantResponse["abortAfterBlock"]>): boolean => {
+            if (next.abortAfterBlock !== block) return false;
+            finish({ ...assistant, content: built.slice(), stopReason: "aborted", errorMessage: "aborted mid-stream" });
+            return true;
+          };
+
           if (next.thinkingDeltas?.length) {
-            stream.push({ type: "thinking_start", contentIndex: 0, partial: assistant } as never);
+            stream.push({ type: "thinking_start", contentIndex: 0, partial: snap() } as never);
             for (const d of next.thinkingDeltas)
-              stream.push({ type: "thinking_delta", contentIndex: 0, delta: d, partial: assistant } as never);
-            stream.push({ type: "thinking_end", contentIndex: 0, content: next.thinkingDeltas.join(""), partial: assistant } as never);
+              stream.push({ type: "thinking_delta", contentIndex: 0, delta: d, partial: snap() } as never);
+            built.push({ type: "thinking", thinking: next.thinkingDeltas.join("") } as never);
+            stream.push({ type: "thinking_end", contentIndex: 0, content: next.thinkingDeltas.join(""), partial: snap() } as never);
+            if (abortHere("thinking")) return;
           }
           if (next.textDeltas?.length) {
             const ci = content.findIndex((b) => b.type === "text");
             if (ci < 0) throw new Error("createFakeModel: textDeltas set but no text block in content");
-            stream.push({ type: "text_start", contentIndex: ci, partial: assistant } as never);
+            stream.push({ type: "text_start", contentIndex: ci, partial: snap() } as never);
             for (const d of next.textDeltas)
-              stream.push({ type: "text_delta", contentIndex: ci, delta: d, partial: assistant } as never);
-            stream.push({ type: "text_end", contentIndex: ci, content: next.textDeltas.join(""), partial: assistant } as never);
+              stream.push({ type: "text_delta", contentIndex: ci, delta: d, partial: snap() } as never);
+            built.push(content[ci]!); // ci>=0 已校验
+            stream.push({ type: "text_end", contentIndex: ci, content: next.textDeltas.join(""), partial: snap() } as never);
+            if (abortHere("text")) return;
           }
           if (next.toolcallDeltas?.length) {
             const ci = content.findIndex((b) => b.type === "toolCall");
             if (ci < 0) throw new Error("createFakeModel: toolcallDeltas set but no toolCall block in content");
-            const tc = content[ci];
-            stream.push({ type: "toolcall_start", contentIndex: ci, partial: assistant } as never);
+            const tc = content[ci]!; // ci>=0 已校验
+            stream.push({ type: "toolcall_start", contentIndex: ci, partial: snap() } as never);
             for (const d of next.toolcallDeltas)
-              stream.push({ type: "toolcall_delta", contentIndex: ci, delta: d, partial: assistant } as never);
-            stream.push({ type: "toolcall_end", contentIndex: ci, toolCall: tc, partial: assistant } as never);
+              stream.push({ type: "toolcall_delta", contentIndex: ci, delta: d, partial: snap() } as never);
+            built.push(tc);
+            stream.push({ type: "toolcall_end", contentIndex: ci, toolCall: tc, partial: snap() } as never);
+            if (abortHere("toolcall")) return;
           }
           finish(assistant);
         })();
