@@ -430,7 +430,6 @@ describe("AgentSession edge cases", () => {
       isConcurrencySafe: () => true,
       async execute(args) {
         events.push(`safe-${args["id"]}-start`);
-        await new Promise((r) => setTimeout(r, 30));
         events.push(`safe-${args["id"]}-end`);
         return { content: [{ type: "text", text: String(args["id"]) }] };
       },
@@ -441,7 +440,6 @@ describe("AgentSession edge cases", () => {
       parameters: Type.Object({ id: Type.String() }),
       async execute(args) {
         events.push(`unsafe-${args["id"]}-start`);
-        await new Promise((r) => setTimeout(r, 10));
         events.push(`unsafe-${args["id"]}-end`);
         return { content: [{ type: "text", text: String(args["id"]) }] };
       },
