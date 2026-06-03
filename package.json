@@ -1,8 +1,15 @@
 {
   "name": "harness-pi",
   "private": true,
-  "version": "0.0.0",
+  "version": "0.1.0",
   "description": "Production harness for pi-ai-based agents — kernel + plugins",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/chasey-myagi/harness-pi.git"
+  },
+  "homepage": "https://github.com/chasey-myagi/harness-pi#readme",
+  "bugs": "https://github.com/chasey-myagi/harness-pi/issues",
   "type": "module",
   "packageManager": "pnpm@10.15.0",
   "scripts": {

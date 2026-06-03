@@ -1,8 +1,16 @@
 {
   "name": "@harness-pi/coding-agent",
-  "version": "0.0.0",
+  "version": "0.1.0",
   "private": true,
   "description": "Dogfood coding agent built on harness-pi",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/chasey-myagi/harness-pi.git",
+    "directory": "apps/coding-agent"
+  },
+  "homepage": "https://github.com/chasey-myagi/harness-pi/tree/main/apps/coding-agent#readme",
+  "bugs": "https://github.com/chasey-myagi/harness-pi/issues",
   "type": "module",
   "main": "./dist/cli.js",
   "types": "./dist/cli.d.ts",

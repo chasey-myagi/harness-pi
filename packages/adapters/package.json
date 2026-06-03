@@ -1,7 +1,15 @@
 {
   "name": "@harness-pi/adapters",
-  "version": "0.0.0",
+  "version": "0.1.0",
   "description": "SessionStore adapters for harness-pi (JSONL file + Postgres). Concrete I/O behind the kernel SessionStore protocol.",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/chasey-myagi/harness-pi.git",
+    "directory": "packages/adapters"
+  },
+  "homepage": "https://github.com/chasey-myagi/harness-pi/tree/main/packages/adapters#readme",
+  "bugs": "https://github.com/chasey-myagi/harness-pi/issues",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -17,6 +25,7 @@
     "README.md"
   ],
   "scripts": {
+    "prepublishOnly": "pnpm run build",
     "build": "tsc -p .",
     "typecheck": "tsc -p . --noEmit",
     "test": "vitest run",
