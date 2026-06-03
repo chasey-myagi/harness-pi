@@ -101,11 +101,20 @@ export class LifecycleRestart {
       // 内存模式在 delay 前先抓历史快照；resume 模式无需快照（历史在 store 里）。
       const carriedMessages = this.opts.resume ? undefined : [...session.messages];
       if (delay > 0) {
+        // 不要 unref：这个 timer 是被 await 的控制流，unref 后独立 worker 的事件循环可能在重试
+        // 触发前就退出（#11.4）。abort 时立即唤醒，让取消能及时退出循环。
         await new Promise<void>((resolve) => {
-          const t = setTimeout(resolve, delay);
-          if (typeof (t as { unref?: () => void }).unref === "function") {
-            (t as { unref: () => void }).unref();
-          }
+          const signal = opts?.signal;
+          if (signal?.aborted) return resolve();
+          const onAbort = (): void => {
+            clearTimeout(t);
+            resolve();
+          };
+          const t = setTimeout(() => {
+            signal?.removeEventListener("abort", onAbort);
+            resolve();
+          }, delay);
+          signal?.addEventListener("abort", onAbort, { once: true });
         });
       }
       if (opts?.signal?.aborted) break;

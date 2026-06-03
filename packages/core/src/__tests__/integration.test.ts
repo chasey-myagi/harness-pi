@@ -8,6 +8,53 @@ import { AgentSession } from "../session.js";
 import type { HarnessTool, Hook, HookContext } from "../index.js";
 import { createFakeModel } from "../testing.js";
 
+/** Read the first text block of a toolResult message. */
+function resultText(m: { content: unknown }): string {
+  const c = m.content;
+  if (Array.isArray(c) && c[0] && typeof c[0] === "object" && "text" in c[0]) {
+    return String((c[0] as { text: unknown }).text);
+  }
+  return "";
+}
+
+/**
+ * Deterministic concurrency latch: `n` callers rendezvous and are ALL released only once `n`
+ * have arrived. If fewer than `n` ever run concurrently, the arrivals block forever → the test
+ * times out. So concurrency is proven without any dependence on wall-clock timing: a truly
+ * concurrent run releases immediately; a serialized run deadlocks. `n=1` releases at once.
+ */
+function rendezvous(n: number): () => Promise<void> {
+  let arrived = 0;
+  let release!: () => void;
+  const gate = new Promise<void>((r) => (release = r));
+  return async () => {
+    if (++arrived >= n) release();
+    await gate;
+  };
+}
+
+/** A tool that records `start-<name>`/`end-<name>` into `ev`; an optional `arrive` gates the
+ *  body on a {@link rendezvous} so concurrency can be asserted deterministically. */
+function probeTool(
+  ev: string[],
+  name: string,
+  safe: boolean,
+  arrive?: () => Promise<void>,
+): HarnessTool {
+  return {
+    name,
+    description: name,
+    parameters: Type.Object({}),
+    isConcurrencySafe: () => safe,
+    async execute() {
+      ev.push(`start-${name}`);
+      if (arrive) await arrive();
+      ev.push(`end-${name}`);
+      return { content: [{ type: "text", text: name }] };
+    },
+  };
+}
+
 const echoTool: HarnessTool = {
   name: "echo",
   description: "echo back",
@@ -433,6 +480,237 @@ describe("Integration: Parallel tool execution (isConcurrencySafe)", () => {
     if (toolResults[1]?.role === "toolResult") {
       expect(toolResults[1].toolCallId).toBe("tc-2");
     }
+  });
+
+  it("an unsafe write is a barrier: a later safe read observes the write (#11.1)", async () => {
+    let state = "old";
+    const write: HarnessTool = {
+      name: "write_state",
+      description: "unsafe write",
+      parameters: Type.Object({}),
+      isConcurrencySafe: () => false,
+      async execute() {
+        state = "new";
+        return { content: [{ type: "text", text: "wrote" }] };
+      },
+    };
+    const read: HarnessTool = {
+      name: "read_state",
+      description: "safe read",
+      parameters: Type.Object({}),
+      isConcurrencySafe: () => true,
+      async execute() {
+        return { content: [{ type: "text", text: state }] };
+      },
+    };
+    const model = createFakeModel([
+      {
+        content: [
+          { type: "toolCall", id: "w", name: "write_state", arguments: {} },
+          { type: "toolCall", id: "r", name: "read_state", arguments: {} },
+        ],
+      },
+      { content: [{ type: "text", text: "done" }] },
+    ]);
+    const session = new AgentSession({ model, tools: [write, read] });
+    await session.run("go");
+    const r = session.messages.find(
+      (m) => m.role === "toolResult" && m.toolCallId === "r",
+    );
+    // Deterministic: the barrier runs the write strictly before the read → read sees "new".
+    // Pre-fix, read sat in the all-safe batch that ran before the unsafe write → "old".
+    expect(r ? resultText(r) : "").toBe("new");
+  });
+
+  it("only contiguous safe runs parallelize; unsafe calls are barriers (#11.1)", async () => {
+    const ev: string[] = [];
+    const ab = rendezvous(2); // A,B must run concurrently (else this deadlocks → timeout)
+    const cd = rendezvous(2); // C,D must run concurrently after the W barrier
+    const model = createFakeModel([
+      {
+        content: [
+          { type: "toolCall", id: "A", name: "A", arguments: {} },
+          { type: "toolCall", id: "B", name: "B", arguments: {} },
+          { type: "toolCall", id: "W", name: "W", arguments: {} },
+          { type: "toolCall", id: "C", name: "C", arguments: {} },
+          { type: "toolCall", id: "D", name: "D", arguments: {} },
+        ],
+      },
+      { content: [{ type: "text", text: "done" }] },
+    ]);
+    const session = new AgentSession({
+      model,
+      tools: [
+        probeTool(ev, "A", true, ab),
+        probeTool(ev, "B", true, ab),
+        probeTool(ev, "W", false),
+        probeTool(ev, "C", true, cd),
+        probeTool(ev, "D", true, cd),
+      ],
+    });
+    await session.run("go");
+    // No deadlock ⇒ A,B ran concurrently and C,D ran concurrently (rendezvous(2) released).
+    expect(ev).toHaveLength(10);
+    const at = (e: string): number => ev.indexOf(e);
+    // W is a barrier: it runs only after the A,B segment fully finished…
+    expect(at("start-W")).toBeGreaterThan(at("end-A"));
+    expect(at("start-W")).toBeGreaterThan(at("end-B"));
+    // …and the C,D segment runs only after W finished (the bug ran C/D before W).
+    expect(at("start-C")).toBeGreaterThan(at("end-W"));
+    expect(at("start-D")).toBeGreaterThan(at("end-W"));
+  });
+
+  it("barrier at the head of the batch: [unsafe, safe, safe] (#11.1)", async () => {
+    const ev: string[] = [];
+    const ab = rendezvous(2);
+    const model = createFakeModel([
+      {
+        content: [
+          { type: "toolCall", id: "W", name: "W", arguments: {} },
+          { type: "toolCall", id: "A", name: "A", arguments: {} },
+          { type: "toolCall", id: "B", name: "B", arguments: {} },
+        ],
+      },
+      { content: [{ type: "text", text: "done" }] },
+    ]);
+    const session = new AgentSession({
+      model,
+      tools: [probeTool(ev, "W", false), probeTool(ev, "A", true, ab), probeTool(ev, "B", true, ab)],
+    });
+    await session.run("go");
+    expect(ev).toHaveLength(6); // no deadlock ⇒ the trailing safe run (A,B) flushed concurrently
+    const at = (e: string): number => ev.indexOf(e);
+    expect(at("start-A")).toBeGreaterThan(at("end-W"));
+    expect(at("start-B")).toBeGreaterThan(at("end-W"));
+  });
+
+  it("barrier at the tail of the batch: [safe, safe, unsafe] (#11.1)", async () => {
+    const ev: string[] = [];
+    const ab = rendezvous(2);
+    const model = createFakeModel([
+      {
+        content: [
+          { type: "toolCall", id: "A", name: "A", arguments: {} },
+          { type: "toolCall", id: "B", name: "B", arguments: {} },
+          { type: "toolCall", id: "W", name: "W", arguments: {} },
+        ],
+      },
+      { content: [{ type: "text", text: "done" }] },
+    ]);
+    const session = new AgentSession({
+      model,
+      tools: [probeTool(ev, "A", true, ab), probeTool(ev, "B", true, ab), probeTool(ev, "W", false)],
+    });
+    await session.run("go");
+    expect(ev).toHaveLength(6);
+    const at = (e: string): number => ev.indexOf(e);
+    // leading safe run flushed (A,B concurrent), then the trailing unsafe ran after them
+    expect(at("start-W")).toBeGreaterThan(at("end-A"));
+    expect(at("start-W")).toBeGreaterThan(at("end-B"));
+    expect(session.messages.filter((m) => m.role === "toolResult")).toHaveLength(3);
+  });
+
+  it("all-unsafe batch runs in strict sequential order (#11.1)", async () => {
+    const ev: string[] = [];
+    const model = createFakeModel([
+      {
+        content: [
+          { type: "toolCall", id: "X", name: "X", arguments: {} },
+          { type: "toolCall", id: "Y", name: "Y", arguments: {} },
+          { type: "toolCall", id: "Z", name: "Z", arguments: {} },
+        ],
+      },
+      { content: [{ type: "text", text: "done" }] },
+    ]);
+    const session = new AgentSession({
+      model,
+      tools: [probeTool(ev, "X", false), probeTool(ev, "Y", false), probeTool(ev, "Z", false)],
+    });
+    await session.run("go");
+    expect(ev).toEqual(["start-X", "end-X", "start-Y", "end-Y", "start-Z", "end-Z"]);
+  });
+
+  it("a throwing isConcurrencySafe is fail-closed to an unsafe barrier + reported via onError (#11.1)", async () => {
+    const ev: string[] = [];
+    const errors: string[] = [];
+    const thrower: HarnessTool = {
+      name: "T",
+      description: "isConcurrencySafe throws",
+      parameters: Type.Object({}),
+      isConcurrencySafe: () => {
+        throw new Error("safety check boom");
+      },
+      async execute() {
+        ev.push("start-T");
+        ev.push("end-T");
+        return { content: [{ type: "text", text: "T" }] };
+      },
+    };
+    const errHook: Hook = {
+      name: "err-spy",
+      onError(input) {
+        if (input.phase === "tool") errors.push(input.err.message);
+      },
+    };
+    const model = createFakeModel([
+      {
+        content: [
+          { type: "toolCall", id: "A", name: "A", arguments: {} },
+          { type: "toolCall", id: "T", name: "T", arguments: {} },
+          { type: "toolCall", id: "B", name: "B", arguments: {} },
+        ],
+      },
+      { content: [{ type: "text", text: "done" }] },
+    ]);
+    const session = new AgentSession({
+      model,
+      hooks: [errHook],
+      tools: [probeTool(ev, "A", true), thrower, probeTool(ev, "B", true)],
+    });
+    await session.run("go");
+    // fail-closed: T is treated as unsafe → acts as a barrier between A and B (strict order)
+    expect(ev).toEqual(["start-A", "end-A", "start-T", "end-T", "start-B", "end-B"]);
+    // and the isConcurrencySafe throw was surfaced, not swallowed
+    expect(errors).toContain("safety check boom");
+  });
+
+  it("abort during the batch skips the remaining trailing safe run (#11.1)", async () => {
+    const ev: string[] = [];
+    const aborter: HarnessTool = {
+      name: "boom",
+      description: "aborts mid-batch",
+      parameters: Type.Object({}),
+      isConcurrencySafe: () => false,
+      async execute(_args, ctx) {
+        ev.push("boom");
+        ctx.abort("manual mid-batch");
+        return { content: [{ type: "text", text: "x" }], isError: true };
+      },
+    };
+    const later: HarnessTool = {
+      name: "later",
+      description: "safe — must be skipped after abort",
+      parameters: Type.Object({}),
+      isConcurrencySafe: () => true,
+      async execute() {
+        ev.push("later-ran");
+        return { content: [{ type: "text", text: "late" }] };
+      },
+    };
+    const model = createFakeModel([
+      {
+        content: [
+          { type: "toolCall", id: "boom", name: "boom", arguments: {} },
+          { type: "toolCall", id: "later", name: "later", arguments: {} },
+        ],
+      },
+      { content: [{ type: "text", text: "done" }] },
+    ]);
+    const session = new AgentSession({ model, tools: [aborter, later] });
+    const summary = await session.run("go");
+    expect(summary.reason).toBe("aborted");
+    // the trailing safe run after the aborting barrier must NOT execute
+    expect(ev).toEqual(["boom"]);
   });
 });
 

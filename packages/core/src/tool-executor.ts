@@ -44,14 +44,16 @@ export class ToolExecutor {
 
   /**
    * 跑一批 toolCall。返回 Map<toolCallId, result>。
-   * 按 `isConcurrencySafe` 分批：safe 批 Promise.all 并发，unsafe 批 await 顺序。
+   *
+   * 执行顺序保持模型在 assistant message 里写下的相对顺序：unsafe 调用是 **barrier**，只把
+   * **连续的** safe 段用 Promise.all 并发跑。否则 `[edit, read]` 里的 read 可能抢在 edit 完成前
+   * 执行、读到旧状态（最终 toolResult 顺序仍按原 toolCalls 排，会掩盖执行乱序）。见 #11.1。
    */
   async executeBatch(
     toolCalls: ToolCall[],
   ): Promise<Map<string, ToolExecResult>> {
-    const safeBatch: ToolCall[] = [];
-    const sequential: ToolCall[] = [];
-
+    // 先分类（保留 isConcurrencySafe 抛错的上报），不动顺序。
+    const classified: Array<{ call: ToolCall; safe: boolean }> = [];
     for (const call of toolCalls) {
       const tool = findToolByName(this.deps.tools, call.name);
       let safe = false;
@@ -76,7 +78,7 @@ export class ToolExecutor {
           error: err instanceof Error ? err.message : String(err),
         });
       }
-      (safe ? safeBatch : sequential).push(call);
+      classified.push({ call, safe });
     }
 
     const results = new Map<string, ToolExecResult>();
@@ -85,11 +87,25 @@ export class ToolExecutor {
         results.set(call.id, res);
       });
 
-    await Promise.all(safeBatch.map(executeOne));
-    for (const call of sequential) {
+    // unsafe = barrier；只并行**连续的** safe 段，保持模型顺序（#11.1）。
+    let safeRun: ToolCall[] = [];
+    const flushSafeRun = async (): Promise<void> => {
+      if (safeRun.length === 0) return;
+      const run = safeRun;
+      safeRun = [];
+      await Promise.all(run.map(executeOne));
+    };
+
+    for (const { call, safe } of classified) {
+      if (safe) {
+        safeRun.push(call);
+        continue;
+      }
+      await flushSafeRun(); // barrier：先把前面连续的 safe 段跑完
       if (this.deps.abortCtrl.signal.aborted) break;
       await executeOne(call);
     }
+    if (!this.deps.abortCtrl.signal.aborted) await flushSafeRun();
 
     return results;
   }
