@@ -43,7 +43,7 @@
 
 `harness-pi` 现在处在 **v0.1 readiness** 阶段：core loop、hook dispatcher、standard plugins、controllers、first-party tools、dogfood coding agent、offline examples 和测试都已经落地，足够做 spike/review。
 
-判断成熟度时区分四个层级，别把它们混为一谈：
+判断成熟度时区分三个层级，别把它们混为一谈：
 
 1. **机制已实现**（mechanism implemented，代码 + 本地测试通过）：包括 streaming `message_update` / thinking parity、完整 auto-compaction、PG sink——这些**都已经落地并有本地测试覆盖**，不再是迁移 blocker。
 2. **provider 已验证**（provider-verified）：用真实 provider 跑 streaming / error / overflow 的 smoke。**尚未完成。**
