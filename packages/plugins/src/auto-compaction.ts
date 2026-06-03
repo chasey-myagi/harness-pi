@@ -58,11 +58,12 @@ export interface AutoCompactionOptions {
 }
 
 /**
- * CJK 码点（含统一表意文字 + 常见 CJK 标点 / 全角字符）。这些码点在主流 tokenizer 里普遍 ≈ 1 token/字，
- * 远稠密于 ASCII 的 ≈ 4 char/token，故单独计数。范围按码点匹配（用 /u flag）：
- * 　-〿 CJK 符号与标点、㐀-䶿 扩展 A、一-鿿 统一表意文字、豈-﫿 兼容表意文字、＀-￯ 全角/半角形式。
+ * 单个 CJK 码点判定（含统一表意文字 + 常见 CJK 标点 / 全角字符）。这些码点在主流 tokenizer 里普遍
+ * ≈ 1 token/字，远稠密于 ASCII 的 ≈ 4 char/token，故单独计数。**非 global**，用于逐码点 `.test`：
+ * 　-〿 CJK 符号与标点、㐀-䶿 扩展 A、一-鿿 统一表意文字、豈-﫿 兼容表意文字、＀-￯ 全角/半角形式，
+ * 以及 \u{20000}-\u{2ffff} 扩展 B–F（代理对，需 /u flag + 按码点迭代才能正确命中，否则被当 2 个 ASCII）。
  */
-const CJK_RE = /[　-〿㐀-䶿一-鿿豈-﫿＀-￯]/gu;
+const CJK_CP = /[　-〿㐀-䶿一-鿿豈-﫿＀-￯]|[\u{20000}-\u{2ffff}]/u;
 
 /** 单张图片的保守、扁平 token 估算（issue #14）：宁可高估、不可低估，避免漏触发→窗口溢出。 */
 const IMAGE_TOKENS = 1000;
@@ -70,10 +71,17 @@ const IMAGE_TOKENS = 1000;
 /**
  * 估算单条文本的 token：CJK 码点按 ≈ 1 token/字计，其余字符按 ≈ 1/4 token 计（向上取整）。
  * 偏向**高估**——本数用于压缩触发判据，低估的代价是漏触发后 context 溢出（安全 bug，见 #14）。
+ *
+ * **按码点迭代**（`for...of`）而非按 `.length`（UTF-16 码元）：这样扩展 B+ 的代理对 CJK（如 𠀀）算 1 个
+ * 码点 = 1 token（否则 `.length===2` 会被当 2 个 ASCII 字符），且 CJK/ASCII 混排时 `rest` 计数单位一致。
  */
 function estimateText(text: string): number {
-  const cjk = (text.match(CJK_RE) ?? []).length;
-  const rest = text.length - cjk;
+  let cjk = 0;
+  let rest = 0;
+  for (const ch of text) {
+    if (CJK_CP.test(ch)) cjk++;
+    else rest++;
+  }
   return cjk + Math.ceil(rest / 4);
 }
 

@@ -95,6 +95,87 @@ describe("autoCompaction", () => {
     expect(estimateTokensByChars([inlineMsg])).toBe(1000);
   });
 
+  it("counts astral (surrogate-pair) CJK as ~1 token/codepoint, not 2 ASCII chars", () => {
+    // 𠀀 = U+20000 (CJK Ext B): .length === 2 (a surrogate pair). Iterating by code POINT must
+    // count it as one CJK token; the pre-fix .length/regex path counted it as 2 ASCII → undercount.
+    const astral = "\u{20000}".repeat(10);
+    expect(astral.length).toBe(20); // 20 UTF-16 code units…
+    expect([...astral].length).toBe(10); // …but 10 code points
+    expect(estimateTokensByChars([m(astral)])).toBe(10); // 10 CJK code points ≈ 10 tokens
+  });
+
+  it("counts CJK + ASCII mixed in one text with consistent code-point units", () => {
+    // 你好(2 CJK) + " hello "(7 non-CJK) + 世界(2 CJK) + " world"(6 non-CJK)
+    // = 4 CJK + ceil(13/4)=4  → 8
+    expect(estimateTokensByChars([m("你好 hello 世界 world")])).toBe(8);
+  });
+
+  it("adds an image block and a text block in the same message", () => {
+    const msg: Message = {
+      role: "user",
+      content: [
+        { type: "image", data: "abc", mimeType: "image/png" },
+        { type: "text", text: "caption" }, // 7 ASCII → ceil(7/4) = 2
+      ],
+      timestamp: 0,
+    };
+    expect(estimateTokensByChars([msg])).toBe(1002); // 1000 (image) + 2 (text)
+  });
+
+  it("counts multiple images per-image (not per-message)", () => {
+    const msg: Message = {
+      role: "user",
+      content: [
+        { type: "image", data: "a", mimeType: "image/png" },
+        { type: "image", data: "b", mimeType: "image/png" },
+        { type: "image", data: "c", mimeType: "image/png" },
+      ],
+      timestamp: 0,
+    };
+    expect(estimateTokensByChars([msg])).toBe(3000); // 3 × IMAGE_TOKENS
+  });
+
+  it("counts non-text / non-image blocks (e.g. toolCall) via their JSON length", () => {
+    const big = {
+      role: "assistant",
+      content: [{ type: "toolCall", id: "t1", name: "foo", arguments: { x: "y".repeat(40) } }],
+      timestamp: 0,
+    } as unknown as Message;
+    const small = {
+      role: "assistant",
+      content: [{ type: "toolCall", id: "t1", name: "foo", arguments: { x: "y" } }],
+      timestamp: 0,
+    } as unknown as Message;
+    // the block IS counted (not skipped) and scales with its serialized size
+    expect(estimateTokensByChars([small])).toBeGreaterThan(0);
+    expect(estimateTokensByChars([big])).toBeGreaterThan(estimateTokensByChars([small]));
+  });
+
+  it("handles empty / whitespace / empty-content messages deterministically (no throw)", () => {
+    expect(estimateTokensByChars([m("")])).toBe(0);
+    expect(estimateTokensByChars([m("   ")])).toBe(1); // ceil(3/4)
+    const emptyContent: Message = { role: "user", content: [], timestamp: 0 };
+    expect(estimateTokensByChars([emptyContent])).toBe(0);
+  });
+
+  it("does not compact when messages.length === keepRecent (nothing to compress, no summarize)", async () => {
+    let calls = 0;
+    const compact = autoCompaction({
+      maxContextTokens: 1,
+      triggerRatio: 1,
+      keepRecent: 3,
+      estimateTokens: () => 999, // over threshold → would compact if it could
+      summarize: () => {
+        calls++;
+        return "S";
+      },
+    });
+    const { ctx } = createTestContext();
+    // exactly keepRecent messages: the tail IS everything → nothing to summarize
+    expect(await compact.transformMessagesBeforeLlm!(grow(3), ctx)).toBeUndefined();
+    expect(calls).toBe(0);
+  });
+
   it("caches the summary by covered prefix until it grows by resummarizeEvery", async () => {
     let calls = 0;
     const compact = autoCompaction({
