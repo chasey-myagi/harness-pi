@@ -288,23 +288,25 @@ npm install @harness-pi/plugins pg
 # 然后才能 import { PostgresSink } from "@harness-pi/plugins/metrics/sinks/postgres"
 ```
 
-**Schema 不打包**：
+**Schema（包内提供 DDL）**：
 
-我们**不**在 plugins 包里 ship migration / DDL。用户自己建表（DDL 在文档示例里给）。理由：DDL 跟用户的 migration 工具（drizzle/prisma/raw SQL）耦合，强行给反而困扰。
+PostgresSink 导出幂等的 `POSTGRES_METRICS_SINK_DDL` 并提供 `migrate()`（按 `;` 拆条执行）——与 `PostgresSessionStore` 同构，**本包零 `pg` 依赖**（注入 `PgClient`，node-postgres 的 `Pool`/`Client` 满足）。首次使用前 `await sink.migrate()` 建表即可；也可以把这段 DDL 接进你自己的 migration 工具（drizzle/prisma/raw SQL）。
 
-参考 DDL（在 README 或本 doc 给示例）：
+DDL（`ts` 用 `bigint` = epoch 毫秒，对齐 `MetricEvent.ts: number`；索引按「等值过滤列 + 时间」复合，服务「按 kind + 时间窗 + session/work-item 聚合」的典型查询）：
 
 ```sql
-CREATE TABLE metrics_events (
-  id BIGSERIAL PRIMARY KEY,
-  kind TEXT NOT NULL,
-  session_id TEXT,
-  turn_idx INTEGER,
-  ts TIMESTAMPTZ NOT NULL,
-  payload JSONB NOT NULL
+CREATE TABLE IF NOT EXISTS metrics_events (
+  id           BIGSERIAL PRIMARY KEY,
+  kind         TEXT   NOT NULL,
+  session_id   TEXT,
+  turn_idx     INTEGER,
+  work_item_id TEXT,
+  ts           BIGINT NOT NULL,
+  payload      JSONB  NOT NULL DEFAULT '{}'::jsonb
 );
-CREATE INDEX idx_metrics_session_ts ON metrics_events (session_id, ts);
-CREATE INDEX idx_metrics_kind_ts ON metrics_events (kind, ts);
+CREATE INDEX IF NOT EXISTS idx_metrics_events_kind_ts ON metrics_events (kind, ts);
+CREATE INDEX IF NOT EXISTS idx_metrics_events_session_kind_ts ON metrics_events (session_id, kind, ts);
+CREATE INDEX IF NOT EXISTS idx_metrics_events_work_item_kind_ts ON metrics_events (work_item_id, kind, ts);
 ```
 
 ### 4.4 OtelSink（peerDep on `@opentelemetry/api` + 一个 exporter，v0.x 候选）

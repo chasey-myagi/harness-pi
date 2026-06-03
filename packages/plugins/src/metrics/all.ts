@@ -16,3 +16,4 @@ export type {
   WorkItemRollup,
   WorkItemAggregatorOptions,
 } from "./sinks/work-item-aggregator.js";
+export type { PostgresSinkOptions, PgClient } from "./sinks/postgres.js";
