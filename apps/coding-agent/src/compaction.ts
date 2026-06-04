@@ -6,7 +6,7 @@
  * `summarize(earlyMessages) => string`，用 pi-ai 的 complete() 跑一次无工具的总结调用。
  */
 
-import { complete, type Context } from "@mariozechner/pi-ai";
+import { complete, type Context } from "@earendil-works/pi-ai";
 import {
   createUserMessage,
   type Api,

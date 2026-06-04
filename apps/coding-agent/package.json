@@ -45,11 +45,10 @@
     "@harness-pi/core": "workspace:*",
     "@harness-pi/plugins": "workspace:*",
     "@harness-pi/tools": "workspace:*",
-    "@mariozechner/pi-ai": "^0.73.1",
-    "@mariozechner/pi-tui": "0.73.1"
+    "@earendil-works/pi-ai": "^0.74.2",
+    "@earendil-works/pi-tui": "0.74.2"
   },
   "devDependencies": {
-    "@mariozechner/pi-coding-agent": "0.73.1",
     "@types/node": "^22.0.0",
     "tsx": "^4.0.0",
     "typescript": "^5.6.0",

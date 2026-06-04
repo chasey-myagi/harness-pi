@@ -153,6 +153,8 @@ describe("pi-coding-agent 0.53 compatibility", () => {
     const pkg = JSON.parse(
       readFileSync(join(process.cwd(), "package.json"), "utf8"),
     ) as { dependencies?: Record<string, string> };
+    // 第一方实现,不把 coding-agent 拉进 tools runtime —— 两个命名空间都不许(迁移到 @earendil-works/* 后)。
     expect(pkg.dependencies).not.toHaveProperty("@mariozechner/pi-coding-agent");
+    expect(pkg.dependencies).not.toHaveProperty("@earendil-works/pi-coding-agent");
   });
 });

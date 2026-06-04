@@ -21,7 +21,7 @@
 import {
   validateToolCall,
   type ToolCall,
-} from "@mariozechner/pi-ai";
+} from "@earendil-works/pi-ai";
 import type { HookContextImpl } from "./context.js";
 import type { HookDispatcher } from "./dispatcher.js";
 import type { ToolExecResult } from "./hook.js";

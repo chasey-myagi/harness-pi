@@ -7,7 +7,7 @@ import {
   type Context,
   type Model,
   type StreamOptions,
-} from "@mariozechner/pi-ai";
+} from "@earendil-works/pi-ai";
 import { AgentSession } from "../session.js";
 
 describe("AgentSession llmOptions", () => {

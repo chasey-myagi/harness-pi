@@ -24,7 +24,7 @@
 
 import type { Hook, HookContext } from "@harness-pi/core";
 import { createUserMessage } from "@harness-pi/core";
-import type { Message } from "@mariozechner/pi-ai";
+import type { Message } from "@earendil-works/pi-ai";
 
 export interface AutoCompactionOptions {
   /** context token 预算（通常 = 模型上下文窗口，或你愿意用满的上限）。须 > 0。 */

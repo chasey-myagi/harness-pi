@@ -15,7 +15,7 @@ import {
   fuzzyFilter,
   type AutocompleteItem,
   type AutocompleteProvider,
-} from "@mariozechner/pi-tui";
+} from "@earendil-works/pi-tui";
 
 const SKIP_DIRS = new Set([
   ".git",

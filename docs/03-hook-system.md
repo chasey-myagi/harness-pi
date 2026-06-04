@@ -29,7 +29,7 @@ Hook 系统是 harness-pi 跟 [pi-agent-core](https://github.com/badlogic/pi-mon
 ## 2. Hook 接口定义
 
 ```ts
-import type { Message, AssistantMessage, ToolCall } from "@mariozechner/pi-ai";
+import type { Message, AssistantMessage, ToolCall } from "@earendil-works/pi-ai";
 import type { HookContext, HookResult, ToolExecResult, HarnessTool } from "@harness-pi/core";
 
 export interface Hook {

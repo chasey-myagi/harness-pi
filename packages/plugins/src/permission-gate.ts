@@ -14,7 +14,7 @@
  */
 
 import type { Hook, HookContext } from "@harness-pi/core";
-import type { ToolCall } from "@mariozechner/pi-ai";
+import type { ToolCall } from "@earendil-works/pi-ai";
 
 export type PermissionDecision = "allow" | "ask" | "deny";
 

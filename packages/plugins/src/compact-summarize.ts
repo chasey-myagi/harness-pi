@@ -18,7 +18,7 @@
 
 import type { Hook, HookContext } from "@harness-pi/core";
 import { createUserMessage } from "@harness-pi/core";
-import type { Message } from "@mariozechner/pi-ai";
+import type { Message } from "@earendil-works/pi-ai";
 
 export interface CompactSummarizeOptions {
   /** 触发阈值：messages 条数 > maxMessages 才压缩。须 > keepRecent。 */

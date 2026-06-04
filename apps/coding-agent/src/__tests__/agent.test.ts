@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { type Api, type Model, type Usage } from "@harness-pi/core";
 import { createFakeModel } from "@harness-pi/core/testing";
-import { getProviders } from "@mariozechner/pi-ai";
+import { getProviders } from "@earendil-works/pi-ai";
 import {
   createCodingAgent,
   createPiAiCostModel,

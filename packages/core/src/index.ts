@@ -85,6 +85,6 @@ export type {
   Usage,
   StopReason,
   Context,
-} from "@mariozechner/pi-ai";
-export { Type } from "@mariozechner/pi-ai";
-export type { Static, TSchema } from "@mariozechner/pi-ai";
+} from "@earendil-works/pi-ai";
+export { Type } from "@earendil-works/pi-ai";
+export type { Static, TSchema } from "@earendil-works/pi-ai";
