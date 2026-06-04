@@ -7,12 +7,12 @@
  *
  * DDL 见导出的 `POSTGRES_SESSION_STORE_DDL`；`migrate()` 会执行它（IF NOT EXISTS，幂等）。
  *
- * **并发契约**：协议要求同一 sessionId 的 appendEntry / fork 串行。appendEntry 的 leaf+seq 现在
- * 并入 INSERT 自身的同一条语句（单条 INSERT...SELECT...RETURNING）读取，在该语句自己的快照里算出
- * parent_id 与 seq，**消除了原先 getLeafId + SELECT MAX 多次往返的 read-modify-write 窗口**。
- * `session_entries(session_id, seq)` 的 UNIQUE 约束仍是**跨进程真并发**写同一 session 的兜底
- * （协议本就禁止——同 session 的 append 由调用方串行）：并发写中撞号的一方插入失败，是兜底而非协调。
- * 不同 sessionId 之间可并发。
+ * **原子性 & 并发契约**：`appendEntry` 与 `fork` 各自是**单条 data-modifying CTE**——entry/entries 插入
+ * + leaf 指针 upsert（+ fork 的 lineage 写入）在同一条语句/同一隐式事务里完成,**任一步失败整条回滚**,
+ * 不留半成功数据（不依赖 HWM 重试自愈或 UNIQUE 兜底来收拾跨语句的中途失败）。parent_id/seq 在该语句
+ * 自身快照里算出。`session_entries(session_id, seq)` 的 UNIQUE 约束仍是**跨进程真并发**写同一 session 的
+ * 兜底（协议本就要求同 session 的 append/fork 由调用方串行）：并发撞号一方整条失败,是兜底而非协调。
+ * 不同 sessionId 之间可并发。真 PG 的原子性 + 真并发由 CI 的 postgres:16 集成测试覆盖（env-gated）。
  */
 
 import { randomUUID } from "node:crypto";
@@ -94,28 +94,32 @@ export class PostgresSessionStore implements SessionStore {
     entry: SessionEntry,
   ): Promise<StoredEntry> {
     const id = randomUUID();
-    // 单条 INSERT...SELECT...RETURNING：parent_id（当前 leaf）与 seq（MAX+1）在 INSERT 自身的
-    // 快照里算出并写入，消除原先 getLeafId + SELECT MAX 多次往返的 read-modify-write 窗口。
-    // leaf / max(seq) 用 FROM 子句的 LEFT JOIN（而非 SELECT-list 标量子查询）取值——两者在真 PG 等价
-    // （单行源 LEFT JOIN 恰产一行），但 pg-mem 会把 SELECT-list 里的标量子查询错当成 record 行包裹，
-    // 故走 FROM 子查询绕开模拟器这一限制，语义不变。
-    const insRes = await this.client.query(
-      `INSERT INTO session_entries (id, session_id, parent_id, seq, entry)
-       SELECT $1, $2, l.leaf_id, COALESCE(m.mx, 0) + 1, $3::jsonb
-       FROM (SELECT 1) AS one
-       LEFT JOIN (SELECT leaf_id FROM session_leaf WHERE session_id = $2) AS l ON true
-       LEFT JOIN (SELECT MAX(seq) AS mx FROM session_entries WHERE session_id = $2) AS m ON true
-       RETURNING parent_id, seq`,
+    // **单条 data-modifying CTE**：entry 插入(ins)+ leaf 指针 upsert(upd)在**同一条语句/同一隐式事务**
+    // 里完成,任一步失败整条回滚——彻底消除原先「INSERT 成、leaf upsert 败」留孤儿行/半成功的跨语句窗口
+    // （不再靠 HWM 重试自愈或 UNIQUE 兜底）。data-modifying CTE「无论是否被主查询引用都恰执行一次到完成」
+    // （PG 契约;pg-mem 实测同此行为,upd 虽不被最终 SELECT 引用仍会更新 leaf）。
+    // parent_id（当前 leaf）与 seq（MAX+1）仍在 ins 自身快照里算（FROM 子句 LEFT JOIN,绕开 pg-mem 对
+    // SELECT-list 标量子查询的限制,真 PG 等价）。
+    const res = await this.client.query(
+      `WITH ins AS (
+         INSERT INTO session_entries (id, session_id, parent_id, seq, entry)
+         SELECT $1, $2, l.leaf_id, COALESCE(m.mx, 0) + 1, $3::jsonb
+         FROM (SELECT 1) AS one
+         LEFT JOIN (SELECT leaf_id FROM session_leaf WHERE session_id = $2) AS l ON true
+         LEFT JOIN (SELECT MAX(seq) AS mx FROM session_entries WHERE session_id = $2) AS m ON true
+         RETURNING id, parent_id, seq
+       ), upd AS (
+         INSERT INTO session_leaf (session_id, leaf_id)
+         SELECT $2, id FROM ins
+         ON CONFLICT (session_id) DO UPDATE SET leaf_id = EXCLUDED.leaf_id
+         RETURNING leaf_id
+       )
+       SELECT parent_id, seq FROM ins`,
       [id, sessionId, JSON.stringify(entry)],
     );
-    const row = insRes.rows[0]!;
+    const row = res.rows[0]!;
     const parentId = row.parent_id === null ? null : String(row.parent_id);
     const seq = Number(row.seq);
-    await this.client.query(
-      `INSERT INTO session_leaf (session_id, leaf_id) VALUES ($1, $2)
-       ON CONFLICT (session_id) DO UPDATE SET leaf_id = EXCLUDED.leaf_id`,
-      [sessionId, id],
-    );
     return { id, parentId, seq, entry };
   }
 
@@ -171,7 +175,9 @@ export class PostgresSessionStore implements SessionStore {
     }
     const forkId = randomUUID();
 
-    // 批量复制前缀（新 id，重建 parent 链）—— 一条多行 INSERT，符合协议「fork 是批量插入」。
+    // **单条 data-modifying CTE**：批量插 entries(ins)+ leaf upsert(leaf)+ lineage 写入在同一条语句/
+    // 同一隐式事务里完成,任一步失败整条回滚——消除原先三条独立语句的半成功窗口（entries 落了但 leaf/
+    // lineage 没更新,且 fork 无 HWM 自愈）。三个 data-modifying CTE 各「无论是否被引用都恰执行一次到完成」。
     const tuples: string[] = [];
     const params: unknown[] = [];
     let p = 0;
@@ -181,21 +187,34 @@ export class PostgresSessionStore implements SessionStore {
       const id = randomUUID();
       tuples.push(`($${++p}, $${++p}, $${++p}, $${++p}, $${++p}::jsonb)`);
       params.push(id, forkId, prevId, ++seq, JSON.stringify(node.entry));
-      prevId = id;
+      prevId = id; // 循环结束后 = 最后一条 entry 的 id = fork 链的 leaf
     }
+    const pLeafSid = ++p;
+    const pLeafId = ++p;
+    params.push(forkId, prevId);
+    const pLinSid = ++p;
+    const pLinParent = ++p;
+    const pLinFrom = ++p;
+    params.push(forkId, sessionId, fromEntryId);
+    // 三个 INSERT 全做成 data-modifying CTE,**主查询用 SELECT**(而非 INSERT):data-modifying CTE
+    // 无论是否被主查询引用都恰执行一次到完成,故三条插入都会落地、且同语句原子。主查询必须是 SELECT——
+    // pg-mem 不支持「WITH ... 主查询为 INSERT」(× "WITH nested statement with query type 'insert'"),
+    // 真 PG 两种都支持;统一用 SELECT 主查询以同时兼容,语义不变。
     await this.client.query(
-      `INSERT INTO session_entries (id, session_id, parent_id, seq, entry) VALUES ${tuples.join(", ")}`,
+      `WITH ins AS (
+         INSERT INTO session_entries (id, session_id, parent_id, seq, entry) VALUES ${tuples.join(", ")}
+         RETURNING id
+       ), leaf AS (
+         INSERT INTO session_leaf (session_id, leaf_id) VALUES ($${pLeafSid}, $${pLeafId})
+         ON CONFLICT (session_id) DO UPDATE SET leaf_id = EXCLUDED.leaf_id
+         RETURNING leaf_id
+       ), lin AS (
+         INSERT INTO session_lineage (session_id, parent_session_id, from_entry_id)
+         VALUES ($${pLinSid}, $${pLinParent}, $${pLinFrom})
+         RETURNING session_id
+       )
+       SELECT id FROM ins`,
       params,
-    );
-    await this.client.query(
-      `INSERT INTO session_leaf (session_id, leaf_id) VALUES ($1, $2)
-       ON CONFLICT (session_id) DO UPDATE SET leaf_id = EXCLUDED.leaf_id`,
-      [forkId, prevId],
-    );
-    await this.client.query(
-      `INSERT INTO session_lineage (session_id, parent_session_id, from_entry_id)
-       VALUES ($1, $2, $3)`,
-      [forkId, sessionId, fromEntryId],
     );
     return forkId;
   }
