@@ -23,7 +23,7 @@
 import {
   isContextOverflow as piAiIsContextOverflow,
   type AssistantMessage,
-} from "@mariozechner/pi-ai";
+} from "@earendil-works/pi-ai";
 
 /**
  * 内核特有补充：pi-ai 的列表**不含** DashScope/Qwen 的 overflow 文案。

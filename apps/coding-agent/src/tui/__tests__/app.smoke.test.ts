@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import type { Terminal } from "@mariozechner/pi-tui";
+import type { Terminal } from "@earendil-works/pi-tui";
 import type { AssistantMessage, LiveEvent, RunSummary, SessionEvent, ToolCall } from "@harness-pi/core";
 import { createTuiApp, type TuiAgentLike, type TuiSession } from "../app.js";
 

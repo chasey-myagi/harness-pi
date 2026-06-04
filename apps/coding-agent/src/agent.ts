@@ -45,7 +45,7 @@ import {
   getEnvApiKey,
   getModels,
   getProviders,
-} from "@mariozechner/pi-ai";
+} from "@earendil-works/pi-ai";
 import type { RunReport } from "./output.js";
 import {
   estimateDashScopeCostCny,

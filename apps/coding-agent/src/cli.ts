@@ -24,7 +24,7 @@ import {
 } from "./config.js";
 import { toolNames, type ToolName } from "@harness-pi/tools";
 import { JsonlSessionStore } from "@harness-pi/adapters";
-import { ProcessTerminal } from "@mariozechner/pi-tui";
+import { ProcessTerminal } from "@earendil-works/pi-tui";
 import { createTuiApp } from "./tui/app.js";
 
 interface CliArgs {

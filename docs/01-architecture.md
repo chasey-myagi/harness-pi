@@ -24,7 +24,7 @@
 └──────────────────────────────────────────────────────────┘
                             ↓ 依赖
 ┌──────────────────────────────────────────────────────────┐
-│              @mariozechner/pi-ai (L1)                     │
+│              @earendil-works/pi-ai (L1)                     │
 │   stream · complete · Tool · Context · OAuth · ...       │
 └──────────────────────────────────────────────────────────┘
 ```
@@ -118,12 +118,12 @@ harness-pi/
                      ↓
 ┌───────────────────────────────────────────────┐
 │ @harness-pi/core                               │
-│  - dependencies: @mariozechner/pi-ai           │
+│  - dependencies: @earendil-works/pi-ai           │
 │  - 仅此一个 runtime dep                         │
 └────────────────────┬──────────────────────────┘
                      ↓
 ┌───────────────────────────────────────────────┐
-│ @mariozechner/pi-ai                            │
+│ @earendil-works/pi-ai                            │
 │  - 16 个 provider 适配 + OAuth + handoff       │
 └───────────────────────────────────────────────┘
 ```
@@ -277,7 +277,7 @@ grep -rE 'controllers/' packages/core/src/
     └── ...
 
 @harness-pi/core
-├── @mariozechner/pi-ai        (^0.53.0 or whatever current)
+├── @earendil-works/pi-ai        (^0.53.0 or whatever current)
 └── devDeps:
     ├── @types/node
     ├── typescript
@@ -291,7 +291,7 @@ grep -rE 'controllers/' packages/core/src/
 ```ts
 // ✅ Kernel 内部
 import { Hook } from "./hook.js";
-import { stream, getModel, type Context } from "@mariozechner/pi-ai";
+import { stream, getModel, type Context } from "@earendil-works/pi-ai";
 
 // ✅ Plugin 引用 kernel
 import type { Hook, HookContext, ToolDecision } from "@harness-pi/core";

@@ -3,7 +3,7 @@ import { AgentSession } from "../session.js";
 import type { LiveEvent } from "../session.js";
 import { createFakeModel } from "../testing.js";
 import type { HarnessTool } from "../types.js";
-import type { AssistantMessage } from "@mariozechner/pi-ai";
+import type { AssistantMessage } from "@earendil-works/pi-ai";
 
 const noopTool: HarnessTool = {
   name: "noop",

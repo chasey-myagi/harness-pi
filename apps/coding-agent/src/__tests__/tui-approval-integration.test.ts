@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { Terminal } from "@mariozechner/pi-tui";
+import type { Terminal } from "@earendil-works/pi-tui";
 import { createFakeModel } from "@harness-pi/core/testing";
 import { createCodingAgent } from "../agent.js";
 import { createTuiApp } from "../tui/app.js";

@@ -10,7 +10,7 @@
  */
 
 import type { AgentSession, HarnessTool, HookContext, Message } from "@harness-pi/core";
-import { Type } from "@mariozechner/pi-ai";
+import { Type } from "@earendil-works/pi-ai";
 
 export interface SubAgentToolOptions {
   /** tool name（默认 "subAgent"）。 */

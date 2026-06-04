@@ -3,7 +3,7 @@
  * 故意精简：够 dogfood 用、可读即可，不做主题切换（pi-coding-agent 那套留作参考）。
  */
 
-import type { EditorTheme, MarkdownTheme, SelectListTheme } from "@mariozechner/pi-tui";
+import type { EditorTheme, MarkdownTheme, SelectListTheme } from "@earendil-works/pi-tui";
 
 /** ANSI CSI 前缀（ESC + '['）。用 fromCharCode(27) 而非源码里塞不可见 ESC 字节，避免编辑时被破坏。 */
 const CSI = `${String.fromCharCode(27)}[`;

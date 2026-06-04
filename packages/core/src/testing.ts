@@ -27,7 +27,7 @@ import {
   type Context,
   type Model,
   type ToolCall,
-} from "@mariozechner/pi-ai";
+} from "@earendil-works/pi-ai";
 import { HookContextImpl, getKernelInternals } from "./context.js";
 import type {
   HookContext,
@@ -302,7 +302,7 @@ export interface TestContextOptions {
   signal?: AbortSignal;
   config?: Partial<SessionConfigView>;
   logSink?: (level: LogLevel, msg: string, fields: Record<string, unknown>) => void;
-  onAppendMessage?: (msg: import("@mariozechner/pi-ai").Message) => void;
+  onAppendMessage?: (msg: import("@earendil-works/pi-ai").Message) => void;
   onAbort?: (reason: string) => void;
   /** captureLog=true 时 logSink 默认变成把 log 推到一个数组里，便于 assert。 */
   captureLog?: boolean;
@@ -327,14 +327,14 @@ export interface TestContextHandle {
   /** captureLog=true 时收集到的 log。 */
   logs: Array<{ level: LogLevel; msg: string; fields: Record<string, unknown> }>;
   /** 最近 appendMessage 的内容（默认收集；可被 onAppendMessage 覆盖）。 */
-  appended: import("@mariozechner/pi-ai").Message[];
+  appended: import("@earendil-works/pi-ai").Message[];
   /** 最近 onAbort 的 reason。 */
   abortReasons: string[];
 }
 
 export function createTestContext(opts: TestContextOptions = {}): TestContextHandle {
   const logs: TestContextHandle["logs"] = [];
-  const appended: import("@mariozechner/pi-ai").Message[] = [];
+  const appended: import("@earendil-works/pi-ai").Message[] = [];
   const abortReasons: string[] = [];
 
   const defaultConfig: SessionConfigView = Object.freeze({

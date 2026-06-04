@@ -12,7 +12,7 @@
 import { describe, it, expect } from "vitest";
 import { AgentSession } from "../session.js";
 import { createFakeModel } from "../testing.js";
-import { Type } from "@mariozechner/pi-ai";
+import { Type } from "@earendil-works/pi-ai";
 import type { Hook } from "../hook.js";
 import type { HarnessTool } from "../types.js";
 

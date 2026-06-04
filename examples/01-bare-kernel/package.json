@@ -8,7 +8,7 @@
   },
   "dependencies": {
     "@harness-pi/core": "workspace:*",
-    "@mariozechner/pi-ai": "^0.73.1"
+    "@earendil-works/pi-ai": "^0.74.2"
   },
   "devDependencies": {
     "tsx": "^4.0.0",

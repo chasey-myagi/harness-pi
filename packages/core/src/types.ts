@@ -5,7 +5,7 @@
  * 我们只补 pi-ai 没有的几个：HarnessTool（在 pi-ai Tool 基础上加 execute）。
  */
 
-import type { Tool, Message } from "@mariozechner/pi-ai";
+import type { Tool, Message } from "@earendil-works/pi-ai";
 import type { HookContext, ToolExecResult } from "./hook.js";
 
 /**

@@ -18,7 +18,7 @@
  *   - 如果 dashboard 按 sink call 计数，两路径会差一截；按字节数 / 行数计就一致。
  */
 
-import type { ToolCall } from "@mariozechner/pi-ai";
+import type { ToolCall } from "@earendil-works/pi-ai";
 import type {
   ContextOverflowInput,
   ContinuationCheckInput,
@@ -38,7 +38,7 @@ import type {
   TurnStartInput,
   UserPromptSubmitInput,
 } from "./hook.js";
-import type { Message } from "@mariozechner/pi-ai";
+import type { Message } from "@earendil-works/pi-ai";
 
 /* ────────────── 默认 timeout ────────────── */
 

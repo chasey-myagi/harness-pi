@@ -1,7 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { AgentSession, createUserMessage } from "@harness-pi/core";
 import { createTestContext, createFakeModel } from "@harness-pi/core/testing";
-import type { Message } from "@mariozechner/pi-ai";
+import type { Message } from "@earendil-works/pi-ai";
 import { autoCompaction, estimateTokensByChars } from "../auto-compaction.js";
 
 function textOf(m: Message): string {

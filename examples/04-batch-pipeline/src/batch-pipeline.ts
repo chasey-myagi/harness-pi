@@ -22,7 +22,7 @@ import {
   type SessionStore,
   type RunSummary,
 } from "@harness-pi/core";
-import type { Api, Model } from "@mariozechner/pi-ai";
+import type { Api, Model } from "@earendil-works/pi-ai";
 import { pipeline, type PipelineOutcome } from "@harness-pi/plugins/controllers";
 import { EventPump, type TransportSink } from "@harness-pi/adapters";
 

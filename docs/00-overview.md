@@ -4,7 +4,7 @@
 
 ## 1. 一句话定位
 
-**harness-pi 是给后端 / 服务端 / headless agent 的运行时基础设施**，建立在 [`@mariozechner/pi-ai`](https://github.com/badlogic/pi-mono/tree/main/packages/ai) 之上，提供 hook 系统、生命周期管理、metrics、Context 注入、基础 coding tools、并行编排等"驾驭 agent 所必需的东西"——而把 agent 内核保持最小。
+**harness-pi 是给后端 / 服务端 / headless agent 的运行时基础设施**，建立在 [`@earendil-works/pi-ai`](https://github.com/badlogic/pi-mono/tree/main/packages/ai) 之上，提供 hook 系统、生命周期管理、metrics、Context 注入、基础 coding tools、并行编排等"驾驭 agent 所必需的东西"——而把 agent 内核保持最小。
 
 ## 2. 谁该用 harness-pi
 
@@ -30,14 +30,14 @@ pi-mono 是三层独立的 package。我们消费 L1，**不**消费 L2，跟 L3
 
 ```
 ┌─────────────────────────────────────────────────────────┐
-│   @mariozechner/pi-ai —— unified LLM API + tool spec    │  L1  ← 我们 100% 依赖
+│   @earendil-works/pi-ai —— unified LLM API + tool spec  │  L1  ← 我们 100% 依赖
 ├──────────────────────────┬──────────────────────────────┤
-│  @mariozechner/          │  @harness-pi/core            │  L2
+│  @earendil-works/        │  @harness-pi/core            │  L2
 │    pi-agent-core         │  (我们自己写 kernel，hook 一  │
 │  (Mario 的 agent 内核，   │   等公民)                     │
 │   observer pattern)      │                               │
 ├──────────────────────────┼──────────────────────────────┤
-│  @mariozechner/          │  @harness-pi/plugins         │  L3
+│  @earendil-works/        │  @harness-pi/plugins         │  L3
 │    pi-coding-agent       │  (watchdog / metrics / ...)  │
 │  (终端编码 agent)         │                               │
 └──────────────────────────┴──────────────────────────────┘
@@ -49,7 +49,7 @@ pi-mono 是三层独立的 package。我们消费 L1，**不**消费 L2，跟 L3
 **社交契约**：
 
 - 不动 pi-mono 一行代码
-- README 写明 "Built on `@mariozechner/pi-ai`. Inspired by pi-coding-agent's philosophy. Not affiliated."
+- README 写明 "Built on `@earendil-works/pi-ai`. Inspired by pi-coding-agent's philosophy. Not affiliated."
 - 类比：**LangGraph 之于 LangChain Core / Remix 之于 React Router**——下游应用框架，明确站在上游肩膀上，不挑战上游
 
 ## 5. 设计哲学（按重要性排序）
