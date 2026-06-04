@@ -89,6 +89,14 @@ export interface CreateCodingAgentOptions {
    */
   persistence?: { store: SessionStore; sessionId: string };
   /**
+   * 严格持久化（透传给内核 `AgentSession.strictPersistence`）。true ⇒ run 结束时若落盘未真正完成
+   * （最终 flush / terminal append 失败），把 `RunSummary.reason` 改写为 "error" 并填 error，避免
+   * 「done 但 transcript 不全」被当成功。两种模式下 `RunSummary.persistenceErrors` 都如实暴露。
+   * TUI / resume（崩溃恢复路径）应默认开启——那正是 strict 存在的理由。createCodingAgent 与
+   * resumeCodingAgent 共用 buildAgentContext，故经 `deps` 一处接线即两路通吃。
+   */
+  strictPersistence?: boolean;
+  /**
    * 启用 compaction（compactSummarize view-transform：超阈值时把早期消息换成模型生成的摘要喂给 LLM，
    * 不毁原始历史）。给了即挂 hook；`maxMessages` 不给 = 阈值设为大哨兵（在位但不自动触发），靠
    * `requestCompaction()`（TUI 的 `/compact`）临时降阈强制压缩。one-shot 模式不传本项即完全不挂。
@@ -382,6 +390,8 @@ function buildAgentContext(opts: CreateCodingAgentOptions): AgentContext {
   };
   if (opts.maxTurns !== undefined) deps.maxTurns = opts.maxTurns;
   if (opts.llmOptions !== undefined) deps.llmOptions = opts.llmOptions;
+  // 单点接线：deps 流向 createCodingAgent({...deps}) 与 resumeCodingAgent(AgentSession.resume(...,deps)) 两路。
+  if (opts.strictPersistence !== undefined) deps.strictPersistence = opts.strictPersistence;
 
   return {
     deps,

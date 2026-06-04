@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
-import { isMainModule, parseArgs } from "../cli.js";
+import { isMainModule, parseArgs, sessionExitNotice } from "../cli.js";
 
 describe("parseArgs — v0.1.0 flags", () => {
   it("defaults: no tui/repl/version/list flags set", () => {
@@ -79,6 +79,26 @@ describe("parseArgs — v0.1.0 flags", () => {
 
   it("rejects unknown options", () => {
     expect(() => parseArgs(["--nope"])).toThrow(/Unknown option/);
+  });
+
+  // #30:TUI 退出消息——落盘失败时不谎称 persisted。
+  it("sessionExitNotice: persistenceErrorRuns>0 → warn + FAILED + run 数", () => {
+    const n = sessionExitNotice("abc", 2);
+    expect(n?.level).toBe("warn");
+    expect(n?.text).toContain("FAILED on 2 run(s)");
+    expect(n?.text).toContain("--resume abc");
+    expect(n?.text).toContain("incomplete");
+  });
+  it("sessionExitNotice: 0 失败 → log + persisted", () => {
+    const n = sessionExitNotice("abc", 0);
+    expect(n?.level).toBe("log");
+    expect(n?.text).toContain("persisted");
+    expect(n?.text).toContain("--resume abc");
+    expect(n?.text).not.toContain("FAILED");
+  });
+  it("sessionExitNotice: 无 sessionId(非 TUI 落盘)→ null", () => {
+    expect(sessionExitNotice(undefined, 0)).toBeNull();
+    expect(sessionExitNotice(undefined, 3)).toBeNull();
   });
 
   it("ignores a leading `--` (pnpm separator) and still parses following flags", () => {

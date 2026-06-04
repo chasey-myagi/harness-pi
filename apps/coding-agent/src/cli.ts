@@ -65,6 +65,27 @@ export function emitStartupWarnings(
   if (agent.harnessPiWarning) write(`⚠️  ${agent.harnessPiWarning}\n`);
 }
 
+/**
+ * TUI 退出时给的会话落盘提示。抽成纯函数便于直测。`persistenceErrorRuns>0` ⇒ 本会话有 run 落盘失败,
+ * 不能谎称 "persisted",改为告警 resume 可能不全;否则给正常 resume 句柄。无 sessionId(非 TUI 落盘)⇒ null。
+ */
+export function sessionExitNotice(
+  sessionId: string | undefined,
+  persistenceErrorRuns: number,
+): { level: "warn" | "log"; text: string } | null {
+  if (!sessionId) return null;
+  if (persistenceErrorRuns > 0) {
+    return {
+      level: "warn",
+      text: `⚠ Session persistence FAILED on ${persistenceErrorRuns} run(s) — --resume ${sessionId} may restore incomplete state (see warnings above).`,
+    };
+  }
+  return {
+    level: "log",
+    text: `Session persisted (process-crash recoverable). Resume with: --resume ${sessionId}`,
+  };
+}
+
 /** 该会话的 persistence 子对象（store + id 捆一起，对齐 createCodingAgent.persistence）。 */
 function persistenceFor(
   cwd: string,
@@ -213,11 +234,13 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
     agent = await resumeCodingAgent({
       ...createOptions,
       persistence: persistenceFor(args.cwd, sessionId),
+      strictPersistence: true, // resume = 崩溃恢复路径，默认 strict：落盘不全则 reason→error + 显式告警
     });
   } else {
     if (args.tui) {
       sessionId = randomUUID();
       createOptions.persistence = persistenceFor(args.cwd, sessionId);
+      createOptions.strictPersistence = true; // TUI 默认落盘 → 默认 strict（同 resume 理由）
     }
     agent = createCodingAgent(createOptions);
   }
@@ -260,11 +283,9 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
       await app.run(); // 直到用户 Ctrl-C 退出
       // 退出后告知 resume 句柄。落盘每 turn 用 appendFileSync（无 fsync）——进程崩溃可恢复，
       // 但断电/内核 panic 下最后一次写可能丢，故措辞为"process-crash recoverable"而非"saved"。
-      if (sessionId) {
-        console.log(
-          `Session persisted (process-crash recoverable). Resume with: --resume ${sessionId}`,
-        );
-      }
+      // 本会话出现过 persistenceErrors（strict 默认开）则不谎称 persisted——见 sessionExitNotice。
+      const notice = sessionExitNotice(sessionId, app.persistenceErrorRuns());
+      if (notice) (notice.level === "warn" ? console.warn : console.log)(notice.text);
       return;
     }
 

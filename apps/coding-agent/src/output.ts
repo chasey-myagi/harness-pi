@@ -34,6 +34,12 @@ export function renderRunReport(report: RunReport): string {
   // 失败终态把原因打出来——否则只剩 "reason: error"，piped/captured 的报告完全丢失原因。
   if (report.summary.error) lines.push(`error: ${report.summary.error.message}`);
   if (report.summary.abortReason) lines.push(`abort reason: ${report.summary.abortReason}`);
+  // 持久化失败如实暴露（两种模式都填）——否则「done 但 transcript 不全」会被静默吞掉，resume 拿残缺状态。
+  if (report.summary.persistenceErrors?.length) {
+    lines.push(
+      `persistence errors (${report.summary.persistenceErrors.length}): ${report.summary.persistenceErrors.join("; ")}`,
+    );
+  }
   lines.push(`turns: ${report.summary.turns}`);
   lines.push(`continuations: ${report.summary.continuations}`);
   lines.push(`run wall time: ${formatMs(report.wallTimeMs)}`);
