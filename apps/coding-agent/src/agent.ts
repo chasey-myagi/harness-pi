@@ -31,6 +31,7 @@ import {
 } from "@harness-pi/plugins";
 import { createModelSummarizer } from "./compaction.js";
 import { redactCodingToolArgs } from "./log-redaction.js";
+import { harnessPiGitignoreWarning } from "./workspace-safety.js";
 import { defaultPermissionRules } from "./tui/permissions.js";
 import {
   createAllTools,
@@ -274,6 +275,15 @@ function buildAgentContext(opts: CreateCodingAgentOptions): AgentContext {
   let lastCostStats: CostStats | undefined;
   let lastToolStats: ToolStats | undefined;
   const warnings: string[] = [];
+  // .harness-pi 落盘安全守卫（#22）：会往 cwd/.harness-pi 落盘（默认 session log 在此，或挂了 resume
+  // 存储）且该目录未被 gitignore 时，提示完整原文有被误提交的风险（resume 存储无法脱敏）。
+  const writesUnderHarnessPi =
+    (opts.log !== false && logDir.startsWith(join(cwd, ".harness-pi"))) ||
+    opts.persistence !== undefined;
+  if (writesUnderHarnessPi) {
+    const w = harnessPiGitignoreWarning(cwd);
+    if (w) warnings.push(w);
+  }
   const dashScopeCost = createDashScopeCostAccumulator(opts.model, opts.llmOptions);
   const costTrackerOptions: CostTrackerOptions = {
     mode: "lifetime",

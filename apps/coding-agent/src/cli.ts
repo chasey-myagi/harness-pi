@@ -22,6 +22,7 @@ import {
   formatProviderList,
   loadDotEnv,
 } from "./config.js";
+import { harnessPiGitignoreWarning } from "./workspace-safety.js";
 import { toolNames, type ToolName } from "@harness-pi/tools";
 import { JsonlSessionStore } from "@harness-pi/adapters";
 import { ProcessTerminal } from "@mariozechner/pi-tui";
@@ -210,6 +211,11 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
     }
     agent = createCodingAgent(createOptions);
   }
+
+  // #22 守卫：启动期就把 .harness-pi 未被 gitignore 的风险打到 stderr（早于任何落盘，且 TUI 路径
+  // 不渲染 run report 也能看到）。one-shot 的 run report 也会再列一次（agent.warnings），刻意冗余。
+  const gitignoreWarning = harnessPiGitignoreWarning(args.cwd);
+  if (gitignoreWarning) process.stderr.write(`⚠️  ${gitignoreWarning}\n`);
 
   try {
     if (!args.readOnly) {
