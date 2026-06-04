@@ -98,6 +98,8 @@ export interface TuiApp {
   /** start() 并返回一个直到用户退出（Ctrl-C）才 resolve 的 promise——CLI 用它驱动生命周期。 */
   run(): Promise<void>;
   isRunning(): boolean;
+  /** 本会话累计出现 persistenceErrors 的 run 次数（>0 ⇒ 落盘有失败，resume 可能不全）。CLI 退出消息据此告警。 */
+  persistenceErrorRuns(): number;
 }
 
 interface StatsView {
@@ -108,6 +110,7 @@ interface StatsView {
 
 export function createTuiApp(opts: TuiAppOptions): TuiApp {
   const tui = new TUI(opts.terminal);
+  let persistenceErrorRuns = 0; // 累计落盘失败的 run 次数（finalize 据 summary.persistenceErrors 自增）
   const messages = new Container();
   const status = new Loader(tui, color.cyan, color.dim, "");
   status.stop(); // Loader 构造即开始动画；空闲时停掉，避免启动后 ~12fps 空转 churn（run 时再 start）。
@@ -275,6 +278,19 @@ export function createTuiApp(opts: TuiAppOptions): TuiApp {
   function finalize(summary: RunSummary): void {
     stats.input = summary.usage.input;
     stats.output = summary.usage.output;
+    // 落盘失败显著告警（崩溃恢复路径上,「done 但 transcript 不全」必须让用户当场看到,而非静默）。
+    if (summary.persistenceErrors?.length) {
+      persistenceErrorRuns++;
+      append(
+        new Text(
+          color.red(
+            `⚠ 持久化失败（resume 可能不全）: ${summary.persistenceErrors.join("; ")}`,
+          ),
+          0,
+          0,
+        ),
+      );
+    }
     const est = opts.agent.getCostEstimate?.();
     if (est) {
       stats.costText =
@@ -570,5 +586,5 @@ export function createTuiApp(opts: TuiAppOptions): TuiApp {
     return done;
   }
 
-  return { tui, submit, start, stop, run, isRunning: () => running };
+  return { tui, submit, start, stop, run, isRunning: () => running, persistenceErrorRuns: () => persistenceErrorRuns };
 }

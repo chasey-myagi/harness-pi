@@ -141,6 +141,36 @@ describe("TUI app smoke (headless, dual-track via fake terminal)", () => {
     expect(out.split("All good.").length - 1).toBe(1); // 只出现一次
   });
 
+  const failSummary: RunSummary = {
+    turns: 1,
+    continuations: 0,
+    reason: "error",
+    usage: { ...ZERO },
+    persistenceErrors: ["appendEntry(message): boom"],
+  };
+
+  it("finalize: summary.persistenceErrors → 渲染醒目告警 + persistenceErrorRuns()===1", async () => {
+    const app = makeApp(scriptedSession([{ coarse: { type: "session-end", summary: failSummary } }], failSummary));
+    await app.submit("go");
+    const out = strip(app.tui.render(80).join("\n"));
+    expect(out).toContain("持久化失败"); // 落盘失败当场可见(崩溃恢复路径)
+    expect(out).toContain("appendEntry(message): boom"); // 具体错误
+    expect(app.persistenceErrorRuns()).toBe(1);
+  });
+
+  it("persistenceErrorRuns 跨多轮累积:两轮都失败 → 2", async () => {
+    const app = makeApp(scriptedSession([{ coarse: { type: "session-end", summary: failSummary } }], failSummary));
+    await app.submit("a");
+    await app.submit("b");
+    expect(app.persistenceErrorRuns()).toBe(2);
+  });
+
+  it("干净 run 不自增 persistenceErrorRuns(无假阳性)", async () => {
+    const app = makeApp(scriptedSession([{ coarse: { type: "session-end", summary } }], summary));
+    await app.submit("go");
+    expect(app.persistenceErrorRuns()).toBe(0);
+  });
+
   it("ignores empty submits (no user bubble added)", async () => {
     const app = makeApp(scriptedSession([{ coarse: { type: "session-end", summary } }], summary));
     const before = app.tui.render(80).join("\n");
