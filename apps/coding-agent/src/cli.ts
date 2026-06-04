@@ -213,9 +213,13 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
   }
 
   // #22 守卫：启动期就把 .harness-pi 未被 gitignore 的风险打到 stderr（早于任何落盘，且 TUI 路径
-  // 不渲染 run report 也能看到）。one-shot 的 run report 也会再列一次（agent.warnings），刻意冗余。
-  const gitignoreWarning = harnessPiGitignoreWarning(args.cwd);
-  if (gitignoreWarning) process.stderr.write(`⚠️  ${gitignoreWarning}\n`);
+  // 不渲染 run report 也能看到）。**复用 agent 已算好的「会往 .harness-pi 落盘」门控**：只有当该告警确实
+  // 进了 agent.warnings（本次运行真会落盘）才打——避免 --no-log（不落盘）下的假阳性，且与 agent 层
+  // 同一来源、同一 resolve(cwd)，不重复门控逻辑。one-shot 的 run report 也会再列一次，刻意冗余。
+  const gitignoreWarning = harnessPiGitignoreWarning(resolve(args.cwd));
+  if (gitignoreWarning && agent.warnings.includes(gitignoreWarning)) {
+    process.stderr.write(`⚠️  ${gitignoreWarning}\n`);
+  }
 
   try {
     if (!args.readOnly) {
