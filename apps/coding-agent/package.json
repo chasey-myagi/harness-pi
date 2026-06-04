@@ -1,6 +1,6 @@
 {
   "name": "@harness-pi/coding-agent",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "description": "Dogfood coding agent built on harness-pi — usable pi-tui CLI showcasing the harness-pi kernel",
   "license": "MIT",
   "repository": {
@@ -22,7 +22,12 @@
       "default": "./dist/cli.js"
     }
   },
-  "files": ["dist", "README.md", "!**/__tests__/**", "!**/*.test.*"],
+  "files": [
+    "dist",
+    "README.md",
+    "!**/__tests__/**",
+    "!**/*.test.*"
+  ],
   "engines": {
     "node": ">=20"
   },
