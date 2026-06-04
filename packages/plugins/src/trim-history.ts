@@ -8,7 +8,7 @@
  */
 
 import type { Hook } from "@harness-pi/core";
-import type { Message } from "@mariozechner/pi-ai";
+import type { Message } from "@earendil-works/pi-ai";
 
 export interface TrimHistoryOptions {
   /** 最近 N 条 toolResult 保留原样。N=0 全部 trim；负数视为 0；非整数向下取整。 */

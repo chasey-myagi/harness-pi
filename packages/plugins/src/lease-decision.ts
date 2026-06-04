@@ -5,7 +5,7 @@
  */
 
 import type { Hook, HookContext } from "@harness-pi/core";
-import type { ToolCall } from "@mariozechner/pi-ai";
+import type { ToolCall } from "@earendil-works/pi-ai";
 
 export interface LeaseDecisionOptions {
   /** 返回当前 lease 持有的 id；null/undefined = 没 lease，跳过检查。 */

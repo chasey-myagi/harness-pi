@@ -23,7 +23,7 @@ import {
   type ToolResultMessage,
   type Usage,
   type StopReason,
-} from "@mariozechner/pi-ai";
+} from "@earendil-works/pi-ai";
 
 /**
  * Phase 3：streaming consumer 看到的事件类型。每个事件对应一个 EVENT-category hook。

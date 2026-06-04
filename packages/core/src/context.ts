@@ -13,7 +13,7 @@
  *   - config 是 SessionConfigView 只读视图，由 session 构造时一次性 deep-freeze；turn 内不变。
  */
 
-import type { Message } from "@mariozechner/pi-ai";
+import type { Message } from "@earendil-works/pi-ai";
 import type {
   HookContext,
   HookLogger,

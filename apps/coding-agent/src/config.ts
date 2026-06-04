@@ -1,5 +1,5 @@
 import { existsSync, readFileSync } from "node:fs";
-import { getModels, getProviders } from "@mariozechner/pi-ai";
+import { getModels, getProviders } from "@earendil-works/pi-ai";
 import { dashScopeModelIds, isDashScopeProviderAlias } from "./providers/dashscope.js";
 
 type Env = Record<string, string | undefined>;
@@ -20,7 +20,7 @@ export const PROVIDER_ONBOARDING: ProviderOnboarding[] = [
   { provider: "anthropic", envVar: "ANTHROPIC_API_KEY", defaultModel: "claude-sonnet-4-0" },
   { provider: "openai", envVar: "OPENAI_API_KEY", defaultModel: "gpt-4.1" },
   { provider: "google", envVar: "GEMINI_API_KEY", defaultModel: "gemini-flash-latest" },
-  { provider: "xai", envVar: "XAI_API_KEY", defaultModel: "grok-3-latest" },
+  { provider: "xai", envVar: "XAI_API_KEY", defaultModel: "grok-3" },
   { provider: "groq", envVar: "GROQ_API_KEY", defaultModel: "llama-3.3-70b-versatile" },
   { provider: "deepseek", envVar: "DEEPSEEK_API_KEY", defaultModel: "deepseek-v4-flash" },
   { provider: "moonshotai", envVar: "MOONSHOT_API_KEY", defaultModel: "kimi-k2-0905-preview" },

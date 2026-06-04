@@ -265,7 +265,7 @@ Around (`wrapTurn`)——因为要在 LLM call 前改 messages view 但 turn 内
 
 ```ts
 import type { Hook, HookContext } from "@harness-pi/core";
-import type { Message } from "@mariozechner/pi-ai";
+import type { Message } from "@earendil-works/pi-ai";
 
 export interface TrimHistoryOptions {
   /** 最近 N 条 toolResult 保留原样。 */

@@ -6,14 +6,14 @@
 
 ```
 ┌─────────────────────────────────────────────────────────┐
-│   @mariozechner/pi-ai  ——  unified LLM API + tool spec  │  L1 ← 我们站在这上面
+│   @earendil-works/pi-ai —— unified LLM API + tool spec  │  L1 ← 我们站在这上面
 ├──────────────────────────┬──────────────────────────────┤
-│  @mariozechner/          │   @harness-pi/core           │  L2
+│  @earendil-works/        │   @harness-pi/core           │  L2
 │  pi-agent-core           │                              │
 │  (Mario 的 agent 内核)    │   (我们的 agent 内核，         │
 │                          │    hook 系统作为一等公民)      │
 ├──────────────────────────┼──────────────────────────────┤
-│  @mariozechner/          │   @harness-pi/plugins        │  L3
+│  @earendil-works/        │   @harness-pi/plugins        │  L3
 │  pi-coding-agent         │   (watchdog / metrics /      │
 │  (终端编码 agent)         │    trim / buffer / log ...)  │
 │                          │                              │

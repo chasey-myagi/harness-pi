@@ -9,7 +9,7 @@
  */
 
 import { describe, it, expect, vi } from "vitest";
-import { Type } from "@mariozechner/pi-ai";
+import { Type } from "@earendil-works/pi-ai";
 import { AgentSession } from "../session.js";
 import { HookDispatcher } from "../dispatcher.js";
 import type { HarnessTool, Hook, HookContext } from "../index.js";

@@ -10,7 +10,7 @@
 pnpm add @harness-pi/core
 ```
 
-Peer: `@mariozechner/pi-ai` (model runtime, a dependency).
+Peer: `@earendil-works/pi-ai` (model runtime, a dependency).
 
 ## Quick start
 

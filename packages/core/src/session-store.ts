@@ -13,7 +13,7 @@
  *   - **leaf pointer**：每个 sessionId 记一个当前 leaf；append 自动挂到 leaf 之后并推进 leaf。
  */
 
-import type { Message } from "@mariozechner/pi-ai";
+import type { Message } from "@earendil-works/pi-ai";
 import { randomUUID } from "node:crypto";
 // type-only import（无运行时循环）：terminal entry 携带内核的 RunSummary 终态。
 import type { RunSummary } from "./session.js";

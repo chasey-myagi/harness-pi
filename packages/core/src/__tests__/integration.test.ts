@@ -3,7 +3,7 @@
  */
 
 import { describe, it, expect, vi } from "vitest";
-import { Type } from "@mariozechner/pi-ai";
+import { Type } from "@earendil-works/pi-ai";
 import { AgentSession } from "../session.js";
 import type { HarnessTool, Hook, HookContext } from "../index.js";
 import { createFakeModel } from "../testing.js";

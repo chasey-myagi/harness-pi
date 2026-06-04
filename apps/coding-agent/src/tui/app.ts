@@ -19,7 +19,7 @@ import {
   type Terminal,
   Text,
   TUI,
-} from "@mariozechner/pi-tui";
+} from "@earendil-works/pi-tui";
 import { createUserMessage, type LiveEvent, type Message, type RunSummary, type SessionEvent, type ToolCall } from "@harness-pi/core";
 import { coarseEventToActions, type TuiAction } from "./event-bridge.js";
 import { LiveStreamAccumulator, type StreamOp } from "./live-stream.js";

@@ -8,7 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 `harness-pi` 是一个把 pi-ai agent 跑成**后端服务/批处理 worker** 的最小运行时 harness(pnpm + TypeScript monorepo)。三层定位:
 
-- **L1 `@mariozechner/pi-ai`**:统一 LLM API + tool spec + event stream。我们是它的**消费者,不动它一行**。
+- **L1 `@earendil-works/pi-ai`**:统一 LLM API + tool spec + event stream。我们是它的**消费者,不动它一行**。
 - **L2 `@harness-pi/core`**:自己写的 agent 内核。**故意不基于 `pi-agent-core`**——换来 **hook 作为一等公民**。
 - **L3 `@harness-pi/plugins` / `/adapters` / `/tools`** + app `@harness-pi/coding-agent`。
 

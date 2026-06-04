@@ -14,7 +14,7 @@ import type {
   AssistantMessage,
   Message,
   ToolCall,
-} from "@mariozechner/pi-ai";
+} from "@earendil-works/pi-ai";
 import type { HarnessTool } from "./types.js";
 
 /* ──────────────────── Tool 执行结果 ──────────────────── */

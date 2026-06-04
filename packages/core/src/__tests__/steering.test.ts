@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { Type, type Context, type Message } from "@mariozechner/pi-ai";
+import { Type, type Context, type Message } from "@earendil-works/pi-ai";
 import { AgentSession } from "../session.js";
 import { MemorySessionStore } from "../session-store.js";
 import { createFakeModel } from "../testing.js";
