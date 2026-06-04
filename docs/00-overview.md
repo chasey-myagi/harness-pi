@@ -149,7 +149,7 @@ Hot path 上的 plugin **只允许同步操作或 push-to-queue**。需要持久
 
 详见 [roadmap](roadmap.md)。
 
-当前风险：尚无外部 production 用户；`message_update` / streaming thinking、完整 auto-compaction、PG metrics sink、`ctx.state` hardening 仍是后续工作。
+当前风险：核心机制已实现并有测试覆盖（`message_update` 渐进式 streaming、auto-compaction、PG metrics sink、`ctx.state` slot API 均已落地），但**尚无外部 production 用户**——真 LLM provider 的 streaming/error/overflow smoke、`bidding-agent` 真实迁移 spike 都还没做（成熟度三层详见 [README](../README.md)「当前状态」）。
 
 ## 8. 下一步
 
