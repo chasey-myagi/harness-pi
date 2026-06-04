@@ -1,0 +1,7 @@
+# 运行时产物 —— 绝不提交（含私有消息 trace / 记忆 / 遥测）
+data/
+dist/
+node_modules/
+.env
+.env.local
+*.tsbuildinfo
