@@ -214,44 +214,34 @@ export interface WorkPoolOptions<I extends WorkItem> {
   maxConcurrency?: number;
   /** 单 group 完成时回调（用于 progress UI / metric）。 */
   onGroupComplete?: (groupId: string, summary: RunSummary) => void;
+  /** 单 group 失败（factory 抛或 run 抛）回调。 */
+  onGroupError?: (groupId: string, err: Error) => void;
+  /** abort 时未启动的 group 被跳过的回调（与 complete/error 对称，保证每个 group 都有终态信号）。 */
+  onGroupSkipped?: (groupId: string, reason: "aborted") => void;
 }
 
 export interface WorkPoolResult {
-  groups: Array<{ id: string; summary: RunSummary }>;
+  /** 每个 group 恰一条终态：summary（完成）/ error（失败）/ skipped（abort 时未启动）。 */
+  groups: Array<{ id: string; summary?: RunSummary; error?: Error; skipped?: "aborted" }>;
   totalItems: number;
+  completedGroups: number;
+  failedGroups: number;
+  /** abort 时未启动而被给终态的 group 数。completed+failed+skipped === groups 总数。 */
+  skippedGroups: number;
 }
 
 export class WorkPool<I extends WorkItem> {
   constructor(private opts: WorkPoolOptions<I>) {}
 
   async start(signal?: AbortSignal): Promise<WorkPoolResult> {
-    const groups = this.opts.partition(this.opts.items);
-    const concurrency = this.opts.maxConcurrency ?? groups.length;
-
-    const results: Array<{ id: string; summary: RunSummary }> = [];
-    const queue = [...groups];
-    const running = new Set<Promise<void>>();
-
-    while (queue.length > 0 || running.size > 0) {
-      if (signal?.aborted) break;
-      while (running.size < concurrency && queue.length > 0) {
-        const group = queue.shift()!;
-        const task = this.runGroup(group, signal).then(summary => {
-          results.push({ id: group.id, summary });
-          this.opts.onGroupComplete?.(group.id, summary);
-        });
-        running.add(task);
-        task.finally(() => running.delete(task));
-      }
-      await Promise.race(running);
-    }
-
-    return { groups: results, totalItems: this.opts.items.length };
-  }
-
-  private async runGroup(group: { id: string; items: I[] }, signal?: AbortSignal): Promise<RunSummary> {
-    const { session, prompt } = await this.opts.workerFactory(group);
-    return session.run(prompt, { signal });
+    // 实现要点（已发布）：
+    // 1. partition → groups；queue = [...groups]；running = Set<Promise>。
+    // 2. while (queue 或 running 非空)：abort 则 break；否则把 queue 填到 maxConcurrency 并发跑。
+    //    每个 group：factory → session.run → push {summary} + onGroupComplete；抛错 → push {error} + onGroupError。
+    // 3. **abort 必给终态**：break 后先 allSettled drain 在跑的 worker（否则 caller 拿到不一致快照），
+    //    再 sweep queue 里未启动的 group → push {skipped:"aborted"} + skippedGroups++ + onGroupSkipped。
+    //    每个 group 恰一条终态；守恒：completedGroups + failedGroups + skippedGroups === groups 总数。
+    // ……见 packages/plugins/src/controllers/work-pool.ts。
   }
 }
 ```
@@ -366,30 +356,35 @@ export interface LeaseQueueOptions<I extends QueueItem> {
 }
 
 export interface LeaseQueueResult {
+  totalItems: number;
   completed: number;
   failed: number;
-  totalItems: number;
+  conflicted: number;
+  /** abort 后从未派发（或 abort 时回退）而被给终态的 item 数。 */
+  skipped: number;
 }
 
 export class LeaseQueue<I extends QueueItem> {
   constructor(private opts: LeaseQueueOptions<I>) {}
 
   async start(signal?: AbortSignal): Promise<LeaseQueueResult> {
-    // 实现要点：
-    // 1. pending queue + leases map
-    // 2. K 个 worker promise 并发
-    // 3. 每个 worker: while (queue 非空 && !signal.aborted)
-    //      lease = leaseNext()
+    // 实现要点（已发布）：
+    // 1. pending queue（单线程 event loop 下 shift/splice 在 await 之间原子，K worker 不竞态）
+    // 2. K 个 worker promise 并发：while (pending 非空 && !signal.aborted)
+    //      lease = 取队首 + attempts 计数
     //      session = factory(item, lease, { releaseLease })
-    //      summary = await session.run(prompt)
-    //      根据 summary + plugin 调用 releaseLease 的情况决定计数
-    // 4. 全部 worker exit → 返回汇总
-    throw new Error("TODO");
+    //      summary = await session.run(prompt, { signal })
+    //      status = releaseLease 优先；否则 summary.reason==="done" → done / 其余 → error
+    //      非 done 且 attempt < maxAttempts → 回退队尾重试；否则 finalize（单点裁决）
+    // 3. **abort 必给终态**：全部 worker exit 后，sweep pending 里残留的 item（从未派发 + abort
+    //    时回退的）统一 finalize 成 "skipped" —— 每个 item 恰 finalize 一次（worker 与 sweep 互斥）。
+    //    守恒：completed + failed + conflicted + skipped === totalItems，work item 不静默消失。
+    // ……见 packages/plugins/src/controllers/lease-queue.ts。
   }
 }
 ```
 
-完整实现参考 bidding-agent `question-pool.ts`（326 行）。
+完整实现见 `packages/plugins/src/controllers/lease-queue.ts`（abort 必给终态 + 守恒，已被 `controllers.test.ts` 的混合终态/守恒用例覆盖）。
 
 ### 5.5 跟 plugin 配合用法
 

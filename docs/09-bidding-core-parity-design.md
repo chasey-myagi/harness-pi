@@ -266,7 +266,7 @@ roadmap 已列 `sideQuestion` controller + `subAgent` tool factory。给 Hybrid 
 - ✅ #6 overflow 事件（`onContextOverflow`）+ #10 `compactRestartFresh`
 - ✅ #5 steering（`AgentSession.steer()` + `onSteer`，turn-start drain）
 - ✅ #7 fail-closed 分类 + #9 `permissionGate`（规则引擎骨架，domain 谓词由调用方给）
-- 🟡 #4 `PostgresSessionStore` ✅ ；**lifecycleRestart 从 store resume ⬜**（`AgentSession.resume()` 原语在，但没有 controller 把它接进「重启即续跑」流程——是 harness-pi 这边唯一未接的机制 glue）
+- ✅ #4 `PostgresSessionStore` ＋ **lifecycleRestart 从 store resume**（`LifecycleRestart` 的 `resume` 模式：每次（重）启走 `AgentSession.resume(store, sessionId, deps)` 从落盘历史续跑——「重启即续跑」已接通，与内存 `sessionFactory` 模式二选一）
 - ✅ #9 杂项：ctx.state slot API（TypedStateMap）、around-hook 超时（结论：不加内核机制，协作式 abort）、去 `questionId` domain 默认（lease-decision argField 必填）
 
 **Phase 3 — Hybrid 闭环**
