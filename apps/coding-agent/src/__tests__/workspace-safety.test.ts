@@ -1,9 +1,8 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { execFileSync } from "node:child_process";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { mkdir } from "node:fs/promises";
 import { createFakeModel } from "@harness-pi/core/testing";
 import { MemorySessionStore } from "@harness-pi/core";
 import { JsonlSessionStore } from "@harness-pi/adapters";
@@ -193,6 +192,33 @@ describe("createCodingAgent → agent.warnings 的 .harness-pi 落盘门控", ()
     });
     expect(agent.harnessPiWarning).toBeTruthy();
     expect(hasGitignoreWarn(agent.warnings)).toBe(true);
+    expect(agent.warnings).toContain(agent.harnessPiWarning!); // flag 与 warnings 同源一致（与 create 路径同等强度）
+  });
+
+  it("resumeCodingAgent + 已忽略 .harness-pi → 不告警（resume 入口负向对照）", async () => {
+    const cwd = await gitRepo(".harness-pi/\n");
+    const store = new JsonlSessionStore(join(cwd, ".harness-pi", "sessions", "s1.jsonl"));
+    const agent = await resumeCodingAgent({
+      cwd,
+      model: createFakeModel([]),
+      persistence: { store, sessionId: "s1" },
+    });
+    expect(agent.harnessPiWarning).toBeUndefined();
+    expect(hasGitignoreWarn(agent.warnings)).toBe(false);
+  });
+
+  it("resume 有真实落盘历史 + 未忽略 → 仍告警（门控基于「会落盘」而非历史是否为空）", async () => {
+    const cwd = await gitRepo();
+    const file = join(cwd, ".harness-pi", "sessions", "s1.jsonl");
+    await mkdir(join(cwd, ".harness-pi", "sessions"), { recursive: true });
+    const store = new JsonlSessionStore(file);
+    await store.appendEntry("s1", { kind: "message", message: { role: "user", content: "hi" } as never });
+    const agent = await resumeCodingAgent({
+      cwd,
+      model: createFakeModel([]),
+      persistence: { store, sessionId: "s1" },
+    });
+    expect(agent.harnessPiWarning).toBeTruthy();
   });
 });
 
@@ -207,6 +233,12 @@ describe("emitStartupWarnings（CLI 启动期 stderr 发射，直测）", () => 
   it("harnessPiWarning 为 undefined → 不写（锁住 --no-log 等不落盘场景无假阳性）", () => {
     const out: string[] = [];
     emitStartupWarnings({ harnessPiWarning: undefined }, (s) => out.push(s));
+    expect(out).toHaveLength(0);
+  });
+
+  it("harnessPiWarning 为空串 → 不写（真值判断，空串=无话可说）", () => {
+    const out: string[] = [];
+    emitStartupWarnings({ harnessPiWarning: "" }, (s) => out.push(s));
     expect(out).toHaveLength(0);
   });
 });

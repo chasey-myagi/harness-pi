@@ -291,6 +291,8 @@ function buildAgentContext(opts: CreateCodingAgentOptions): AgentContext {
       (logDir === harnessDir || logDir.startsWith(harnessDir + sep))) || // 路径边界，不误命中 .harness-pi-backup
     opts.persistence !== undefined;
   // 算一次：结构化标志（暴露给 CLI 等消费者）+ 进 warnings（供 run report）。
+  // `?? undefined`：harnessPiGitignoreWarning 返回 string|null，转成 string|undefined 以对齐字段类型
+  // （exactOptionalPropertyTypes 下 null 不可赋给 string|undefined）。
   const harnessPiWarning = writesUnderHarnessPi
     ? (harnessPiGitignoreWarning(cwd) ?? undefined)
     : undefined;
