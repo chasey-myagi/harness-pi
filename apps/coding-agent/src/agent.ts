@@ -1,4 +1,4 @@
-import { join, resolve } from "node:path";
+import { join, resolve, sep } from "node:path";
 import {
   AgentSession,
   type Api,
@@ -31,6 +31,7 @@ import {
 } from "@harness-pi/plugins";
 import { createModelSummarizer } from "./compaction.js";
 import { redactCodingToolArgs } from "./log-redaction.js";
+import { harnessPiGitignoreWarning } from "./workspace-safety.js";
 import { defaultPermissionRules } from "./tui/permissions.js";
 import {
   createAllTools,
@@ -264,7 +265,9 @@ function buildAgentContext(opts: CreateCodingAgentOptions): AgentContext {
     toolModeOptions.toolsOptions = opts.toolsOptions;
   }
   const tools = createToolsForMode(cwd, toolModeOptions);
-  const logDir = opts.logDir ?? join(cwd, ".harness-pi", "logs");
+  // resolve 成绝对路径（锚定 workspace cwd）：相对 --log-dir 也有确定落点，且下面的路径边界门控
+  // 不会因「相对 logDir vs 绝对 harnessDir」字符串比较恒 false 而漏告警（安全守卫的假阴性）。
+  const logDir = resolve(cwd, opts.logDir ?? join(".harness-pi", "logs"));
   const metricsSink = opts.metricsFile
     ? new NdjsonFileSink({ path: opts.metricsFile, batchSize: 1 })
     : undefined;
@@ -274,6 +277,17 @@ function buildAgentContext(opts: CreateCodingAgentOptions): AgentContext {
   let lastCostStats: CostStats | undefined;
   let lastToolStats: ToolStats | undefined;
   const warnings: string[] = [];
+  // .harness-pi 落盘安全守卫（#22）：会往 cwd/.harness-pi 落盘（默认 session log 在此，或挂了 resume
+  // 存储）且该目录未被 gitignore 时，提示完整原文有被误提交的风险（resume 存储无法脱敏）。
+  const harnessDir = join(cwd, ".harness-pi");
+  const writesUnderHarnessPi =
+    (opts.log !== false &&
+      (logDir === harnessDir || logDir.startsWith(harnessDir + sep))) || // 路径边界，不误命中 .harness-pi-backup
+    opts.persistence !== undefined;
+  if (writesUnderHarnessPi) {
+    const w = harnessPiGitignoreWarning(cwd);
+    if (w) warnings.push(w);
+  }
   const dashScopeCost = createDashScopeCostAccumulator(opts.model, opts.llmOptions);
   const costTrackerOptions: CostTrackerOptions = {
     mode: "lifetime",

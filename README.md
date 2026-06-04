@@ -66,6 +66,7 @@ pnpm --filter @harness-pi/coding-agent start -- --cwd . --model dashscope:qwen-p
 - `--disable bash,write` 可以关闭指定基础 tool。
 - 默认 log 目录是 `.harness-pi/logs`；`--metrics-file path.ndjson` 可写 metrics。
 - 默认对 session log 里的高危 tool args 脱敏（`write` 内容、`edit` 文本、`bash` 命令仅记长度，不落原文，避免密钥/源码静默写进 `.harness-pi/logs`）；`--log-args full` 记原始 args（仅本地调试）；`--log-args none` 完全不记 args；`--no-log` 关闭整个 session log。
+- **`.harness-pi/` 落盘与 gitignore**：session log 已默认脱敏（见上），但 **resume 存储**（`.harness-pi/sessions/*.jsonl`，TUI / `--resume` 用）为了能正确**重放续跑**保存**完整原文**消息历史（含 `write` 内容、`bash` 命令等），**不脱敏**。启动时若检测到当前仓库未把 `.harness-pi/` 加入 `.gitignore`，会打印一条告警——请务必把 `.harness-pi/` 加入 `.gitignore`，以免敏感内容被误提交。
 - **安全边界**：`bash` 是 host shell，不是 sandbox。full mode 只应在你明确允许修改的 workspace 里运行。
 
 ## Layout
