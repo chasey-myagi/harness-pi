@@ -41,6 +41,27 @@ describe("renderRunReport — failure & overflow surfacing", () => {
     expect(out).toContain("abort reason: watchdog:timeout");
   });
 
+  it("surfaces persistenceErrors（否则「done 但 transcript 不全」被静默吞掉）", () => {
+    const out = renderRunReport(
+      report({
+        reason: "error",
+        persistenceErrors: ["appendEntry(message): boom", "appendEntry(terminal): boom"],
+      }),
+    );
+    expect(out).toContain("persistence errors (2)");
+    expect(out).toContain("appendEntry(message): boom");
+    expect(out).toContain("appendEntry(terminal): boom");
+  });
+
+  it("无 persistenceErrors 时不打该行", () => {
+    expect(renderRunReport(report({ reason: "done" }))).not.toContain("persistence errors");
+  });
+
+  it("单条 persistenceError → (1) 计数 + 该条文案(钉住计数与分隔符渲染)", () => {
+    const out = renderRunReport(report({ reason: "error", persistenceErrors: ["appendEntry(terminal): boom"] }));
+    expect(out).toContain("persistence errors (1): appendEntry(terminal): boom");
+  });
+
   it("warns when the answer was truncated by the context/output limit (stopReason length)", () => {
     const out = renderRunReport(report({ reason: "done", stopReason: "length" }));
     expect(out).toMatch(/Warnings/);
