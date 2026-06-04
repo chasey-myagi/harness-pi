@@ -1,0 +1,41 @@
+{
+  "name": "@harness-pi/lark-bot",
+  "version": "0.1.0",
+  "description": "Feishu/Lark personal Agent-OS bot built on the harness-pi kernel (deepseek-v4-flash brain, lark-cli toolbelt)",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/chasey-myagi/harness-pi.git",
+    "directory": "apps/lark-bot"
+  },
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "bin": {
+    "lark-bot": "./dist/index.js"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    ".env.example"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "start": "tsx src/index.ts",
+    "dev": "tsx watch src/index.ts",
+    "build": "tsc -p .",
+    "typecheck": "tsc -p . --noEmit"
+  },
+  "dependencies": {
+    "@harness-pi/core": "workspace:*",
+    "@harness-pi/plugins": "workspace:*",
+    "@earendil-works/pi-ai": "^0.74.2"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "tsx": "^4.0.0",
+    "typescript": "^5.6.0"
+  }
+}
