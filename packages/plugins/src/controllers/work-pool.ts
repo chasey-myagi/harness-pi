@@ -4,6 +4,10 @@
  * 跟 LeaseQueue 的区别：WorkPool 把 items 静态分组（如按 heading），每 group
  * 一个 worker 跑完；LeaseQueue 是动态领单制，worker 持 lease 完了领下一题。
  *
+ * **abort 必给终态**：abort 时 in-flight group drain 收尾，未启动的 group 进 `results` 标
+ * `skipped:"aborted"` 并触发 `onGroupSkipped`——每个 group 都有终态,
+ * `completedGroups + failedGroups + skippedGroups === groups 总数`,不静默丢 group。
+ *
  * 详见 docs/06-controllers.md §4。
  */
 
@@ -32,13 +36,18 @@ export interface WorkPoolOptions<I extends WorkItem> {
   onGroupComplete?: (groupId: string, summary: RunSummary) => void;
   /** 单 group 失败回调（factory 抛或 run 抛）。 */
   onGroupError?: (groupId: string, err: Error) => void;
+  /** abort 时未启动的 group 被跳过的回调（与 complete/error 对称,保证每个 group 都有终态信号,不静默消失）。 */
+  onGroupSkipped?: (groupId: string, reason: "aborted") => void;
 }
 
 export interface WorkPoolResult {
-  groups: Array<{ id: string; summary?: RunSummary; error?: Error }>;
+  /** 每个 group 恰一条终态：summary（完成）/ error（失败）/ skipped（abort 时未启动）。 */
+  groups: Array<{ id: string; summary?: RunSummary; error?: Error; skipped?: "aborted" }>;
   totalItems: number;
   completedGroups: number;
   failedGroups: number;
+  /** abort 时未启动而被给终态的 group 数。completed+failed+skipped === groups 总数。 */
+  skippedGroups: number;
 }
 
 export class WorkPool<I extends WorkItem> {
@@ -52,6 +61,7 @@ export class WorkPool<I extends WorkItem> {
         totalItems: this.opts.items.length,
         completedGroups: 0,
         failedGroups: 0,
+        skippedGroups: 0,
       };
     }
 
@@ -65,10 +75,12 @@ export class WorkPool<I extends WorkItem> {
       id: string;
       summary?: RunSummary;
       error?: Error;
+      skipped?: "aborted";
     }> = [];
     const running = new Set<Promise<void>>();
     let completed = 0;
     let failed = 0;
+    let skippedGroups = 0;
 
     const runGroup = (g: WorkGroup<I>): Promise<void> =>
       (async () => {
@@ -106,11 +118,21 @@ export class WorkPool<I extends WorkItem> {
       await Promise.allSettled([...running]);
     }
 
+    // abort 后 queue 里未启动的 group 必须给终态(进 results + 计数 + 回调)——否则它们静默消失,
+    // 调用方按 group 归账时漏项(#31)。每个 group 至此恰一条终态:跑过的在 runGroup 里 push、未启动的在此。
+    while (queue.length > 0) {
+      const g = queue.shift()!;
+      results.push({ id: g.id, skipped: "aborted" });
+      skippedGroups++;
+      this.opts.onGroupSkipped?.(g.id, "aborted");
+    }
+
     return {
       groups: results,
       totalItems: this.opts.items.length,
       completedGroups: completed,
       failedGroups: failed,
+      skippedGroups,
     };
   }
 }

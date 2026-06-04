@@ -4,6 +4,10 @@
  * 跟 WorkPool 的区别：动态领单，适合 item 完成时间分布极不均的场景。
  * 失败的 item 可重试（attempt 计数 + maxAttempts 兜底）。
  *
+ * **abort 必给终态**：abort 时正在跑的 item 由内核 abort 收尾，残留(从未派发 / abort 时回退)的 item
+ * 在 `start()` 末尾统一 finalize 成 `skipped` 并触发 `onItemComplete`——保证每个 item 都有终态,
+ * `completed + failed + conflicted + skipped === totalItems`,不让 work item 静默消失。
+ *
  * **并发安全前提**：依赖 Node.js 单线程 event loop——`pending.shift()` / `pending.splice()`
  * 在 await 之间是原子的，K 个 worker 不会竞态。任何修改请保持此契约（shift/splice 跟 length
  * 检查之间禁止插入 await）。
@@ -23,7 +27,7 @@ export interface QueueLease {
   attempt: number;
 }
 
-export type LeaseStatus = "done" | "error" | "conflict";
+export type LeaseStatus = "done" | "error" | "conflict" | "skipped";
 
 export interface LeaseQueueOptions<I extends QueueItem> {
   items: I[];
@@ -52,6 +56,8 @@ export interface LeaseQueueResult {
   completed: number;
   failed: number;
   conflicted: number;
+  /** abort 后从未派发(或 abort 时回退)而被给终态的 item 数。completed+failed+conflicted+skipped === totalItems。 */
+  skipped: number;
 }
 
 const DEFAULT_MAX_ATTEMPTS = 1;
@@ -71,6 +77,21 @@ export class LeaseQueue<I extends QueueItem> {
     let completed = 0;
     let failed = 0;
     let conflicted = 0;
+    let skipped = 0;
+
+    // 单点终态裁决:worker 与下面的 abort 兜底 sweep 共用,保证每个 item 恰被 finalize 一次。
+    const finalize = (
+      item: I,
+      status: LeaseStatus,
+      summary?: RunSummary,
+      error?: Error,
+    ): void => {
+      if (status === "done") completed++;
+      else if (status === "conflict") conflicted++;
+      else if (status === "skipped") skipped++;
+      else failed++;
+      this.opts.onItemComplete?.(item, status, summary, error);
+    };
 
     const workerCount = Math.min(
       this.opts.concurrency,
@@ -79,31 +100,28 @@ export class LeaseQueue<I extends QueueItem> {
     const workers: Promise<void>[] = [];
 
     for (let i = 0; i < workerCount; i++) {
-      const workerId = `worker-${i}`;
       workers.push(
-        this._workerLoop(
-          workerId,
-          pending,
-          attempts,
-          maxAttempts,
-          signal,
-          (item, status, summary, error) => {
-            if (status === "done") completed++;
-            else if (status === "conflict") conflicted++;
-            else failed++;
-            this.opts.onItemComplete?.(item, status, summary, error);
-          },
-        ),
+        this._workerLoop(`worker-${i}`, pending, attempts, maxAttempts, signal, finalize),
       );
     }
 
     await Promise.all(workers);
+
+    // abort 后 pending 里残留的 item(从未派发 + abort 时回退重试的)必须给终态——否则「work item
+    // 无终态、静默消失」,正是新原语要消灭却从旧 controller 旁路回来的问题(#31)。每个 item 至此恰
+    // finalize 一次:派发并跑完的在 worker 里 finalize、未跑完的回退进 pending 在此 sweep,二者互斥。
+    while (pending.length > 0) {
+      const item = pending.shift()!;
+      attempts.delete(item.id);
+      finalize(item, "skipped");
+    }
 
     return {
       totalItems: this.opts.items.length,
       completed,
       failed,
       conflicted,
+      skipped,
     };
   }
 
