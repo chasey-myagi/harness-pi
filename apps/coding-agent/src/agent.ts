@@ -103,6 +103,12 @@ export interface CodingAgent {
   model: Model<Api>;
   costKnown: boolean;
   warnings: string[];
+  /**
+   * #22 守卫：若本次运行会往未被 gitignore 的 `cwd/.harness-pi` 落盘，则为那条告警文案，否则 undefined。
+   * 这是个**结构化标志**——消费者（如 CLI 启动期 stderr）据此判断要不要提示，**不靠**按文案字符串匹配
+   * `warnings` 数组（那是脆弱的隐式契约）。同一条文案也会进 `warnings`（供 run report 呈现）。
+   */
+  harnessPiWarning?: string | undefined;
   readOnly: boolean;
   logPath: string;
   metricsPath?: string | undefined;
@@ -284,10 +290,11 @@ function buildAgentContext(opts: CreateCodingAgentOptions): AgentContext {
     (opts.log !== false &&
       (logDir === harnessDir || logDir.startsWith(harnessDir + sep))) || // 路径边界，不误命中 .harness-pi-backup
     opts.persistence !== undefined;
-  if (writesUnderHarnessPi) {
-    const w = harnessPiGitignoreWarning(cwd);
-    if (w) warnings.push(w);
-  }
+  // 算一次：结构化标志（暴露给 CLI 等消费者）+ 进 warnings（供 run report）。
+  const harnessPiWarning = writesUnderHarnessPi
+    ? (harnessPiGitignoreWarning(cwd) ?? undefined)
+    : undefined;
+  if (harnessPiWarning) warnings.push(harnessPiWarning);
   const dashScopeCost = createDashScopeCostAccumulator(opts.model, opts.llmOptions);
   const costTrackerOptions: CostTrackerOptions = {
     mode: "lifetime",
@@ -385,6 +392,7 @@ function buildAgentContext(opts: CreateCodingAgentOptions): AgentContext {
         model: opts.model,
         costKnown,
         warnings,
+        harnessPiWarning,
         readOnly,
         logPath: join(logDir, `${session.id}.ndjson`),
         metricsPath: opts.metricsFile,

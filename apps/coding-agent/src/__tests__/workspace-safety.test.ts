@@ -2,14 +2,17 @@ import { afterEach, describe, expect, it } from "vitest";
 import { execFileSync } from "node:child_process";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { join } from "node:path";
+import { mkdir } from "node:fs/promises";
 import { createFakeModel } from "@harness-pi/core/testing";
 import { MemorySessionStore } from "@harness-pi/core";
+import { JsonlSessionStore } from "@harness-pi/adapters";
 import {
   harnessPiGitignoreWarning,
   isHarnessPiGitIgnored,
 } from "../workspace-safety.js";
-import { createCodingAgent } from "../agent.js";
+import { createCodingAgent, resumeCodingAgent } from "../agent.js";
+import { emitStartupWarnings } from "../cli.js";
 
 const dirs: string[] = [];
 afterEach(async () => {
@@ -82,9 +85,10 @@ describe("createCodingAgent → agent.warnings 的 .harness-pi 落盘门控", ()
     const cwd = await gitRepo();
     const agent = createCodingAgent({ cwd, model: createFakeModel([]) });
     const gw = agent.warnings.filter((w) => w.includes(".harness-pi") && w.includes(".gitignore"));
-    expect(gw).toHaveLength(1);
-    // CLI 启动期 stderr 门控依赖这条恒等：harnessPiGitignoreWarning(resolve(cwd)) 必在 agent.warnings 里。
-    expect(agent.warnings).toContain(harnessPiGitignoreWarning(resolve(cwd)));
+    expect(gw).toHaveLength(1); // run report 里恰一条，不重复堆叠
+    // 结构化标志（CLI 启动期 stderr 据此判断，不靠文案字符串匹配）也置位，且与 warnings 里那条一致。
+    expect(agent.harnessPiWarning).toBeTruthy();
+    expect(agent.warnings).toContain(agent.harnessPiWarning!);
   });
 
   it("persistence（resume 存储）+ 未忽略 → 出告警（头号泄漏面）", async () => {
@@ -108,8 +112,8 @@ describe("createCodingAgent → agent.warnings 的 .harness-pi 落盘门控", ()
     const cwd = await gitRepo();
     const agent = createCodingAgent({ cwd, model: createFakeModel([]), log: false });
     expect(hasGitignoreWarn(agent.warnings)).toBe(false);
-    // 这条同时锁住 CLI 启动期 stderr 不会假阳性（它只在告警进了 agent.warnings 时才打）。
-    expect(agent.warnings).not.toContain(harnessPiGitignoreWarning(resolve(cwd)));
+    // 结构化标志也为 undefined → CLI 启动期 stderr 不会假阳性（emitStartupWarnings 据此判断）。
+    expect(agent.harnessPiWarning).toBeUndefined();
   });
 
   it("自定义 logDir 落在 .harness-pi 之外 + 无 persistence → 不告警", async () => {
@@ -174,5 +178,59 @@ describe("createCodingAgent → agent.warnings 的 .harness-pi 落盘门控", ()
     const cwd = await tmp();
     const agent = createCodingAgent({ cwd, model: createFakeModel([]) });
     expect(hasGitignoreWarn(agent.warnings)).toBe(false);
+    expect(agent.harnessPiWarning).toBeUndefined();
+  });
+
+  it("resumeCodingAgent（--resume/TUI 路径，必挂 persistence）+ 未忽略 → 告警（头号泄漏面）", async () => {
+    // resume 走 resumeCodingAgent，与 createCodingAgent 共享 buildAgentContext；persistence 必填，
+    // 故 resume 必然会落 .harness-pi/sessions 原文，未忽略时必须告警。直接锁住这条真实入口。
+    const cwd = await gitRepo();
+    const store = new JsonlSessionStore(join(cwd, ".harness-pi", "sessions", "s1.jsonl"));
+    const agent = await resumeCodingAgent({
+      cwd,
+      model: createFakeModel([]),
+      persistence: { store, sessionId: "s1" }, // 文件不存在 → 空历史 resume，足以验证门控
+    });
+    expect(agent.harnessPiWarning).toBeTruthy();
+    expect(hasGitignoreWarn(agent.warnings)).toBe(true);
+  });
+});
+
+describe("emitStartupWarnings（CLI 启动期 stderr 发射，直测）", () => {
+  it("harnessPiWarning 存在 → 写一行带 ⚠️ 前缀的告警", () => {
+    const out: string[] = [];
+    emitStartupWarnings({ harnessPiWarning: "X 未被 gitignore" }, (s) => out.push(s));
+    expect(out).toHaveLength(1);
+    expect(out[0]).toBe("⚠️  X 未被 gitignore\n");
+  });
+
+  it("harnessPiWarning 为 undefined → 不写（锁住 --no-log 等不落盘场景无假阳性）", () => {
+    const out: string[] = [];
+    emitStartupWarnings({ harnessPiWarning: undefined }, (s) => out.push(s));
+    expect(out).toHaveLength(0);
+  });
+});
+
+describe("isHarnessPiGitIgnored 进阶边界", () => {
+  it("否定/再包含 pattern（.harness-pi/ + !.harness-pi/keep）→ probe 子路径仍判忽略", async () => {
+    // 尾部 negation 只放行 .harness-pi/keep，不翻转 .harness-pi/probe 的忽略状态。
+    const cwd = await gitRepo(".harness-pi/\n!.harness-pi/keep\n");
+    expect(isHarnessPiGitIgnored(cwd)).toBe(true);
+  });
+
+  it("从仓库子目录运行：根 .gitignore 的 .harness-pi/ 在子目录下仍命中", async () => {
+    const root = await gitRepo(".harness-pi/\n");
+    const sub = join(root, "packages", "app");
+    await mkdir(sub, { recursive: true });
+    // git check-ignore 以 sub 为 cwd 查 .harness-pi/probe（= sub/.harness-pi/probe），
+    // 根 .gitignore 的无锚 pattern 在任意层级生效 → 仍判忽略。
+    expect(isHarnessPiGitIgnored(sub)).toBe(true);
+  });
+
+  it("从仓库子目录运行 + 未忽略 → 仍报未忽略", async () => {
+    const root = await gitRepo();
+    const sub = join(root, "packages", "app");
+    await mkdir(sub, { recursive: true });
+    expect(isHarnessPiGitIgnored(sub)).toBe(false);
   });
 });
