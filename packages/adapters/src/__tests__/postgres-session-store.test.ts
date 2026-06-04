@@ -51,6 +51,34 @@ describe("PostgresSessionStore specifics", () => {
     expect(b.seq).toBe(2);
   });
 
+  it("原子性：appendEntry/fork 各只发 1 条含写入的语句(单条 CTE → 同语句原子,无跨语句半成功窗口)", async () => {
+    // 用计数包装器证明结构性原子:每个操作的所有写入(entry/leaf/lineage)收进**一条**语句。
+    // 单条语句在 PG 是一个隐式事务,任一步失败整条回滚——这正是 #29 要消除的「INSERT 成、leaf 败」窗口。
+    const pg = newDb().adapters.createPg();
+    const pool = new pg.Pool();
+    let writeStmts = 0;
+    const counting: PgClient = {
+      query: (text: string, params?: unknown[]) => {
+        if (/INSERT|UPDATE|DELETE/i.test(text)) writeStmts++;
+        return pool.query(text, params);
+      },
+    };
+    const store = new PostgresSessionStore(counting);
+    await store.migrate();
+    const msg = (role: string): SessionEntry =>
+      ({ kind: "message", message: { role, content: "x" } } as never);
+
+    writeStmts = 0;
+    await store.appendEntry("s", msg("user"));
+    await store.appendEntry("s", msg("assistant"));
+    expect(writeStmts).toBe(2); // 每次 appendEntry 恰 1 条写语句(原先 entry-insert + leaf-upsert 两条)
+
+    const fromId = (await store.getPathToLeaf("s"))[0]!.id;
+    writeStmts = 0;
+    await store.fork("s", fromId);
+    expect(writeStmts).toBe(1); // fork 恰 1 条写语句(原先 entries + leaf + lineage 三条);getPathToLeaf 的 SELECT 不计
+  });
+
   it("persists jsonb entry content faithfully (terminal RunSummary deep round-trip)", async () => {
     const store = await freshStore();
     const terminal: SessionEntry = {
