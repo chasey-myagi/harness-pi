@@ -265,7 +265,9 @@ function buildAgentContext(opts: CreateCodingAgentOptions): AgentContext {
     toolModeOptions.toolsOptions = opts.toolsOptions;
   }
   const tools = createToolsForMode(cwd, toolModeOptions);
-  const logDir = opts.logDir ?? join(cwd, ".harness-pi", "logs");
+  // resolve 成绝对路径（锚定 workspace cwd）：相对 --log-dir 也有确定落点，且下面的路径边界门控
+  // 不会因「相对 logDir vs 绝对 harnessDir」字符串比较恒 false 而漏告警（安全守卫的假阴性）。
+  const logDir = resolve(cwd, opts.logDir ?? join(".harness-pi", "logs"));
   const metricsSink = opts.metricsFile
     ? new NdjsonFileSink({ path: opts.metricsFile, batchSize: 1 })
     : undefined;
