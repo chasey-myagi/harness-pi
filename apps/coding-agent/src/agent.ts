@@ -1,4 +1,4 @@
-import { join, resolve } from "node:path";
+import { join, resolve, sep } from "node:path";
 import {
   AgentSession,
   type Api,
@@ -277,8 +277,10 @@ function buildAgentContext(opts: CreateCodingAgentOptions): AgentContext {
   const warnings: string[] = [];
   // .harness-pi 落盘安全守卫（#22）：会往 cwd/.harness-pi 落盘（默认 session log 在此，或挂了 resume
   // 存储）且该目录未被 gitignore 时，提示完整原文有被误提交的风险（resume 存储无法脱敏）。
+  const harnessDir = join(cwd, ".harness-pi");
   const writesUnderHarnessPi =
-    (opts.log !== false && logDir.startsWith(join(cwd, ".harness-pi"))) ||
+    (opts.log !== false &&
+      (logDir === harnessDir || logDir.startsWith(harnessDir + sep))) || // 路径边界，不误命中 .harness-pi-backup
     opts.persistence !== undefined;
   if (writesUnderHarnessPi) {
     const w = harnessPiGitignoreWarning(cwd);

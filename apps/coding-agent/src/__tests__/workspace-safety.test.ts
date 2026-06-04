@@ -122,6 +122,17 @@ describe("createCodingAgent → agent.warnings 的 .harness-pi 落盘门控", ()
     expect(hasGitignoreWarn(agent.warnings)).toBe(false);
   });
 
+  it("自定义 logDir 是同前缀兄弟目录 .harness-pi-backup → 不误命中、不告警", async () => {
+    // 路径边界判定：.harness-pi-backup 以 '.harness-pi' 开头但不是 .harness-pi 的子路径，不应触发。
+    const cwd = await gitRepo();
+    const agent = createCodingAgent({
+      cwd,
+      model: createFakeModel([]),
+      logDir: join(cwd, ".harness-pi-backup", "logs"),
+    });
+    expect(hasGitignoreWarn(agent.warnings)).toBe(false);
+  });
+
   it("自定义 logDir 仍在 cwd/.harness-pi 下 + 未忽略 → 告警", async () => {
     const cwd = await gitRepo();
     const agent = createCodingAgent({
