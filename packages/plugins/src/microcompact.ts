@@ -16,8 +16,6 @@
  *
  * **view-only（与 autoCompaction / trimHistory 同款）**：`transformMessagesBeforeLlm` 只改本次返回的 messages
  * 数组（copy-on-write），完整原始历史天然留在 store 里；不动 user 消息、assistant 推理、非白名单工具的 toolResult。
- *
- * 详见 docs/05-plugins.md。
  */
 
 import type { Hook } from "@harness-pi/core";
