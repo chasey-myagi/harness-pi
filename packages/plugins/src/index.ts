@@ -47,6 +47,9 @@ export type { CompactSummarizeOptions } from "./compact-summarize.js";
 export { autoCompaction, estimateTokensByChars } from "./auto-compaction.js";
 export type { AutoCompactionOptions } from "./auto-compaction.js";
 
+export { microcompact } from "./microcompact.js";
+export type { MicrocompactOptions } from "./microcompact.js";
+
 export { permissionGate } from "./permission-gate.js";
 export type {
   PermissionGateOptions,
