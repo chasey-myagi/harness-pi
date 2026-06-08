@@ -129,6 +129,178 @@ describe("subAgentTool", () => {
   });
 });
 
+/* ──────────────── subAgentTool 跨层递归深度闸 (#45) ──────────────── */
+
+describe("subAgentTool depth gate (#45)", () => {
+  /**
+   * 造一个**会嵌套挂 subAgentTool** 的 session：每层 fake model 先 toolCall("subAgent") 把任务再下派一层，
+   * 子层 done 后本层回一句 text。所有 fake 收集起来供 teardown。`depthsSeen` 记录每次 spawn 时**父读到的当前深度**。
+   * 这样从顶层（depth 0）run 起来，深度会沿 lineage 透传、自增，直到 maxDepth 把某层的 spawn 挡掉。
+   */
+  function makeNestedFactory(opts: {
+    maxDepth?: number;
+    maxSubAgents?: number;
+    depthsSeen: number[];
+    fakes: Array<ReturnType<typeof createFakeModel>>;
+  }) {
+    const build = (): AgentSession => {
+      // 这层 model：先要求 spawn 一个 subAgent，拿到结果后回一句 text 收尾。
+      const fake = createFakeModel([
+        { content: [{ type: "toolCall", name: "subAgent", arguments: { task: "go deeper" } }] },
+        { content: [{ type: "text", text: "layer done" }], stopReason: "stop" },
+      ]);
+      opts.fakes.push(fake);
+      const tool = subAgentTool({
+        ...(opts.maxDepth !== undefined ? { maxDepth: opts.maxDepth } : {}),
+        ...(opts.maxSubAgents !== undefined ? { maxSubAgents: opts.maxSubAgents } : {}),
+        // sessionFactory 拿到父 ctx → 记录父此刻读到的深度，再递归造下一层。
+        sessionFactory: (_task, c) => {
+          opts.depthsSeen.push(c.state.get("subAgent.depth") ?? 0);
+          return build();
+        },
+      });
+      return new AgentSession({ model: fake, tools: [tool] });
+    };
+    return build;
+  }
+
+  it("3rd layer spawn throws a readable depth-limit error (maxDepth=2)", async () => {
+    // depth: 主(0)→子(1)→孙(2)。孙这层 execute 读到 depth=2 >= maxDepth=2 → throw，不再 spawn 第 4 层。
+    const fakes: Array<ReturnType<typeof createFakeModel>> = [];
+    const depthsSeen: number[] = [];
+    const build = makeNestedFactory({ maxDepth: 2, depthsSeen, fakes });
+    const root = build();
+    const res = await root.run("start");
+    expect(res.reason).toBe("done");
+
+    // 孙(depth 2)层的 subAgent execute 抛错 → kernel 包成 isError toolResult 回灌孙的 model。
+    // 在某个 fake 的收到的 context 里能找到这条可读错误。
+    const allToolResults = fakes
+      .flatMap((f) => f.getCalls())
+      .flatMap((ctx) => ctx.messages)
+      .filter((m) => m.role === "toolResult");
+    const errText = allToolResults
+      .map((m) => blockText((m as { content: unknown }).content))
+      .join("\n");
+    expect(errText).toContain("depth limit (maxDepth=2) reached");
+
+    // spawn 只发生在 depth 0 和 1 两层（孙那层被挡，不进 sessionFactory）。
+    expect(depthsSeen).toEqual([0, 1]);
+    fakes.forEach((f) => f.teardown());
+  });
+
+  it("depth limit fires at the top level too when maxDepth=0 (no spawn at all)", async () => {
+    // maxDepth=0：顶层（depth 0）execute 立刻读到 0 >= 0 → 直接 throw，sessionFactory 一次都不调。
+    const subFake = createFakeModel([{ content: [{ type: "text", text: "x" }], stopReason: "stop" }]);
+    let factoryCalls = 0;
+    const tool = subAgentTool({
+      maxDepth: 0,
+      sessionFactory: () => {
+        factoryCalls++;
+        return new AgentSession({ model: subFake, tools: [] });
+      },
+    });
+    const { ctx } = createTestContext();
+    await expect(
+      tool.execute({ task: "t" }, ctx, new AbortController().signal),
+    ).rejects.toThrow(/depth limit \(maxDepth=0\) reached/);
+    expect(factoryCalls).toBe(0);
+    subFake.teardown();
+  });
+
+  it("horizontal maxSubAgents gate stays independent of the vertical depth gate", async () => {
+    // 同一层（depth 0）连派 2 个 sub-agent：maxSubAgents=1 拦第 2 个（横向），而 maxDepth=2 这层（depth 0<2）
+    // 本不该拦——证明两闸正交：横向耗尽不是「深度到顶」，错误文案也各自独立。
+    const subFake = createFakeModel([
+      { content: [{ type: "text", text: "1" }], stopReason: "stop" },
+    ]);
+    const tool = subAgentTool({
+      maxSubAgents: 1,
+      maxDepth: 2,
+      sessionFactory: () => new AgentSession({ model: subFake, tools: [] }),
+    });
+    const { ctx } = createTestContext(); // depth 缺省 0
+    const sig = new AbortController().signal;
+    await tool.execute({ task: "a" }, ctx, sig); // spawned=1，depth 0<2 → OK
+    await expect(tool.execute({ task: "b" }, ctx, sig)).rejects.toThrow(/budget exhausted/);
+    subFake.teardown();
+  });
+
+  it("depth增量沿 lineage 透传：每层 = 父+1，闸停在 maxDepth", async () => {
+    // 直接观察注入机制：每嵌套一层，子 session 的 ctx.state 深度比父 +1。makeNestedFactory 会一直递归下钻，
+    // 故深度从 0 起逐层自增，直到读到 depth>=maxDepth 把该层 spawn 挡掉。maxDepth=5 → spawn 发生在 depth 0..4，
+    // 严格连续自增的 [0,1,2,3,4] 同时钉死「逐层 +1 透传」与「闸恰在 maxDepth 截断」。
+    const fakes: Array<ReturnType<typeof createFakeModel>> = [];
+    const depthsSeen: number[] = [];
+    const build = makeNestedFactory({ maxDepth: 5, depthsSeen, fakes });
+    const root = build();
+    await root.run("start");
+    expect(depthsSeen).toEqual([0, 1, 2, 3, 4]);
+    fakes.forEach((f) => f.teardown());
+  });
+
+  it("multi-branch siblings don't cross-talk: each child inherits parent depth independently", async () => {
+    // 顶层（depth 0）连 spawn 两个**兄弟**子：两个子各自从父继承 depth+1=1，互不串扰（独立 ctx.state）。
+    // 每个兄弟子里再 spawn 一层，应都读到 depth=1（而非把彼此的递增累加成 1、2）。
+    const childDepths: number[] = [];
+    const subFakes: Array<ReturnType<typeof createFakeModel>> = [];
+    // 兄弟子的 model：spawn 一层孙后收尾。
+    const buildChild = (): AgentSession => {
+      const f = createFakeModel([
+        { content: [{ type: "toolCall", name: "subAgent", arguments: { task: "grandchild" } }] },
+        { content: [{ type: "text", text: "child done" }], stopReason: "stop" },
+      ]);
+      subFakes.push(f);
+      const childTool = subAgentTool({
+        maxDepth: 10,
+        sessionFactory: (_t, c) => {
+          childDepths.push(c.state.get("subAgent.depth") ?? 0); // 子里 spawn 孙时读到的深度
+          const gf = createFakeModel([{ content: [{ type: "text", text: "gc" }], stopReason: "stop" }]);
+          subFakes.push(gf);
+          return new AgentSession({ model: gf, tools: [] });
+        },
+      });
+      return new AgentSession({ model: f, tools: [childTool] });
+    };
+
+    // 顶层 model：连发两个 subAgent toolCall（同一 turn 内两次），再收尾。
+    const rootFake = createFakeModel([
+      {
+        content: [
+          { type: "toolCall", name: "subAgent", arguments: { task: "branch-A" } },
+          { type: "toolCall", name: "subAgent", arguments: { task: "branch-B" } },
+        ],
+      },
+      { content: [{ type: "text", text: "root done" }], stopReason: "stop" },
+    ]);
+    const rootTool = subAgentTool({
+      maxDepth: 10,
+      sessionFactory: () => buildChild(),
+    });
+    const root = new AgentSession({ model: rootFake, tools: [rootTool] });
+    await root.run("start");
+
+    // 两个兄弟子各自在自己层 spawn 孙，都应读到 depth=1（从顶层 0 各自 +1），不互相污染。
+    expect(childDepths).toEqual([1, 1]);
+    rootFake.teardown();
+    subFakes.forEach((f) => f.teardown());
+  });
+
+  it("default maxDepth (=2) is harmless for existing single-level usage (regression)", async () => {
+    // 不传 maxDepth：顶层（depth 0）spawn 一个子（depth 1）这类**现有**单层用法照常工作，不被默认闸误伤。
+    const subFake = createFakeModel([
+      { content: [{ type: "text", text: "ok" }], stopReason: "stop" },
+    ]);
+    const tool = subAgentTool({
+      sessionFactory: () => new AgentSession({ model: subFake, tools: [] }),
+    });
+    const { ctx } = createTestContext(); // depth 缺省 0
+    const result = await tool.execute({ task: "t" }, ctx, new AbortController().signal);
+    expect(blockText(result.content)).toContain("ok");
+    subFake.teardown();
+  });
+});
+
 /* ──────────────── GapExplorer ──────────────── */
 
 describe("GapExplorer", () => {
