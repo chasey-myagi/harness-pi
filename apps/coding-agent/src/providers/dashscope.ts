@@ -1,4 +1,5 @@
-import type { Api, Model, Usage } from "@harness-pi/core";
+import { makeOpenAICompatibleModel } from "@harness-pi/core";
+import type { Api, LlmOptions, Model, Usage } from "@harness-pi/core";
 
 export interface DashScopeEnv {
   DASHSCOPE_API_KEY?: string | undefined;
@@ -7,7 +8,7 @@ export interface DashScopeEnv {
 
 export interface DashScopeResolvedModelRuntime {
   model: Model<Api>;
-  llmOptions: Record<string, unknown>;
+  llmOptions: LlmOptions;
 }
 
 export interface DashScopePricingTier {
@@ -244,17 +245,15 @@ export function resolveDashScopeModel(
 
   const metadata = getDashScopeModelMetadata(modelId);
   return {
-    model: {
+    // pi-ai Model.cost is USD per million tokens; DashScope docs publish CNY, so cost stays at the
+    // factory's zero default and CNY estimation is kept in this adapter (createDashScopeCostAccumulator).
+    model: makeOpenAICompatibleModel({
       id: modelId,
       name: `DashScope ${modelId}`,
-      api: "openai-completions",
       provider: "dashscope",
       baseUrl: DASHSCOPE_BASE_URL,
       reasoning: metadata.reasoning,
       input: metadata.input,
-      // pi-ai Model.cost is USD per million tokens. DashScope docs publish CNY;
-      // CNY estimation is kept in this adapter so the shared USD report stays honest.
-      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
       contextWindow: metadata.contextWindow,
       maxTokens: metadata.maxTokens,
       compat: {
@@ -266,7 +265,7 @@ export function resolveDashScopeModel(
         thinkingFormat: "qwen",
         supportsStrictMode: false,
       },
-    } satisfies Model<"openai-completions">,
+    }),
     llmOptions: { apiKey },
   };
 }

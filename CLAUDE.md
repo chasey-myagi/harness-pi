@@ -10,17 +10,25 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 - **L1 `@earendil-works/pi-ai`**:统一 LLM API + tool spec + event stream。我们是它的**消费者,不动它一行**。
 - **L2 `@harness-pi/core`**:自己写的 agent 内核。**故意不基于 `pi-agent-core`**——换来 **hook 作为一等公民**。
-- **L3 `@harness-pi/plugins` / `/adapters` / `/tools`** + app `@harness-pi/coding-agent`。
+- **L3 `@harness-pi/plugins` / `/adapters` / `/tools`** + apps `@harness-pi/coding-agent`（CLI dogfood）、`@harness-pi/lark-bot`（飞书机器人，多轮 LRU session cache）。
 
 不是 `pi-coding-agent` 的 fork(那是终端 UX 扩展);方向是服务端 agent 运行时。详见 `docs/00-overview.md`、`docs/01-architecture.md`。
+
+> **L1 不变量「不动它一行」仍然成立,但允许「在消费面之上收口」。** `@harness-pi/core` 可提供薄 DX seam——把自定义 Model 构造与 provider options 的人体工学集中到内核一侧,而**完全不碰 pi-ai 源码**:
+> - `makeOpenAICompatibleModel(spec)`(`packages/core/src/llm-model.ts`):造 OpenAI-compatible 自定义 Model,**零 `as Model` cast、无 `cost:{0,0,0,0}` 占位**(返回窄类型 `Model<"openai-completions">` 让条件 `compat` 字段正确解析)。
+> - `LlmOptions` + `resolveLlmOptions()`:`AgentSessionOptions.llmOptions` 的 typed 形态(`Omit<StreamOptions,"signal"> & { providerExtras }`),`{apikey}` typo 编译期失败;provider 专属键走 `providerExtras` 逃生口。
+>
+> 这是「在咽喉点封装上游公共面」,不是改 L1。下游(coding-agent / engram / bidding-agent)应从 `@harness-pi/core` 拿这两个,**别直接 import `@earendil-works/pi-ai`**——seam 是单一咽喉点,上游 churn `Model` 类型时只动 `llm-model.ts` + `index.ts` re-export。
+>
+> **若将来真需改 L1 行为**,升级阶梯是:`pnpm patch`(软 fork,留在 version train、自动重应用;但 tarball 只发 `dist`,只能 patch 编译产物)→ 硬 fork+vendor(仅当 patch 做不到且需跨多 release 持续,如未用 provider SDK 瘦身)作最终储备。上游(`github.com/earendil-works/pi-mono`, MIT)当前健康,fork 期权永不过期,**现在不 fork**。
 
 ## 架构大图(读多个文件才能拼出的部分)
 
 **内核极简 + 一切皆 hook。** `@harness-pi/core` 只做两件事:跑 pi-ai 的 LLM-tool 循环 + 派发 hook。**无** metric / watchdog / pool / DB / frontend——这些全是 `@harness-pi/plugins` 里的 hook 实例。改内核前先问:这能不能做成 hook?
 
 **三个概念别混(`docs/05/06/07`):**
-- **Plugin**:钩 loop 事件的装饰器(watchdog / metrics / trimHistory / toolOutputBuffer / sessionLog / emptyRunGuard / repeatedCallGuard / costTracker / autoCompaction / compactSummarize / permissionGate)。
-- **Controller**:编排一/多个 session(workPool、lifecycleRestart、forkSession)。
+- **Plugin**:钩 loop 事件的装饰器(watchdog / metrics / trimHistory / toolOutputBuffer / sessionLog / emptyRunGuard / repeatedCallGuard / costTracker / autoCompaction / compactSummarize / permissionGate / tokenBudget / systemReminder / batchCounter / leaseDecision / toolStats)。
+- **Controller**:编排一/多个 session(workPool / lifecycleRestart / forkSession / leaseQueue / parallel / pipeline / compactOnOverflow / compactRestartFresh / gapExplorer / subAgentTool)。
 - **Adapter**:plugin 的 I/O 后端(metric sink、log sink、`SessionStore`)。**走接口 + peerDep,不强加具体 driver**;自定义 metric kind 用 TS module augmentation,不改内核。
 
 **`AgentSession`(`packages/core/src/session.ts`,本仓库最重的文件)**:`run`/`continue` → turn loop →三段式 phase(`_phaseLlmCall` → `_phaseToolBatch` → `_phaseTurnEnd`)。几个**必须知道、否则会改错**的不变量:

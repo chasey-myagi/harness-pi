@@ -118,6 +118,8 @@ import { createAttachmentMessage } from "./types.js";
 import type { HarnessTool } from "./types.js";
 import type { SessionStore } from "./session-store.js";
 import { defaultIsContextOverflow } from "./context-overflow.js";
+import { resolveLlmOptions } from "./llm-model.js";
+import type { LlmOptions } from "./llm-model.js";
 import { randomUUID } from "node:crypto";
 
 export interface AgentSessionOptions {
@@ -153,10 +155,12 @@ export interface AgentSessionOptions {
    */
   resumedMessageCount?: number;
   /**
-   * 透传给 pi-ai complete() 的 provider options。
-   * `signal` 是 kernel 保留字段：即使传入也会被当前 session 的 AbortSignal 覆盖。
+   * 透传给 pi-ai stream()/complete() 的 provider options（typed，见 {@link LlmOptions}）。
+   * 公共字段（apiKey / temperature / headers / …）类型化，`{apikey}` 这类 typo 编译期失败；
+   * provider 专属键走 `providerExtras` 逃生口。`signal` 是 kernel 保留字段，已从类型 Omit 掉
+   * （即使经 `providerExtras` 偷传也会被当前 session 的 AbortSignal 覆盖）。
    */
-  llmOptions?: Record<string, unknown>;
+  llmOptions?: LlmOptions;
   /** Hook 失败上报通道（metrics plugin 通常 hook 进来）。 */
   hookFailureSink?: HookFailureSink;
   /**
@@ -248,7 +252,7 @@ export class AgentSession {
   readonly systemPrompt: string;
   readonly maxTurns: number;
   readonly maxContinuations: number;
-  private readonly _llmOptions: Record<string, unknown>;
+  private readonly _llmOptions: LlmOptions;
 
   private _messages: Message[];
   private _hooks: Hook[];
@@ -1219,7 +1223,7 @@ export class AgentSession {
       // stream() 而非 complete()：complete() 内部就是 stream().result()，两者结果完全等价，
       // 但 stream 让我们在回合进行中把 delta 作为 live 事件发出（Event Bus）。
       const s = stream(this.model, context, {
-        ...this._llmOptions,
+        ...resolveLlmOptions(this._llmOptions),
         signal: this._abortCtrl.signal,
       });
       for await (const ev of s) {
