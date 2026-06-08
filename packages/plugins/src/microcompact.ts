@@ -9,10 +9,13 @@
  * 裁剪所有 toolResult；microcompact 只在**体积超阈值**（或 cache 已冷）时动手、只清**白名单工具**、清到**目标
  * 体积**为止即停。两者都 view-only（只改本 turn 发给 LLM 的 view，绝不写 `session.messages`）。
  *
- * **⚠️ Hook 顺序：本插件必须排在 `autoCompaction` 之前。** 与「压缩型 hook 排在裁剪型 hook 之前」准则一致——
- * microcompact 是廉价的「先清可重取的旧 tool 输出」，autoCompaction 是昂贵的「总结剩下的早期对话」。先让
- * microcompact 把白名单工具的体积降下来，autoCompaction 再据**裁剪后**的真实 view 决定是否还需要总结。反过来
- * 排（autoCompaction 在前）会让昂贵总结多跑、甚至把本可廉价清掉的 tool 输出也卷进 summary。
+ * **⚠️ Hook 顺序：microcompact 应排在 `autoCompaction` 之前。** （**别**套用 `auto-compaction.ts` 里
+ * 「autoCompaction 排在 `trimHistory` 等**裁剪型** transform 之前」那条规则来反推顺序——microcompact 不是那种
+ * 无条件机械裁剪:它既不总结、也不按条数硬裁,而是**有条件地清掉可重取的白名单工具输出**,是比「总结」更廉价
+ * 的一手,所以比 autoCompaction 还靠前。）理由:先让 microcompact 把白名单工具体积降下来,autoCompaction 再据
+ * **清理后**的真实 view 决定是否还要花钱总结(体积已够低时直接 no-op)。反过来排会让昂贵总结多跑、甚至把本可
+ * 廉价清掉的 tool 输出也卷进 summary。与 `trimHistory` 的取舍见下(microcompact 是其「按 token 体积 + 白名单 +
+ * keepRecent」的升级版,一般二选一,不必同时挂)。
  *
  * **view-only（与 autoCompaction / trimHistory 同款）**：`transformMessagesBeforeLlm` 只改本次返回的 messages
  * 数组（copy-on-write），完整原始历史天然留在 store 里；不动 user 消息、assistant 推理、非白名单工具的 toolResult。
