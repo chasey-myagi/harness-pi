@@ -116,3 +116,52 @@ export function createAttachmentMessage(opts: {
     },
   } as Message & { _meta?: Record<string, unknown> };
 }
+
+/**
+ * 剔除「悬挂的 tool 调用」，让一段 messages snapshot 重新喂给 pi-ai 时合法。
+ *
+ * 背景：snapshot 可能停在 tool batch 中途——assistant 已发出 `toolCall`，但对应的
+ * `toolResult` 还没 append。把这种带「无 result 的 toolCall」的消息直接喂 provider 会
+ * 报错（orphan tool_use 400）。fork / sub-agent 这类「拿父 snapshot 当 initialMessages」
+ * 的路径必须先过一遍本函数。借鉴 Claude Code `filterIncompleteToolCalls`
+ * （[08-claude-code-lessons](docs/08-claude-code-lessons.md)），并补齐对称的 orphan-result 清理。
+ *
+ * 三遍、纯函数（不改入参）：
+ *   1. 收集所有 `toolResult` 的 `toolCallId`。
+ *   2. 丢掉「含任一未被 result 的 `toolCall`」的整条 assistant（连同其 text/thinking——
+ *      与 pi-ai 消息原子性一致：assistant 的 content 块不可拆开发）。
+ *   3. 丢掉 orphan `toolResult`（其 `toolCallId` 对应的 assistant 已在第 2 步被丢）。
+ *
+ * snapshot 无悬挂时返回**内容等价**的新数组（始终是 copy，不返回原引用）。
+ */
+export function filterIncompleteToolCalls(messages: Message[]): Message[] {
+  // Pass 1：已有 result 的 toolCallId。
+  const resolved = new Set<string>();
+  for (const m of messages) {
+    if (m.role === "toolResult") resolved.add(m.toolCallId);
+  }
+
+  // Pass 2：保留 non-assistant + 所有 toolCall 都有 result 的 assistant；
+  // 记录存活的 toolCall id 供 Pass 3 清理 orphan result。
+  const survivingToolCallIds = new Set<string>();
+  const afterAssistantFilter = messages.filter((m) => {
+    if (m.role !== "assistant") return true;
+    let hasIncomplete = false;
+    for (const block of m.content) {
+      if (block.type === "toolCall" && !resolved.has(block.id)) {
+        hasIncomplete = true;
+        break;
+      }
+    }
+    if (hasIncomplete) return false;
+    for (const block of m.content) {
+      if (block.type === "toolCall") survivingToolCallIds.add(block.id);
+    }
+    return true;
+  });
+
+  // Pass 3：丢掉 toolCall 已被丢弃的 orphan toolResult。
+  return afterAssistantFilter.filter(
+    (m) => m.role !== "toolResult" || survivingToolCallIds.has(m.toolCallId),
+  );
+}
