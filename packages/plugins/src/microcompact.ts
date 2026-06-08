@@ -125,20 +125,28 @@ export function microcompact(opts: MicrocompactOptions): Hook {
 
       // 体积触发：从最旧开始清，清到 ≤ targetTokens 即停（不必全清）。
       // gap 触发（coldCache）：不设早停，把所有可清的都清掉（cache 反正冷了）。
+      //
+      // **增量 running total，不每轮全量重估。** estimateTokensByChars 是逐消息/逐块累加，故替换一条时
+      // `estimate([原]) - estimate([占位])` 正是整体估值的精确变化量——结果与全量重估完全一致，但复杂度从
+      // O(N·K) 降到 O(N+K)。这点很关键：本 transform 是**同步**的，`timeout:50` 拦不住同步循环（计时器在
+      // 同步阻塞期间根本没机会 fire），而本插件正是为大文件读取场景设计、harness 又是多 session 跑在单
+      // event loop（WorkPool/LeaseQueue）——全量重估的 O(N·K) 会让一个 session 的压缩同步冻住其余所有 session。
       const out = messages.slice(); // copy-on-write，绝不改原数组 / session.messages
-      let cleared = 0;
+      let total = estimate(out); // 开头估一次
       for (const idx of clearable) {
-        if (!coldCache && estimate(out) <= targetTokens) break; // 体积已降到目标（gap 路径不早停）
+        if (!coldCache && total <= targetTokens) break; // O(1) 比较；降到目标即停（gap 路径不早停）
         const msg = out[idx]! as ToolResult;
         const chars = contentChars(msg.content);
-        out[idx] = {
+        const placeholder: ToolResult = {
           ...msg,
           content: [{ type: "text" as const, text: placeholderText(msg.toolName, chars) }],
         };
-        cleared++;
+        total -= estimate([msg]) - estimate([placeholder]); // 精确减去本条清理带来的体积下降
+        out[idx] = placeholder;
       }
 
-      if (cleared === 0) return undefined; // 体积本就 ≤ target 且非 coldCache → 无需清
+      // 走到这里必然清了 ≥1 条：volume 路径的入口判据已保证 total > triggerTokens ≥ targetTokens（首轮不早停）；
+      // cold 路径不早停、且 clearable 非空。故无需 cleared===0 的死分支。
       return out;
     },
   };
