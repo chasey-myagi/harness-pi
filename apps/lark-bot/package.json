@@ -1,6 +1,7 @@
 {
   "name": "@harness-pi/lark-bot",
   "version": "0.1.0",
+  "private": true,
   "description": "Feishu/Lark personal Agent-OS bot built on the harness-pi kernel (deepseek-v4-flash brain, lark-cli toolbelt)",
   "license": "MIT",
   "repository": {
