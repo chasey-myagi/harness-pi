@@ -1,6 +1,6 @@
 {
   "name": "@harness-pi/tools",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "First-party coding tools for harness-pi agents",
   "license": "MIT",
   "repository": {
