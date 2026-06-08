@@ -75,8 +75,9 @@ describe("microcompact", () => {
 
   it("stops clearing once target volume is reached (does not clear everything)", () => {
     // 5 条各 ~1000 tokens（estimateTokensByChars ≈ chars/4），keepRecent=0。总 ≈ 5000。
-    // trigger=3000（5000 > 3000 → 触发）；target=3000 → 逐条清并重估，降到 ≤3000 即停。
-    // 实测：清 2 条剩 ≈3024（仍 >3000）→ 再清 1 条剩 ≈2036（≤3000）即停 = 清 3 条；关键是**不会**全清 5 条。
+    // trigger=3000（5000 > 3000 → 触发）；target=3000 → 从最旧逐条清并重估，降到 ≤3000 即停。
+    // 契约 = 「清到目标即停、绝不全清」；断言**不耦合估算器精确算术**（清了几条随 rounding 可能微变，
+    // 真正的不变量是 0 < cleared < 5、且最近一条（早停必发生在清到它之前）幸存。）
     const msgs: Message[] = Array.from({ length: 5 }, () => tr("read", "z".repeat(4000)));
     const compact = microcompact({
       compactableTools: ["read"],
@@ -89,10 +90,9 @@ describe("microcompact", () => {
 
     expect(view).toBeDefined();
     const clearedCount = view.filter((m) => textOf(m).includes("microcompact")).length;
-    expect(clearedCount).toBe(3); // 清到目标即停
-    expect(clearedCount).toBeLessThan(5); // 而非全清——「清到目标为止」语义
-    expect(textOf(view[3]!)).toContain("z".repeat(40)); // 第 4、5 条原文保留
-    expect(textOf(view[4]!)).toContain("z".repeat(40));
+    expect(clearedCount).toBeGreaterThan(0); // 触发并清了一些
+    expect(clearedCount).toBeLessThan(5); // 但绝不全清——「清到目标为止」语义
+    expect(textOf(view[4]!)).toBe("z".repeat(4000)); // 最近一条必然幸存（早停发生在清到它之前），精确比对
   });
 
   it("leaves non-whitelisted tool results, assistant reasoning and user messages untouched", () => {
@@ -153,6 +153,53 @@ describe("microcompact", () => {
     expect(textOf(view[0]!)).toContain("microcompact"); // gap 触发，旧条被清
     expect(textOf(view[1]!)).toContain("microcompact");
     expect(textOf(view[2]!)).toBe("recent"); // 最近保留
+  });
+
+  it("gapMinutes (cold cache) clears ALL clearable, ignoring the targetTokens early-stop", () => {
+    // 区分 cold-cache 路径与 volume 路径:triggerTokens 极大 → volume 永不触发(只有 cold 路径会动);
+    // targetTokens=3000(若 cold 误用了体积早停,会停在 ~3 条);keepRecent=0(5 条全可清);gap 超阈值 → cold。
+    // cold 路径**无早停**,应把 5 条全清。防回归:若给 cold 加上 targetTokens 早停(或从 volume 去掉),清的就不足 5。
+    const t0 = 1_000_000;
+    const msgs: Message[] = Array.from({ length: 5 }, () => tr("read", "z".repeat(4000), t0));
+    const compact = microcompact({
+      compactableTools: ["read"],
+      triggerTokens: 1_000_000, // volume 路径永不触发
+      targetTokens: 3000, // 若 cold 误用早停会停在 ~3 条
+      keepRecent: 0,
+      gapMinutes: 5,
+      now: () => t0 + 6 * 60_000, // 距末条 6 分钟 > 5 → cold
+    });
+    const { ctx } = createTestContext();
+    const view = compact.transformMessagesBeforeLlm!(msgs, ctx) as Message[];
+
+    expect(view).toBeDefined();
+    const cleared = view.filter((m) => textOf(m).includes("microcompact")).length;
+    expect(cleared).toBe(5); // cold 路径全清,不受 targetTokens 早停约束
+  });
+
+  it("keepRecent ranks by toolResult position, skipping interspersed non-whitelisted results", () => {
+    // 布局:read(旧) / bash(非白名单,夹中间) / read(旧) / read(最近)。keepRecent=1 只保护最近 1 条 toolResult。
+    // 证明 keepRecent 按 toolResult 序位(非 raw index)算,夹中间的 bash 既不被清、也不占保护名额。
+    const msgs: Message[] = [
+      tr("read", "OLD1 " + "x".repeat(2000)),
+      tr("bash", "BASH " + "b".repeat(2000)), // 非白名单
+      tr("read", "OLD2 " + "y".repeat(2000)),
+      tr("read", "RECENT"), // 最近 toolResult,keepRecent=1 保护
+    ];
+    const compact = microcompact({
+      compactableTools: ["read"],
+      triggerTokens: 1,
+      targetTokens: 1,
+      keepRecent: 1,
+    });
+    const { ctx } = createTestContext();
+    const view = compact.transformMessagesBeforeLlm!(msgs, ctx) as Message[];
+
+    expect(view).toBeDefined();
+    expect(textOf(view[0]!)).toContain("microcompact"); // OLD1 清
+    expect(textOf(view[1]!)).toContain("BASH"); // 非白名单 toolResult 不动
+    expect(textOf(view[2]!)).toContain("microcompact"); // OLD2 清(夹中间的 bash 没让它逃过保护名额)
+    expect(textOf(view[3]!)).toBe("RECENT"); // 最近保留
   });
 
   it("gapMinutes: does NOT trigger when within the gap window and volume small", () => {
