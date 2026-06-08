@@ -15,6 +15,7 @@
  * 借鉴 Claude Code `forkedAgent` + `CacheSafeParams`（[08-claude-code-lessons](docs/08-claude-code-lessons.md) §4.1）。
  */
 
+import { filterIncompleteToolCalls } from "@harness-pi/core";
 import type { AgentSession, Message, RunSummary } from "@harness-pi/core";
 
 export interface ForkOptions {
@@ -53,9 +54,11 @@ export async function forkSession(
   factory: (initialMessages: Message[]) => AgentSession,
   opts: ForkOptions = {},
 ): Promise<ForkResult> {
-  // 拷贝 snapshot —— 父 session 不会被 child 影响（initialMessages 是 [...父messages] copy）
+  // 拷贝 snapshot —— 父 session 不会被 child 影响（initialMessages 是 [...父messages] copy）。
+  // 过滤悬挂的 tool 调用：父若在 tool batch 中途被 fork，snapshot 会含「无 result 的 toolCall」，
+  // 直接当子 initialMessages 喂 pi-ai 会 400。filterIncompleteToolCalls 也始终返回 copy。
   const snapshot = parent.snapshot();
-  const child = factory(snapshot.messages);
+  const child = factory(filterIncompleteToolCalls(snapshot.messages));
 
   // M4：防 self-fork。factory 必须返回新的 AgentSession 实例，否则 child.run() 会
   // 直接 mutate 父，破坏 fork 语义。

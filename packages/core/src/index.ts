@@ -47,7 +47,11 @@ export { defaultIsContextOverflow } from "./context-overflow.js";
 
 // ─────────── Tool 形态 + message helpers ───────────
 export type { HarnessTool } from "./types.js";
-export { createUserMessage, createAttachmentMessage } from "./types.js";
+export {
+  createUserMessage,
+  createAttachmentMessage,
+  filterIncompleteToolCalls,
+} from "./types.js";
 
 // ─────────── Session persistence (协议在内核，落盘实现在 adapter) ───────────
 export { MemorySessionStore } from "./session-store.js";
