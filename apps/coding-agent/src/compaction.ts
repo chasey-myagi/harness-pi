@@ -6,10 +6,16 @@
  * `summarize(earlyMessages) => string`，用 pi-ai 的 complete() 跑一次无工具的总结调用。
  */
 
-import { complete, type Context } from "@earendil-works/pi-ai";
+import {
+  complete,
+  type Context,
+  type ProviderStreamOptions,
+} from "@earendil-works/pi-ai";
 import {
   createUserMessage,
+  resolveLlmOptions,
   type Api,
+  type LlmOptions,
   type Message,
   type Model,
 } from "@harness-pi/core";
@@ -47,7 +53,7 @@ function assistantText(message: { content: Message["content"] }): string {
  */
 export function createModelSummarizer(
   model: Model<Api>,
-  llmOptions?: Record<string, unknown>,
+  llmOptions?: LlmOptions,
 ): (earlyMessages: Message[], signal?: AbortSignal) => Promise<string> {
   return async (earlyMessages, signal) => {
     const context: Context = {
@@ -55,7 +61,7 @@ export function createModelSummarizer(
       tools: [],
       systemPrompt: SUMMARY_SYSTEM,
     };
-    const options: Record<string, unknown> = { ...llmOptions };
+    const options: ProviderStreamOptions = resolveLlmOptions(llmOptions);
     if (signal) options.signal = signal;
     const result = await complete(model, context, options);
     const text = assistantText(result);

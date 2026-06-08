@@ -4,6 +4,7 @@ import {
   type Api,
   type HarnessTool,
   type Hook,
+  type LlmOptions,
   type Model,
   type RunSummary,
   type SessionEvent,
@@ -72,7 +73,7 @@ export interface CreateCodingAgentOptions {
   metricsFile?: string;
   systemPrompt?: string;
   toolsOptions?: ToolsOptions;
-  llmOptions?: Record<string, unknown>;
+  llmOptions?: LlmOptions;
   maxTurns?: number;
   costModel?: CostTrackerOptions["costModel"];
   /**
@@ -141,7 +142,7 @@ export interface RunAgentPromptOptions {
 
 export interface ResolvedModelRuntime {
   model: Model<Api>;
-  llmOptions?: Record<string, unknown>;
+  llmOptions?: LlmOptions;
 }
 
 const DEFAULT_SYSTEM_PROMPT = [
@@ -596,7 +597,7 @@ function cloneToolStats(stats: ToolStats): ToolStats {
 
 function createDashScopeCostAccumulator(
   model: Model<Api>,
-  llmOptions: Record<string, unknown> | undefined,
+  llmOptions: LlmOptions | undefined,
 ):
   | {
       hook: Hook;
@@ -607,7 +608,9 @@ function createDashScopeCostAccumulator(
 
   let total = 0;
   let source: string | undefined;
-  const thinking = typeof llmOptions?.["reasoningEffort"] === "string";
+  // reasoningEffort 是 openai-completions 的 provider 专属选项，经 LlmOptions.providerExtras 透传。
+  const thinking =
+    typeof llmOptions?.providerExtras?.["reasoningEffort"] === "string";
   return {
     hook: {
       name: "dashscope-cost-estimator",

@@ -116,7 +116,7 @@ function assistantText(msg: { content: unknown } | undefined): string {
 export function makeReadOnlySubAgentSpawner(
   cwd: string,
   model: ReturnType<typeof resolveModelRuntime>["model"],
-  llmOptions: Record<string, unknown> | undefined,
+  llmOptions: ReturnType<typeof resolveModelRuntime>["llmOptions"],
 ): (task: string, signal: AbortSignal) => Promise<{ ok: boolean; text: string }> {
   return async (task, signal) => {
     const subOpts: Parameters<typeof createCodingAgent>[0] = {

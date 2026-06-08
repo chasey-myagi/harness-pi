@@ -67,6 +67,10 @@ export type {
   LiveEvent,
 } from "./session.js";
 
+// ─────────── LLM seam（自定义 Model 构造 + typed llmOptions，收口 pi-ai 公共面） ───────────
+export { makeOpenAICompatibleModel, resolveLlmOptions } from "./llm-model.js";
+export type { OpenAICompatibleModelSpec, LlmOptions } from "./llm-model.js";
+
 // ─────────── HookContextImpl 实例类型（plugin / controller 偶尔需要） ───────────
 export type { HookContextImpl, HookContextDeps } from "./context.js";
 // 注意：getKernelInternals / KERNEL_INTERNALS_BAG 故意不导出——它们是 kernel-internal API。
@@ -85,6 +89,7 @@ export type {
   Usage,
   StopReason,
   Context,
+  OpenAICompletionsCompat,
 } from "@earendil-works/pi-ai";
 export { Type } from "@earendil-works/pi-ai";
 export type { Static, TSchema } from "@earendil-works/pi-ai";

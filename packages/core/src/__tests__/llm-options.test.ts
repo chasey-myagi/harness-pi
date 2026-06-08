@@ -74,8 +74,9 @@ describe("AgentSession llmOptions", () => {
         tools: [],
         llmOptions: {
           temperature: 0.2,
-          customOption: "kept",
-          signal: callerSignal,
+          // provider 专属 / 非 StreamOptions 键走 providerExtras 逃生口；摊平后回到顶层透传。
+          // signal 经 providerExtras「偷传」也应被 kernel 覆盖（文档承诺的不变量）。
+          providerExtras: { customOption: "kept", signal: callerSignal },
         },
       });
 
