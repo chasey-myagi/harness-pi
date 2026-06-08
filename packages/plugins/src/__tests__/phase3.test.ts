@@ -4,7 +4,13 @@
  */
 
 import { describe, it, expect } from "vitest";
-import { AgentSession, Type, type HarnessTool } from "@harness-pi/core";
+import {
+  AgentSession,
+  Type,
+  createUserMessage,
+  type HarnessTool,
+  type Message,
+} from "@harness-pi/core";
 import { createFakeModel } from "@harness-pi/core/testing";
 import { costTracker, getCostStats } from "../cost-tracker.js";
 import { forkSession, forkSessionAll } from "../controllers/fork-session.js";
@@ -145,6 +151,56 @@ describe("Phase 3: forkSession controller", () => {
     expect(parent.messages.length).toBe(parentBeforeFork);
     // 子拿到父历史 + 自己新增
     expect(result.messages.length).toBeGreaterThan(parentBeforeFork);
+    expect(result.summary.reason).toBe("done");
+    parentFake.teardown();
+    childFake.teardown();
+  });
+
+  it("fork 过滤父 snapshot 里悬挂的 tool_use（S1 真 bug）", async () => {
+    // 父 snapshot 停在 tool batch 中途：assistant 发了 toolCall 但还没 toolResult。
+    // 裸拷这段当子 initialMessages 喂 pi-ai 会 400；forkSession 必须先过滤掉。
+    const hangingAssistant = {
+      role: "assistant",
+      content: [{ type: "toolCall", id: "tc1", name: "read", arguments: {} }],
+      timestamp: 0,
+    } as unknown as Message;
+    const parentFake = createFakeModel([
+      { content: [{ type: "text", text: "unused" }] },
+    ]);
+    const parent = new AgentSession({
+      model: parentFake,
+      tools: [],
+      initialMessages: [createUserMessage("hi"), hangingAssistant],
+    });
+
+    let received: Message[] | undefined;
+    const childFake = createFakeModel([
+      { content: [{ type: "text", text: "child done" }] },
+    ]);
+    const result = await forkSession(
+      parent,
+      (init) => {
+        received = init;
+        return new AgentSession({
+          model: childFake,
+          tools: [],
+          initialMessages: init,
+        });
+      },
+      { prompt: "child prompt" },
+    );
+
+    // factory 收到的 init 不含任何悬挂 toolCall（fake model 不校验消息，故断言过滤本身）
+    const hasHangingToolCall = (received ?? []).some(
+      (m) =>
+        m.role === "assistant" &&
+        m.content.some(
+          (b: { type: string }) => b.type === "toolCall",
+        ),
+    );
+    expect(hasHangingToolCall).toBe(false);
+    // 但 user 历史保留
+    expect((received ?? []).some((m) => m.role === "user")).toBe(true);
     expect(result.summary.reason).toBe("done");
     parentFake.teardown();
     childFake.teardown();
