@@ -44,8 +44,17 @@ export type { LeaseDecisionOptions } from "./lease-decision.js";
 export { compactSummarize } from "./compact-summarize.js";
 export type { CompactSummarizeOptions } from "./compact-summarize.js";
 
-export { autoCompaction, estimateTokensByChars } from "./auto-compaction.js";
-export type { AutoCompactionOptions } from "./auto-compaction.js";
+export {
+  autoCompaction,
+  estimateTokensByChars,
+  estimateRequestTokens,
+  defaultTokenCounter,
+} from "./auto-compaction.js";
+export type {
+  AutoCompactionOptions,
+  RequestTokenInput,
+  TokenCounter,
+} from "./auto-compaction.js";
 
 export { microcompact } from "./microcompact.js";
 export type { MicrocompactOptions } from "./microcompact.js";

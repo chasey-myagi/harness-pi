@@ -327,6 +327,17 @@ export class AgentSession {
       sessionId: this.id,
       model: Object.freeze({ id: this.model.id, provider: this.model.provider }),
       toolNames: Object.freeze(this.tools.map((t) => t.name)),
+      // 只暴露 pi-ai Tool 三字段（与每请求随发的 piTools 同形），冻结每个元素防 plugin 改 schema。
+      tools: Object.freeze(
+        this.tools.map((t) =>
+          Object.freeze({
+            name: t.name,
+            description: t.description,
+            parameters: t.parameters,
+          }),
+        ),
+      ),
+      systemPrompt: this.systemPrompt,
       maxTurns: this.maxTurns,
       maxContinuations: this.maxContinuations,
     });
