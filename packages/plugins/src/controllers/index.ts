@@ -48,6 +48,12 @@ export type {
   CompactRestartResult,
 } from "./compact-restart-fresh.js";
 
+export { CompactResumeFromBoundary } from "./compact-resume-from-boundary.js";
+export type {
+  CompactResumeFromBoundaryOptions,
+  CompactResumeResult,
+} from "./compact-resume-from-boundary.js";
+
 export { subAgentTool, routedSubAgentTool } from "./sub-agent-tool.js";
 export type {
   SubAgentToolOptions,
