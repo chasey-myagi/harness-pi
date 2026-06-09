@@ -133,7 +133,8 @@ describe("Event Bus · live token deltas via on()", () => {
 
   it("on a runtime LLM error (error EVENT, not a sync throw) message_end still carries the error message", async () => {
     // Real providers surface runtime errors as an `error` stream event → result() RESOLVES to a
-    // stopReason="error" message (does NOT reject) → success path → message_end carries that message.
+    // stopReason="error" message (does NOT reject). The kernel emits message_end with that message
+    // BEFORE escalating the turn to reason="error" (#53), so message_end still carries it.
     // Downstream must judge failure by message.stopReason, not by message presence.
     const fake = createFakeModel([{ content: [], throwError: new Error("api 500") }]);
     const session = new AgentSession({ model: fake, tools: [], consoleSink: () => {} });

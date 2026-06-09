@@ -116,20 +116,38 @@ describe("RunSummary as typed terminal result", () => {
     fake.teardown();
   });
 
-  it("provider-reported error (error EVENT, resolves) lands the error message as lastMessage, with reason='done'", async () => {
-    // distinct from streamThrows (sync throw -> catch -> reason='error', no lastMessage). Here
-    // result() RESOLVES a stopReason='error' assistant which IS pushed, so lastMessage is present.
-    // PINNED CONTRACT: this is complete()-equivalent — the loop only reports reason='error' on a
-    // genuine THROW; a provider error surfaced as a resolved message is a normal turn (stopReason
-    // != toolUse) => reason='done'. The failure on THIS path is signaled by lastMessage.stopReason,
-    // not by summary.reason (matches RunSummary.lastMessage doc).
+  it("escalates a resolved non-overflow error-stopReason to reason='error' and fires onError (#53)", async () => {
+    // Two LLM failure modes are now UNIFIED:
+    //   - streamThrows (sync throw) -> catch -> reason='error', no lastMessage.
+    //   - error EVENT: result() RESOLVES a stopReason='error' assistant (IS pushed, so lastMessage
+    //     is present). #53: this used to be silently treated as a normal turn => reason='done',
+    //     which let headless callers mistake auth/rate-limit failures for success. Now it escalates.
+    // (Overflow-classified errors still flow through onContextOverflow and keep reason='done' — see
+    // context-overflow.test.ts; THIS is the non-overflow error path.)
     const fake = createFakeModel([{ content: [], throwError: new Error("api 500") }]);
-    const session = new AgentSession({ model: fake, tools: [], consoleSink: () => {} });
+    const errs: Array<{ phase: string; message: string }> = [];
+    const session = new AgentSession({
+      model: fake,
+      tools: [],
+      consoleSink: () => {},
+      hooks: [
+        {
+          name: "err-watch",
+          onError: (i) => {
+            errs.push({ phase: i.phase, message: i.err.message });
+          },
+        },
+      ],
+    });
     const summary = await session.run("hi");
+    expect(summary.reason).toBe("error"); // #53: no longer silently 'done'
+    expect(summary.error?.message).toContain("api 500"); // errorMessage surfaced in RunSummary.error
+    // The error message still lands as lastMessage too (resolved + pushed before escalation).
     expect(summary.lastMessage).toBeDefined();
     expect(summary.lastMessage?.stopReason).toBe("error");
     expect(summary.stopReason).toBe("error");
-    expect(summary.reason).toBe("done"); // NOT 'error' — failure is in lastMessage.stopReason here
+    // onError fired exactly once with phase='llm' (observability; mirrors the sync-throw path).
+    expect(errs).toEqual([{ phase: "llm", message: "api 500" }]);
     fake.teardown();
   });
 

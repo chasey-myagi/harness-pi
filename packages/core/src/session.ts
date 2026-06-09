@@ -1326,7 +1326,9 @@ export class AgentSession {
     //     API error 报回，pi-ai 转成 error 流事件 → result() resolve 出 stopReason==="error"）。
     // 内核只「发事件」，不再当普通 done 静默吞掉；压缩/重启策略全在插件（ctx.abort("compaction:...")
     // → compactRestartFresh 重启 fresh，或 transformMessagesBeforeLlm 改写消息）。注意 fire 不改控制流：
-    // 没策略 abort 时这条 length/error assistant 仍以 reason:"done" 收尾。connection/config 类 sync-throw
+    // 没策略 abort 时这条 length / overflow-error assistant 仍以 reason:"done" 收尾（契约不变）。
+    // 但**非 overflow** 的 error-stopReason（坏 apiKey 401 / 限流 / 其它 provider 错误）会被下面的
+    // else-if 提级为 reason:"error"（#53），不再静默成 done。connection/config 类 sync-throw
     //（provider 未注册）走上面的 catch，不是 overflow，不在此分类。
     const overflow = this._detectOverflow(assistant);
     if (overflow) {
@@ -1336,6 +1338,17 @@ export class AgentSession {
         this._ctx,
       );
       this._flushSystemMessages(coOut.systemMessages);
+    } else if (assistant.stopReason === "error") {
+      // 非 overflow 的 resolved error-stopReason（#53）：此前因「无 tool call」被 turn loop 当正常完成
+      // → reason="done"，headless 调用方分不清硬错误与成功。修复：与同步抛路径（上面的 catch）一致——
+      // fire onError（可观测，插件可记录/决策；observe-only 不改控制流）后 throw，经 _runOneTurn 既有
+      // catch 提级 reason="error" + summary.error。两种 LLM 失败模式自此统一。assistant 已入 messages
+      //（lastMessage 仍带 errorMessage），message_end 也已发，故抛在此处不破坏 live 事件配对。
+      const err = new Error(
+        assistant.errorMessage ?? 'LLM call ended with stopReason="error"',
+      );
+      await this._dispatcher.fireError({ phase: "llm", err }, this._ctx);
+      throw err;
     }
 
     return assistant;
