@@ -113,3 +113,9 @@ export type { TokenBudgetOptions } from "./token-budget.js";
 
 export { repeatedCallGuard } from "./repeated-call-guard.js";
 export type { RepeatedCallGuardOptions } from "./repeated-call-guard.js";
+
+export { deferredTools } from "./deferred-tools.js";
+export type { DeferredToolsOptions } from "./deferred-tools.js";
+
+export { toolSearch } from "./tool-search.js";
+export type { ToolSearchOptions } from "./tool-search.js";
