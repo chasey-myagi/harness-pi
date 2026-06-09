@@ -10,8 +10,11 @@
  * seed 成 `alwaysListed`。当前 turn 实际 listing 的子集顺手写进 `"deferred.activeListing"`，
  * 给 autoCompaction 的 token 估算读（有 deferred 就估激活子集，没有退回全集）。
  *
- * **必须排在 autoCompaction 之前**（用 `requires` 声明）——否则 autoCompaction 读不到
- * 本 turn 写入的 `deferred.activeListing`。
+ * **估算联动有结构性的一 turn 滞后，与 hook 注册顺序无关**：autoCompaction 在
+ * `transformMessagesBeforeLlm` 读 `deferred.activeListing`，本 hook 在 `transformToolsBeforeLlm`
+ * 写它——内核固定 messages-pipe 先于 tools-pipe（且二者不同 method，重排注册顺序也改不了），
+ * 故 autoCompaction 读到的是**上一 turn**写入的激活子集；turn-0 读到 undefined → 退回全集
+ * （保守高估，安全侧：宁早压勿晚）。对压缩阈值无害，无需也无法靠排序消除。
  */
 
 import type { Hook, Tool } from "@harness-pi/core";
@@ -49,10 +52,8 @@ export function deferredTools(opts: DeferredToolsOptions): Hook {
 
   return {
     name: "deferredTools",
-    // 软依赖：autoCompaction 的 token 估算会读 deferred.activeListing（激活子集），缺它也能独立工作。
-    // 两者都挂时，deferredTools 应排在 autoCompaction **之前**注册，让估算口径与本 turn listing 对齐。
-    // 用 prefers（不发 warning，opt-in 行为不受影响），与 tokenBudget→cost-tracker 同例。
-    prefers: ["autoCompaction"],
+    // 不声明对 autoCompaction 的依赖：二者在不同 pipe method（tools vs messages），注册顺序对其
+    // 交互无影响（见文件头「结构性一 turn 滞后」）。autoCompaction 缺席时也独立工作（opt-in）。
 
     onSessionStart(_input, ctx) {
       ctx.state.set(KEY_ACTIVATED, new Set(opts.alwaysListed ?? []));
