@@ -123,6 +123,73 @@ describe("read tool", () => {
     expect(text(result)).toBe("outside");
   });
 
+  it("behaves identically to default truncation when maxTokens is unset", async () => {
+    await writeFile(path.join(dir, "notes.txt"), ["one", "two", "three"].join("\n"));
+    const withoutCap = await runTool(createReadTool(dir), { path: "notes.txt" });
+    expect(text(withoutCap)).toBe("one\ntwo\nthree");
+    expect(withoutCap.details).toBeUndefined();
+  });
+
+  it("returns content when estimated tokens are within maxTokens", async () => {
+    await writeFile(path.join(dir, "notes.txt"), "x".repeat(40));
+    // 40 bytes / 4 = 10 estimated tokens, under the cap.
+    const result = await runTool(createReadTool(dir), {
+      path: "notes.txt",
+      maxTokens: 100,
+    });
+    expect(text(result)).toBe("x".repeat(40));
+  });
+
+  it("returns a short error guiding offset+limit when maxTokens is exceeded", async () => {
+    await writeFile(path.join(dir, "big.txt"), "x".repeat(4_000));
+    // 4000 bytes / 4 = 1000 estimated tokens, over the cap of 100.
+    const promise = runTool(createReadTool(dir), {
+      path: "big.txt",
+      maxTokens: 100,
+    });
+    await expect(promise).rejects.toThrow(/exceeds maxTokens=100/);
+    await expect(promise).rejects.toThrow(/~1000 tokens/);
+    await expect(promise).rejects.toThrow(/offset\+limit/i);
+    const err = await promise.catch((e: Error) => e);
+    expect(Buffer.byteLength((err as Error).message, "utf8")).toBeLessThan(200);
+    // Does not leak truncated file content into the error message.
+    expect((err as Error).message).not.toContain("xxxx");
+  });
+
+  it("estimates denser bytesPerToken for json/jsonl than other extensions", async () => {
+    const payload = "x".repeat(300);
+    await writeFile(path.join(dir, "data.json"), payload);
+    await writeFile(path.join(dir, "data.txt"), payload);
+    // 300 bytes: json -> ceil(300/2)=150 tokens, txt -> ceil(300/4)=75 tokens.
+    // A cap of 100 trips the .json file but not the .txt file.
+    await expect(
+      runTool(createReadTool(dir), { path: "data.json", maxTokens: 100 }),
+    ).rejects.toThrow(/~150 tokens/);
+    const txtResult = await runTool(createReadTool(dir), {
+      path: "data.txt",
+      maxTokens: 100,
+    });
+    expect(text(txtResult)).toBe(payload);
+  });
+
+  it("estimates tokens on the offset+limit slice so a smaller range succeeds", async () => {
+    await writeFile(
+      path.join(dir, "lines.txt"),
+      Array.from({ length: 20 }, () => "x".repeat(40)).join("\n"),
+    );
+    // Whole file ~20*41/4 ≈ 205 tokens > 100, but a 5-line slice is well under.
+    await expect(
+      runTool(createReadTool(dir), { path: "lines.txt", maxTokens: 100 }),
+    ).rejects.toThrow(/exceeds maxTokens=100/);
+    const sliced = await runTool(createReadTool(dir), {
+      path: "lines.txt",
+      offset: 1,
+      limit: 5,
+      maxTokens: 100,
+    });
+    expect(text(sliced)).toContain("xxxx");
+  });
+
   it("rejects symlink escapes and bounded default exports reject outside cwd", async () => {
     const outside = path.join(path.dirname(dir), `${path.basename(dir)}-secret.txt`);
     await writeFile(outside, "secret");
