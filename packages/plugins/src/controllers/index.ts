@@ -51,6 +51,9 @@ export type {
 export { subAgentTool } from "./sub-agent-tool.js";
 export type { SubAgentToolOptions } from "./sub-agent-tool.js";
 
+export { persistCompactionBoundary } from "./persist-compaction-boundary.js";
+export type { PersistCompactionBoundaryOptions } from "./persist-compaction-boundary.js";
+
 export { GapExplorer } from "./gap-explorer.js";
 export type {
   Gap,
