@@ -13,8 +13,7 @@
 
 import { Type } from "@harness-pi/core";
 import type { HarnessTool, HookContext, ToolExecResult } from "@harness-pi/core";
-
-const KEY_ACTIVATED = "deferred.activated" as const;
+import { KEY_ACTIVATED } from "./deferred-tools.js";
 
 export interface ToolSearchOptions {
   /**
