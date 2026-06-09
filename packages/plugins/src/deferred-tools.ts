@@ -27,8 +27,10 @@ declare module "@harness-pi/core" {
   }
 }
 
-// `as const` 保留字面类型，让 TypedStateMap 走 typed overload 而不是 string fallback
-const KEY_ACTIVATED = "deferred.activated" as const;
+// `as const` 保留字面类型，让 TypedStateMap 走 typed overload 而不是 string fallback。
+// `KEY_ACTIVATED` 导出供 toolSearch / skills 复用同一激活集（单一 key 真相源，
+// 别在别处重复 declare module augmentation）。
+export const KEY_ACTIVATED = "deferred.activated" as const;
 const KEY_LISTING = "deferred.activeListing" as const;
 
 export interface DeferredToolsOptions {
