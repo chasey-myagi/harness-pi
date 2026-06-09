@@ -377,23 +377,20 @@ describe("routedSubAgentTool (#59)", () => {
     bFake.teardown();
   });
 
-  it("passes the task + parent ctx (and spec maxTurns) to the routed sessionFactory", async () => {
+  it("passes the task + parent ctx to the routed sessionFactory", async () => {
     const subFake = createFakeModel([{ content: [{ type: "text", text: "ok" }], stopReason: "stop" }]);
     let gotTask = "";
     let gotCtx: unknown = null;
-    let gotMaxTurns: number | undefined = -1;
     const { ctx } = createTestContext();
     const tool = routedSubAgentTool({
       specs: [
         {
           type: "x",
           whenToUse: "x",
-          maxTurns: 7,
-          sessionFactory: (task, c, maxTurns) => {
+          sessionFactory: (task, c) => {
             gotTask = task;
             gotCtx = c;
-            gotMaxTurns = maxTurns;
-            return new AgentSession({ model: subFake, tools: [], ...(maxTurns ? { maxTurns } : {}) });
+            return new AgentSession({ model: subFake, tools: [] });
           },
         },
       ],
@@ -401,8 +398,24 @@ describe("routedSubAgentTool (#59)", () => {
     await tool.execute({ agent_type: "x", task: "hello" }, ctx, new AbortController().signal);
     expect(gotTask).toBe("hello");
     expect(gotCtx).toBe(ctx);
-    expect(gotMaxTurns).toBe(7); // spec.maxTurns 透传给工厂第三参
     subFake.teardown();
+  });
+
+  it("honors a custom tool name and description prefix (whenToUse folded after it)", async () => {
+    const tool = routedSubAgentTool({
+      name: "router",
+      description: "Route to a specialist.",
+      specs: [
+        { type: "alpha", whenToUse: "alpha tasks", sessionFactory: () => new AgentSession({ model: createFakeModel([]), tools: [] }) },
+      ],
+    });
+    expect(tool.name).toBe("router");
+    // 自定义前缀在前，各 spec 的 whenToUse 折叠在 "Available agent types:" 之后。
+    const prefixAt = tool.description.indexOf("Route to a specialist.");
+    const typesAt = tool.description.indexOf("Available agent types:");
+    expect(prefixAt).toBeGreaterThanOrEqual(0);
+    expect(typesAt).toBeGreaterThan(prefixAt);
+    expect(tool.description).toContain("alpha: alpha tasks");
   });
 
   it("throws a clear error on an unknown agent_type (fail-loud, no crash)", async () => {
