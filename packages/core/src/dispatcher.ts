@@ -18,7 +18,7 @@
  *   - 如果 dashboard 按 sink call 计数，两路径会差一截；按字节数 / 行数计就一致。
  */
 
-import type { ToolCall } from "@earendil-works/pi-ai";
+import type { Tool, ToolCall } from "@earendil-works/pi-ai";
 import type {
   ContextOverflowInput,
   ContinuationCheckInput,
@@ -73,6 +73,7 @@ const DECISION_METHODS = new Set([
 const PIPE_METHODS = new Set([
   "transformSystemPromptBeforeLlm",
   "transformMessagesBeforeLlm",
+  "transformToolsBeforeLlm",
 ] as const);
 
 /* ────────────── Decision outcome ────────────── */
@@ -351,6 +352,24 @@ export class HookDispatcher {
       const inv = await this._invokeSafe<Message[] | void>(
         h,
         "transformMessagesBeforeLlm",
+        [v, ctx],
+        "pipe",
+      );
+      if (Array.isArray(inv.value)) v = inv.value;
+    }
+    return v;
+  }
+
+  async firePipeTools(
+    value: Tool[],
+    ctx: HookContext,
+  ): Promise<Tool[]> {
+    let v = value;
+    for (const h of this.hooks) {
+      if (typeof h.transformToolsBeforeLlm !== "function") continue;
+      const inv = await this._invokeSafe<Tool[] | void>(
+        h,
+        "transformToolsBeforeLlm",
         [v, ctx],
         "pipe",
       );
