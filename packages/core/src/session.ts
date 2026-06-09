@@ -322,7 +322,9 @@ export class AgentSession {
 
     this._abortCtrl = new AbortController();
     // tools 是构造期固定（`use()` 只允许在 idle 加 hooks，不改 tools / model / maxTurns）。
-    // 整个 configView 包括 nested model 对象都 deep-freeze，runtime 拒绝任何 plugin 修改。
+    // Object.freeze 是**浅冻**：configView 顶层 + model + toolNames 数组 + tools 数组及其每个元素都冻结，
+    // plugin 不能替换字段/增删元素;但 tool.parameters 是 TypeBox schema 对象的**引用**(未深冻)——估算只读
+    // 不写,与 model 的扁平冻结粒度一致,不构成新风险面。
     const configView: SessionConfigView = Object.freeze({
       sessionId: this.id,
       model: Object.freeze({ id: this.model.id, provider: this.model.provider }),
