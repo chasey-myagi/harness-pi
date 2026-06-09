@@ -142,7 +142,7 @@ export function estimateTokensByChars(messages: Message[]): number {
 }
 
 /** 每条消息的固定格式开销（role / 分隔符 / 模板包装），主流 chat 模板约 3–4 tok/消息，取保守 4。 */
-const PER_MESSAGE_OVERHEAD = 4;
+export const PER_MESSAGE_OVERHEAD = 4;
 
 /** {@link estimateRequestTokens} 的输入：一次 LLM 请求随发的三部分（tools / systemPrompt 每请求都发）。 */
 export interface RequestTokenInput {
@@ -268,7 +268,11 @@ export function autoCompaction(opts: AutoCompactionOptions): Hook {
         const contextWindow = ctx.config.model.contextWindow;
         if (contextWindow > 0) {
           const reserveForOutput = opts.reserveForOutput ?? Math.min(ctx.config.model.maxTokens, 4096);
-          threshold = contextWindow - reserveForOutput - safetyBuffer;
+          const w = contextWindow - reserveForOutput - safetyBuffer;
+          // 防 footgun:reserve+safetyBuffer >= contextWindow 时 w<=0,直接用会让 estimated(>=0)永远 > 阈值
+          // → 每 turn 都压缩(过度激进)。视为「算不出有意义阈值」→ 本 turn no-op(下面 threshold===undefined 兜底)。
+          // 这种 misconfig 需 window < reserve(本就荒谬),no-op 比每 turn 空压更安全、更可诊断。
+          if (w > 0) threshold = w;
         }
       }
       if (threshold === undefined) return undefined;
