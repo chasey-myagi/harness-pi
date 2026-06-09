@@ -313,7 +313,17 @@ export interface HookLogger {
  */
 export interface SessionConfigView {
   readonly sessionId: string;
-  readonly model: { id: string; provider: string };
+  /**
+   * 当前 model 的标识 + 有效窗口（X2 / #57）。`contextWindow` / `maxTokens` 取自 pi-ai `Model` 同名字段
+   * （`makeOpenAICompatibleModel` / registry 都填）——**值来自调用方 Model，内核不硬编 per-model 表、不解析 id**。
+   * autoCompaction 据此算「按有效窗口触发」的绝对阈值（`contextWindow − reserveForOutput − safetyBuffer`）。
+   */
+  readonly model: {
+    id: string;
+    provider: string;
+    contextWindow: number;
+    maxTokens: number;
+  };
   readonly toolNames: ReadonlyArray<string>;
   /**
    * 发给 LLM 的 tool schema（pi-ai `Tool` 形态 `{name, description, parameters}`，与每次请求随发的

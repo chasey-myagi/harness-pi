@@ -363,4 +363,179 @@ describe("autoCompaction", () => {
     expect(view).toBeDefined();
     expect(calls.length).toBeGreaterThan(0); // 注入的 counter 真的被调用
   });
+
+  // ───────────────── X2(#57): per-model 有效窗口 + 分层 buffer ─────────────────
+
+  const modelCfg = (contextWindow: number, maxTokens: number) => ({
+    model: { id: "m", provider: "p", contextWindow, maxTokens },
+  });
+
+  it("X2: window mode threshold = contextWindow − reserveForOutput − safetyBuffer", async () => {
+    // contextWindow=10000, reserveForOutput=4096(默认 min(maxTokens,4096)), safetyBuffer=500 → 阈值 5404。
+    let summarized = false;
+    const compact = autoCompaction({
+      // 不给 maxContextTokens → 走窗口路径
+      keepRecent: 1,
+      safetyBuffer: 500,
+      tokenCounter: { estimate: () => 5405 }, // 5404 < 5405 → 越界 → 触发
+      summarize: () => {
+        summarized = true;
+        return "RECAP";
+      },
+    });
+    const { ctx } = createTestContext({ config: modelCfg(10_000, 8000) }); // maxTokens=8000 → reserve=min(8000,4096)=4096
+    const view = await compact.transformMessagesBeforeLlm!(grow(3), ctx);
+    expect(view).toBeDefined();
+    expect(summarized).toBe(true);
+  });
+
+  it("X2: window mode does NOT trigger at or below the effective window", async () => {
+    // 阈值 = 10000 − 4096 − 0 = 5904。估算正好 = 5904（边界，<= 不触发）。
+    let calls = 0;
+    const compact = autoCompaction({
+      keepRecent: 1,
+      tokenCounter: { estimate: () => 5904 },
+      summarize: () => {
+        calls++;
+        return "S";
+      },
+    });
+    const { ctx } = createTestContext({ config: modelCfg(10_000, 4096) });
+    expect(await compact.transformMessagesBeforeLlm!(grow(5), ctx)).toBeUndefined();
+    expect(calls).toBe(0);
+
+    // 阈值 + 1 → 触发。
+    const compact2 = autoCompaction({
+      keepRecent: 1,
+      tokenCounter: { estimate: () => 5905 },
+      summarize: () => "S",
+    });
+    expect(await compact2.transformMessagesBeforeLlm!(grow(5), ctx)).toBeDefined();
+  });
+
+  it("X2: reserveForOutput / safetyBuffer overrides lower the effective window", async () => {
+    // 显式 reserveForOutput=1000, safetyBuffer=2000 → 阈值 = 10000 − 1000 − 2000 = 7000。
+    const compact = autoCompaction({
+      keepRecent: 1,
+      reserveForOutput: 1000,
+      safetyBuffer: 2000,
+      tokenCounter: { estimate: () => 7000 }, // == 阈值 → 不触发
+      summarize: () => "S",
+    });
+    const { ctx } = createTestContext({ config: modelCfg(10_000, 4096) });
+    expect(await compact.transformMessagesBeforeLlm!(grow(5), ctx)).toBeUndefined();
+
+    const compact2 = autoCompaction({
+      keepRecent: 1,
+      reserveForOutput: 1000,
+      safetyBuffer: 2000,
+      tokenCounter: { estimate: () => 7001 }, // 越界 1 → 触发
+      summarize: () => "S",
+    });
+    expect(await compact2.transformMessagesBeforeLlm!(grow(5), ctx)).toBeDefined();
+  });
+
+  it("X2: reserveForOutput defaults to min(model.maxTokens, 4096)", async () => {
+    // maxTokens=2000 < 4096 → reserve=2000 → 阈值 = 10000 − 2000 = 8000。
+    const compactSmall = autoCompaction({
+      keepRecent: 1,
+      tokenCounter: { estimate: () => 8001 },
+      summarize: () => "S",
+    });
+    const { ctx: ctxSmall } = createTestContext({ config: modelCfg(10_000, 2000) });
+    expect(await compactSmall.transformMessagesBeforeLlm!(grow(5), ctxSmall)).toBeDefined(); // 8001 > 8000
+
+    const compactSmall2 = autoCompaction({
+      keepRecent: 1,
+      tokenCounter: { estimate: () => 8000 },
+      summarize: () => "S",
+    });
+    expect(await compactSmall2.transformMessagesBeforeLlm!(grow(5), ctxSmall)).toBeUndefined(); // 8000 == 阈值
+
+    // maxTokens=100000 > 4096 → reserve 封顶 4096 → 阈值 = 10000 − 4096 = 5904。
+    const compactBig = autoCompaction({
+      keepRecent: 1,
+      tokenCounter: { estimate: () => 5905 },
+      summarize: () => "S",
+    });
+    const { ctx: ctxBig } = createTestContext({ config: modelCfg(10_000, 100_000) });
+    expect(await compactBig.transformMessagesBeforeLlm!(grow(5), ctxBig)).toBeDefined(); // 5905 > 5904
+  });
+
+  it("X2: explicit maxContextTokens takes priority over the window path (backward compat)", async () => {
+    // 即便 ctx 暴露了 contextWindow，给了 maxContextTokens 就走百分比路径，窗口路径被忽略。
+    // maxContextTokens=100, triggerRatio=1 → 阈值 100；窗口阈值会是 10000−4096=5904（若误用窗口路径则不触发）。
+    let summarized = false;
+    const compact = autoCompaction({
+      maxContextTokens: 100,
+      triggerRatio: 1,
+      keepRecent: 1,
+      tokenCounter: { estimate: () => 200 }, // > 100(百分比) 但 < 5904(窗口) → 只有走百分比才触发
+      summarize: () => {
+        summarized = true;
+        return "S";
+      },
+    });
+    const { ctx } = createTestContext({ config: modelCfg(10_000, 4096) });
+    const view = await compact.transformMessagesBeforeLlm!(grow(5), ctx);
+    expect(view).toBeDefined(); // 走了百分比路径
+    expect(summarized).toBe(true);
+  });
+
+  it("X2: contextWindow unavailable (0) and no maxContextTokens → no compaction (no threshold)", async () => {
+    let calls = 0;
+    const compact = autoCompaction({
+      keepRecent: 1,
+      tokenCounter: { estimate: () => 999_999 }, // 巨大，但算不出阈值
+      summarize: () => {
+        calls++;
+        return "S";
+      },
+    });
+    const { ctx } = createTestContext({ config: modelCfg(0, 0) }); // contextWindow=0
+    expect(await compact.transformMessagesBeforeLlm!(grow(5), ctx)).toBeUndefined();
+    expect(calls).toBe(0);
+  });
+
+  it("X2: rejects negative reserveForOutput / safetyBuffer; allows omitting maxContextTokens", () => {
+    expect(() =>
+      autoCompaction({ reserveForOutput: -1, summarize: () => "" }),
+    ).toThrow(/reserveForOutput/);
+    expect(() =>
+      autoCompaction({ safetyBuffer: -1, summarize: () => "" }),
+    ).toThrow(/safetyBuffer/);
+    // maxContextTokens 显式给 0 仍报错（区分「缺省」与「非法显式值」）。
+    expect(() => autoCompaction({ maxContextTokens: 0, summarize: () => "" })).toThrow(
+      /maxContextTokens/,
+    );
+    // 完全不给 maxContextTokens（窗口模式）→ 构造不报错。
+    expect(() => autoCompaction({ summarize: () => "" })).not.toThrow();
+  });
+
+  it("X2 end-to-end: window mode from a real session's model.contextWindow", async () => {
+    // fake model: contextWindow=200000, maxTokens=4096 → 阈值 = 200000 − 4096 = 195904。
+    // 注入一个超大 estimate(走 tokenCounter)，让请求体积越过窗口阈值 → 真 session 触发压缩。
+    const initial = [m("h1"), m("a1"), m("h2"), m("a2"), m("h3"), m("a3")]; // 6
+    const fake = createFakeModel([{ content: [{ type: "text", text: "ok" }], stopReason: "stop" }]);
+    const session = new AgentSession({
+      model: fake,
+      tools: [],
+      initialMessages: initial,
+      hooks: [
+        autoCompaction({
+          // 不给 maxContextTokens → 用 model.contextWindow
+          keepRecent: 2,
+          tokenCounter: { estimate: () => 200_000 }, // > 195904 → 触发
+          summarize: () => "RECAP",
+        }),
+      ],
+    });
+    await session.run("go");
+
+    const view = fake.getCalls()[0]!.messages;
+    expect(view.length).toBe(3); // [summary, "a3", "go"]
+    expect(textOf(view[0]!)).toContain("RECAP");
+    expect(session.messages.length).toBe(8); // full history intact
+    fake.teardown();
+  });
 });

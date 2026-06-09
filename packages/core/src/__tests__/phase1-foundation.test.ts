@@ -229,6 +229,23 @@ describe("Phase 1: ctx.config", () => {
     fake.teardown();
   });
 
+  it("config.model 暴露 contextWindow / maxTokens(X2 #57)— autoCompaction 据此算绝对阈值", async () => {
+    let captured: HookContext["config"] | null = null;
+    const probe: Hook = {
+      name: "probe",
+      onSessionStart(_input, ctx) {
+        captured = ctx.config;
+      },
+    };
+    // createFakeModel 的 Model 携带 contextWindow=200_000 / maxTokens=4096(testing.ts 固定值)。
+    const fake = createFakeModel([{ content: [{ type: "text", text: "done" }] }]);
+    const session = new AgentSession({ model: fake, tools: [], hooks: [probe] });
+    await session.run("go");
+    expect(captured!.model.contextWindow).toBe(200_000);
+    expect(captured!.model.maxTokens).toBe(4096);
+    fake.teardown();
+  });
+
   it("config.systemPrompt 默认空串(未配置时)— 估算不应误把 undefined 当内容", async () => {
     let captured: HookContext["config"] | null = null;
     const probe: Hook = {

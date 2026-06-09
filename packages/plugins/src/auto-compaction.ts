@@ -27,10 +27,31 @@ import { createUserMessage } from "@harness-pi/core";
 import type { Message, Tool } from "@earendil-works/pi-ai";
 
 export interface AutoCompactionOptions {
-  /** context token 预算（通常 = 模型上下文窗口，或你愿意用满的上限）。须 > 0。 */
-  maxContextTokens: number;
-  /** 触发比例：估算 tokens > `maxContextTokens * triggerRatio` 才压缩。默认 0.8，须 ∈ (0, 1]。 */
+  /**
+   * context token 预算（百分比触发路径）。须 > 0。
+   *
+   * **触发路径优先级（X2 / #57）**：
+   *   - 显式给了 `maxContextTokens` → 永远走百分比路径 `> maxContextTokens * triggerRatio`（尊重调用方的显式上限，
+   *     与旧行为一致；现有测试多走此路径）。
+   *   - 未给 `maxContextTokens`、但 `ctx.config.model.contextWindow > 0` → 走**绝对窗口路径**
+   *     `> contextWindow − reserveForOutput − safetyBuffer`（X2 的有效窗口阈值，更贴近真实窗口压力）。
+   *   - 两者都不可得（无 maxContextTokens 且 contextWindow 为 0/缺）→ 算不出阈值，本 turn 不压缩
+   *     （contextWindow 是运行时值、构造期无从校验，故退化为 no-op 而非构造期报错）。
+   *
+   * 即：**显式 maxContextTokens 压过窗口路径**；窗口路径是「没显式上限时用模型自带窗口」的兜底主路。
+   */
+  maxContextTokens?: number;
+  /** 触发比例（百分比路径）：估算 tokens > `maxContextTokens * triggerRatio` 才压缩。默认 0.8，须 ∈ (0, 1]。 */
   triggerRatio?: number;
+  /**
+   * 窗口路径（X2 / #57）给模型输出 + summary/续答预留的 token 数（从 contextWindow 里扣掉）。
+   * 默认 `Math.min(model.maxTokens, 4096)`——既不超模型实际能输出的上限、又给个合理保底。须 ≥ 0。
+   */
+  reserveForOutput?: number;
+  /**
+   * 窗口路径（X2 / #57）的绝对安全缓冲（再从 contextWindow 里多扣一截，吸收估算误差）。默认 0，须 ≥ 0。
+   */
+  safetyBuffer?: number;
   /** 压缩后原样保留的最近消息条数（recent tail）。默认 6，须 ≥ 1。 */
   keepRecent?: number;
   /** 把一批早期消息总结成文本（可 async / 调 LLM）——与 compactSummarize 同契约。 */
@@ -200,7 +221,8 @@ export const defaultTokenCounter: TokenCounter = {
  *    每个 session 各 `autoCompaction(...)` 一次。
  */
 export function autoCompaction(opts: AutoCompactionOptions): Hook {
-  if (!(opts.maxContextTokens > 0)) {
+  // maxContextTokens 可选（X2）：给了就走百分比路径(并须 > 0)；不给则走窗口路径(阈值来自 ctx.config.model)。
+  if (opts.maxContextTokens !== undefined && !(opts.maxContextTokens > 0)) {
     throw new Error("autoCompaction: maxContextTokens must be > 0");
   }
   const triggerRatio = opts.triggerRatio ?? 0.8;
@@ -215,8 +237,17 @@ export function autoCompaction(opts: AutoCompactionOptions): Hook {
   if (resummarizeEvery < 1) {
     throw new Error("autoCompaction: resummarizeEvery must be >= 1");
   }
+  if (opts.reserveForOutput !== undefined && opts.reserveForOutput < 0) {
+    throw new Error("autoCompaction: reserveForOutput must be >= 0");
+  }
+  if (opts.safetyBuffer !== undefined && opts.safetyBuffer < 0) {
+    throw new Error("autoCompaction: safetyBuffer must be >= 0");
+  }
   const counter = opts.tokenCounter ?? defaultTokenCounter;
-  const threshold = opts.maxContextTokens * triggerRatio;
+  const safetyBuffer = opts.safetyBuffer ?? 0;
+  // 百分比路径阈值是构造期常量；窗口路径阈值依赖 ctx.config.model.contextWindow，须每请求算。
+  const percentThreshold =
+    opts.maxContextTokens !== undefined ? opts.maxContextTokens * triggerRatio : undefined;
   const wrap =
     opts.summaryText ??
     ((summary, n) => `[auto-compacted summary of ${n} earlier messages]\n${summary}`);
@@ -228,6 +259,20 @@ export function autoCompaction(opts: AutoCompactionOptions): Hook {
     name: "autoCompaction",
 
     async transformMessagesBeforeLlm(messages, ctx) {
+      // 触发阈值（X2 #57，优先级：显式 maxContextTokens 压过窗口路径）：
+      //   - 给了 maxContextTokens → 百分比路径常量 percentThreshold（旧行为，尊重显式上限）。
+      //   - 否则用 model.contextWindow > 0 → 窗口路径 contextWindow − reserveForOutput − safetyBuffer。
+      //   - 两者都不可得 → 算不出阈值，本 turn 不压缩（return undefined）。
+      let threshold = percentThreshold;
+      if (threshold === undefined) {
+        const contextWindow = ctx.config.model.contextWindow;
+        if (contextWindow > 0) {
+          const reserveForOutput = opts.reserveForOutput ?? Math.min(ctx.config.model.maxTokens, 4096);
+          threshold = contextWindow - reserveForOutput - safetyBuffer;
+        }
+      }
+      if (threshold === undefined) return undefined;
+
       // 未到 token 阈值 → 原样。tools / systemPrompt 由 ctx.config 提供，计入每请求随发的固定开销（X1）。
       const estimated = counter.estimate({
         messages,
