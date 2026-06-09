@@ -517,6 +517,16 @@ export interface Hook {
     messages: Message[],
     ctx: HookContext,
   ): Message[] | void | Promise<Message[] | void>;
+  /**
+   * listing-only：transform LLM call 这一帧随发的 tool listing（裸 pi-ai `Tool`，仅
+   * name/description/parameters）。返回 `Tool[]` 收窄/重排可见工具，`void` 保持不变。
+   * **不影响 execution**：执行/校验始终走 `session.tools` 全集，filter 掉的工具仍可被调用。
+   * 值类型刻意用裸 `Tool` 而非 `HarnessTool`，从类型层堵死在 listing 里塞 `execute`。
+   */
+  transformToolsBeforeLlm?(
+    tools: Tool[],
+    ctx: HookContext,
+  ): Tool[] | void | Promise<Tool[] | void>;
 
   // ─────────── Around (nested) ───────────
   wrapTurn?(ctx: HookContext, next: () => Promise<void>): Promise<void>;

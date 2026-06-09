@@ -3,7 +3,7 @@
  */
 
 import { describe, it, expect, vi } from "vitest";
-import { HookDispatcher, mergeResults } from "../dispatcher.js";
+import { HookDispatcher, mergeResults, defaultTimeoutFor } from "../dispatcher.js";
 import type { Hook, HookContext, MergedHookResult } from "../index.js";
 import { createTestContext } from "../testing.js";
 
@@ -221,6 +221,100 @@ describe("HookDispatcher transform pipe", () => {
     expect(out).toHaveLength(2);
     expect((out[0] as any).content).toBe("from A");
     expect((out[1] as any).content).toBe("from B");
+  });
+
+  it("tools: 0 hook returns value unchanged", async () => {
+    const d = new HookDispatcher([]);
+    const tools = [
+      { name: "a", description: "", parameters: {} as any },
+      { name: "b", description: "", parameters: {} as any },
+    ];
+    const out = await d.firePipeTools(tools, fakeCtx());
+    expect(out).toBe(tools);
+  });
+
+  it("tools: chained narrowing across hooks", async () => {
+    const hooks: Hook[] = [
+      {
+        name: "a",
+        transformToolsBeforeLlm: (tools) =>
+          tools.filter((t) => t.name !== "drop-a"),
+      },
+      {
+        name: "b",
+        transformToolsBeforeLlm: (tools) =>
+          tools.filter((t) => t.name !== "drop-b"),
+      },
+    ];
+    const d = new HookDispatcher(hooks);
+    const tools = [
+      { name: "keep", description: "", parameters: {} as any },
+      { name: "drop-a", description: "", parameters: {} as any },
+      { name: "drop-b", description: "", parameters: {} as any },
+    ];
+    const out = await d.firePipeTools(tools, fakeCtx());
+    expect(out.map((t) => t.name)).toEqual(["keep"]);
+  });
+
+  it("tools: a hook throwing is dropped, chain continues", async () => {
+    const log = vi.fn();
+    const hooks: Hook[] = [
+      {
+        name: "thrower",
+        transformToolsBeforeLlm: () => {
+          throw new Error("boom");
+        },
+      },
+      {
+        name: "good",
+        transformToolsBeforeLlm: (tools) =>
+          tools.filter((t) => t.name !== "drop"),
+      },
+    ];
+    const d = new HookDispatcher(hooks, (info) => log(info));
+    const tools = [
+      { name: "keep", description: "", parameters: {} as any },
+      { name: "drop", description: "", parameters: {} as any },
+    ];
+    const out = await d.firePipeTools(tools, fakeCtx());
+    // thrower 被丢弃（保留 input），good 仍生效。
+    expect(out.map((t) => t.name)).toEqual(["keep"]);
+    expect(log).toHaveBeenCalledWith(
+      expect.objectContaining({ hookName: "thrower" }),
+    );
+  });
+
+  it("tools: a hook timing out is dropped, chain continues", async () => {
+    const log = vi.fn();
+    const hooks: Hook[] = [
+      {
+        name: "slow",
+        timeout: 20,
+        transformToolsBeforeLlm: () =>
+          new Promise((resolve) => setTimeout(() => resolve([]), 200)),
+      },
+      {
+        name: "fast",
+        transformToolsBeforeLlm: (tools) =>
+          tools.filter((t) => t.name !== "drop"),
+      },
+    ];
+    const d = new HookDispatcher(hooks, (info) => log(info));
+    const tools = [
+      { name: "keep", description: "", parameters: {} as any },
+      { name: "drop", description: "", parameters: {} as any },
+    ];
+    const out = await d.firePipeTools(tools, fakeCtx());
+    expect(out.map((t) => t.name)).toEqual(["keep"]);
+    expect(log).toHaveBeenCalledWith(
+      expect.objectContaining({ hookName: "slow", timeoutMs: 20 }),
+    );
+  });
+});
+
+describe("defaultTimeoutFor", () => {
+  it("transformToolsBeforeLlm gets pipe-class 500ms", () => {
+    expect(defaultTimeoutFor("transformToolsBeforeLlm")).toBe(500);
   });
 });
 
