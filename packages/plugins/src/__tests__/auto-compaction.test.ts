@@ -497,6 +497,23 @@ describe("autoCompaction", () => {
     expect(calls).toBe(0);
   });
 
+  it("X2: reserveForOutput+safetyBuffer >= contextWindow → 阈值≤0 视为算不出 → no-op(不每 turn 空压)", async () => {
+    // footgun 防护:小窗口 + 大 reserve 让 effectiveWindow ≤ 0;若直接用,estimated(>=0) 永远 > 阈值 → 每 turn 压缩。
+    let calls = 0;
+    const compact = autoCompaction({
+      keepRecent: 1,
+      reserveForOutput: 200, // >= contextWindow(100) → w = 100 − 200 − 0 = −100 ≤ 0
+      tokenCounter: { estimate: () => 999_999 }, // 巨大,但阈值算不出 → 不应触发
+      summarize: () => {
+        calls++;
+        return "S";
+      },
+    });
+    const { ctx } = createTestContext({ config: modelCfg(100, 50) });
+    expect(await compact.transformMessagesBeforeLlm!(grow(5), ctx)).toBeUndefined();
+    expect(calls).toBe(0); // 不每 turn 空压
+  });
+
   it("X2: rejects negative reserveForOutput / safetyBuffer; allows omitting maxContextTokens", () => {
     expect(() =>
       autoCompaction({ reserveForOutput: -1, summarize: () => "" }),
