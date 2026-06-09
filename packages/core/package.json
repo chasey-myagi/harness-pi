@@ -1,6 +1,6 @@
 {
   "name": "@harness-pi/core",
-  "version": "0.2.3",
+  "version": "0.2.4",
   "description": "Agent kernel — pi-ai loop + first-class hook system",
   "license": "MIT",
   "repository": {
