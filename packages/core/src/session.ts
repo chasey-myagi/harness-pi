@@ -1258,11 +1258,12 @@ export class AgentSession {
     );
     this._pendingAttachments = [];
 
-    const piTools = this.tools.map((t) => ({
+    const baseTools = this.tools.map((t) => ({
       name: t.name,
       description: t.description,
       parameters: t.parameters,
     }));
+    const piTools = await this._dispatcher.firePipeTools(baseTools, this._ctx);
     const context: Context = {
       messages: stripHarnessOnlyFields(transformed),
       tools: piTools,
