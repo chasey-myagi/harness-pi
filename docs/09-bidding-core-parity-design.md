@@ -397,8 +397,10 @@ interface AgentSessionOptions {
 // #10 compactSummarize（插件，§4.2）：transformMessagesBeforeLlm hook，超阈值时用注入的 summarize(可调
 // LLM)把早期消息总结成一条 + recent tail；按覆盖前缀缓存(resummarizeEvery 节奏)；只改模型 view 省 token，
 // 不动 _messages。summarize 抛错被内核 pipe fail-open 吞掉 → 退化为不压缩(run 不中断)。
-// 实现说明：doc 原文「写 compaction 边界进 store」未做——HookContext 刻意无 store 写权限(护 _flushToStore
-// 高水位不变量)，store-boundary 属编排层职责。本 hook 压缩 view（与 trim-history 互补：语义压缩 vs 机械占位）。
+// 实现说明：本 hook 只压 view（与 trim-history 互补：语义压缩 vs 机械占位）。「写 compaction 边界进 store」
+// 由 C1 的 `persistCompactionBoundary` 控制器经内核 `onAfterFlush` collect-return seam 落地(0.2.2，#47)——
+// 仍守住「HookContext 无 store 写权限/不破 _flushToStore 高水位」:hook 只**返回** summary,内核在 flush 后
+// in-band 串行写 boundary,store-boundary 仍属编排层职责。
 
 // ── #7 fail-closed 分类 ─────────────────────────────────────
 // 实现说明：草案的 `decisionHook(..., { critical })` wrapper 落地成 Hook 上的两个字段 + 一个注册期硬校验，
