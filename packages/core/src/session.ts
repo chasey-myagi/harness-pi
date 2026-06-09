@@ -1102,6 +1102,40 @@ export class AgentSession {
       // 每个 turn 结束把新 messages append 进 store（durable resume；no-op if no store）。
       await this._flushToStore();
 
+      // After-flush 观测点（C1，docs/09 §4.2）：仅有 store 时 fire。**collect-return**：hook 不持有
+      // 任何写能力，只**返回** boundary；内核在这里 in-band、awaited、串行地把它写进 store——在进入
+      // 下一轮 loop / 下一次 _flushToStore / terminal **之前**完成。这保证：boundary 永远落在「它之后
+      // 的消息 flush」之前，且绝无两个 appendEntry 并发同 session（满足 SessionStore 串行契约）。
+      //
+      // 超时的 hook 其返回被 dispatcher 的 race 丢弃 → fireAfterFlush 拿不到它的 boundary → 这里不写
+      // → 该 turn 无 boundary（干净跳过，**绝不产生 detached store 写**）。这是上一版「detached 写能力」
+      // 设计导致 data-loss/乱序的根因修复。
+      //
+      // boundary 是 store 侧额外 entry，**不动** _persistedCount / _messages（HWM 不变量保持）。
+      // append 抛错按 best-effort 处理（记 failureSink、不杀 run），与 _flushToStore 一致。
+      if (this._store) {
+        const boundaries = await this._dispatcher.fireAfterFlush(
+          {
+            // 刚跑完并 flush 的那个 turn 的序号（_ctx.turnIdx 仍是 :setTurnIdx 设的值，
+            // 而局部 turnIdx 已 ++ 指向下一轮）—— 与 onContextOverflow 取 _ctx.turnIdx 一致。
+            turnIdx: this._ctx.turnIdx,
+            persistedCount: this._persistedCount,
+          },
+          this._ctx,
+        );
+        // 多个 hook 都返回 boundary 时按顺序逐条 append（正常只 1 个）。
+        for (const summary of boundaries) {
+          try {
+            await this._store.appendEntry(this.id, {
+              kind: "compaction_boundary",
+              summary,
+            });
+          } catch (err) {
+            this._reportStoreError("appendEntry(compaction_boundary)", err);
+          }
+        }
+      }
+
       if (outcome === "done") return { turnIdx, reason: "done" };
       if (outcome === "abort") return { turnIdx, reason: "aborted" };
       if (outcome === "error") return { turnIdx, reason: "error" };
