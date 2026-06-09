@@ -10,6 +10,10 @@
  *
  * domain-free：`SkillSpec` 不绑任何具体领域，纯 name/description/body/tools。
  * opt-in：不挂 skills 时行为与 0.2.x 一致（system prompt 不含 "Available skills"）。
+ *
+ * 注意（已知小限制，非本插件引入）：catalog 经 `transformSystemPromptBeforeLlm` 追加在 **pipe 之后**，
+ * 而 `SessionConfigView.systemPrompt`（token-budget / autoCompaction 读的）暴露的是 **pipe 前**的 base，
+ * 故 catalog 的字节不计入 token 估算。catalog 仅 name+description、体积小，影响可忽略。
  */
 
 import { Type } from "@harness-pi/core";

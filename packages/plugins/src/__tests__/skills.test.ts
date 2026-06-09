@@ -64,8 +64,8 @@ describe("skills: catalog in system prompt (a)", () => {
     const sys = fake.getCalls()[0]!.systemPrompt;
     expect(sys).toContain("## Available skills");
     for (const s of SPECS) {
-      expect(sys).toContain(s.name);
-      expect(sys).toContain(s.description);
+      // 精确钉住 name↔description 配对(独立 toContain 会漏「名字配错描述」)。
+      expect(sys).toContain(`- ${s.name}: ${s.description}`);
       // body 绝不进 catalog。
       expect(sys).not.toContain(s.body);
     }
@@ -177,6 +177,62 @@ describe("skills: tool activation reuses O1 activation set (d)", () => {
     const text = tr!.content.map((b) => b.text ?? "").join("");
     expect(text).toContain("FETCH BODY");
     expect(text).toContain("activated tools: WebFetch");
+    fake.teardown();
+  });
+});
+
+describe("skills: activation is a union, not overwrite (d2)", () => {
+  it("invoking a skill keeps previously-activated deferred tools visible", async () => {
+    const { hook, tool } = skills([
+      { name: "fetcher", description: "fetch web", body: "FETCH", tools: ["WebFetch"] },
+    ]);
+    const fake = createFakeModel([
+      {
+        content: [
+          { type: "toolCall", name: "skill", arguments: { name: "fetcher" } },
+        ],
+      },
+      { content: [{ type: "text", text: "done" }], stopReason: "stop" },
+    ]);
+    const session = new AgentSession({
+      model: fake,
+      tools: [trivialTool("WebFetch"), trivialTool("Grep"), tool],
+      hooks: [
+        // Grep 是 deferred 且**预激活**(alwaysListed)→ 一开始就可见;skill 再激活 WebFetch。
+        // 若 skill 用 overwrite(new Set(spec.tools))而非 union,会丢掉预激活的 Grep。
+        deferredTools({
+          deferred: ["WebFetch", "Grep"],
+          alwaysListed: ["Grep", tool.name],
+        }),
+        hook,
+      ],
+    });
+    await session.run("go");
+
+    const turn2 = namesOf(fake.getCalls()[1]!.tools);
+    // union:WebFetch 新激活 + Grep 预激活仍在(overwrite 会丢 Grep)。
+    expect(turn2).toEqual(expect.arrayContaining(["WebFetch", "Grep"]));
+    fake.teardown();
+  });
+});
+
+describe("skills: skill tool is a barrier", () => {
+  it("declares isConcurrencySafe === false (writes shared ctx.state activation set)", () => {
+    const { tool } = skills(SPECS);
+    expect(tool.isConcurrencySafe!({})).toBe(false);
+  });
+});
+
+describe("skills: custom toolName", () => {
+  it("honors opts.toolName in both tool.name and the catalog invoke hint", async () => {
+    const { hook, tool } = skills(SPECS, { toolName: "loadSkill" });
+    expect(tool.name).toBe("loadSkill");
+    const fake = createFakeModel([
+      { content: [{ type: "text", text: "ok" }], stopReason: "stop" },
+    ]);
+    const session = new AgentSession({ model: fake, tools: [tool], hooks: [hook] });
+    await session.run("go");
+    expect(fake.getCalls()[0]!.systemPrompt).toContain("`loadSkill`");
     fake.teardown();
   });
 });
