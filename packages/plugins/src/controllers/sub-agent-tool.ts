@@ -9,7 +9,7 @@
  * `sessionFactory` 里。父 session 的 abort signal 透传给 sub-agent（协作式取消）。
  */
 
-import type { AgentSession, Hook, HarnessTool, HookContext, Message } from "@harness-pi/core";
+import type { AgentSession, Hook, HarnessTool, HookContext, Message, ToolExecResult } from "@harness-pi/core";
 import { Type } from "@earendil-works/pi-ai";
 
 /**
@@ -52,6 +52,46 @@ function messageText(m: Message | undefined): string {
         .join("");
 }
 
+/**
+ * 共享：spawn 一个 sub-agent session 并整形结果。单 factory 版与 routed 版（#59）都走这里——
+ * 纵向深度透传（给子挂 onSessionStart hook 把深度设为 父+1）、父 signal 透传、子终态回灌全在此收口。
+ * 横向/纵向闸由调用方在调用前各自判（错误文案各自独立），故本函数只管「确实要 spawn 时」的动作。
+ */
+async function spawnSubAgent(
+  sub: AgentSession,
+  task: string,
+  depth: number,
+  signal: AbortSignal,
+): Promise<ToolExecResult> {
+  // 纵向深度透传：给子 session 挂一个 onSessionStart hook，把子 ctx.state 的深度设为 当前+1。
+  // 子 session 自己的（routed）subAgentTool（若有）execute 时就读到递增后的深度——多分支各自从父继承，
+  // 互不串扰（每个子 session 有独立 ctx.state）。零内核改动：只用现成的 use()/onSessionStart。
+  const depthInjector: Hook = {
+    name: "subAgent.depth-injector",
+    internal: true,
+    onSessionStart(_input, subCtx) {
+      subCtx.state.set(DEPTH_KEY, depth + 1);
+    },
+  };
+  sub.use(depthInjector);
+  // 父 signal 透传 → sub-agent 可被父的 abort 协作式取消。
+  const summary = await sub.run(task, { signal });
+  const text = messageText(summary.lastMessage) || "(sub-agent produced no text output)";
+
+  // 把子代理终态放进 details（trace/metrics 用），content 回灌父模型。
+  return {
+    content: [{ type: "text", text }],
+    details: {
+      subAgent: {
+        reason: summary.reason,
+        turns: summary.turns,
+        usage: summary.usage,
+        ...(summary.stopReason ? { stopReason: summary.stopReason } : {}),
+      },
+    },
+  };
+}
+
 export function subAgentTool(opts: SubAgentToolOptions): HarnessTool {
   const max = opts.maxSubAgents ?? 8;
   const maxDepth = opts.maxDepth ?? 2;
@@ -86,34 +126,130 @@ export function subAgentTool(opts: SubAgentToolOptions): HarnessTool {
       }
       spawned++;
 
-      // 父 signal 透传 → sub-agent 可被父的 abort 协作式取消。
       const sub = opts.sessionFactory(task, ctx);
-      // 纵向深度透传：给子 session 挂一个 onSessionStart hook，把子 ctx.state 的深度设为 当前+1。
-      // 子 session 自己的 subAgentTool（若有）execute 时就读到递增后的深度——多分支各自从父继承，
-      // 互不串扰（每个子 session 有独立 ctx.state）。零内核改动：只用现成的 use()/onSessionStart。
-      const depthInjector: Hook = {
-        name: "subAgent.depth-injector",
-        internal: true,
-        onSessionStart(_input, subCtx) {
-          subCtx.state.set(DEPTH_KEY, depth + 1);
-        },
-      };
-      sub.use(depthInjector);
-      const summary = await sub.run(task, { signal });
-      const text = messageText(summary.lastMessage) || "(sub-agent produced no text output)";
+      return spawnSubAgent(sub, task, depth, signal);
+    },
+  };
+}
 
-      // 把子代理终态放进 details（trace/metrics 用），content 回灌父模型。
-      return {
-        content: [{ type: "text", text }],
-        details: {
-          subAgent: {
-            reason: summary.reason,
-            turns: summary.turns,
-            usage: summary.usage,
-            ...(summary.stopReason ? { stopReason: summary.stopReason } : {}),
-          },
-        },
-      };
+/* ──────────────── routed 变体（#59 / S3） ──────────────── */
+
+/**
+ * 一种可路由的 sub-agent 规格（**domain-free**：只是「类型标识 + 选择依据 + 怎么造 session」，
+ * 不含任何业务/文件布局概念）。父模型据 `whenToUse` 在多个 spec 间挑一个 `type` 来分派。
+ */
+export interface AgentSpec {
+  /** 路由标识。父模型用它在 `agent_type` 参数里点名；同一 tool 内须唯一。 */
+  type: string;
+  /** 给模型看的选择依据——拼进 tool description，让模型据此决定派给哪种 agent。 */
+  whenToUse: string;
+  /**
+   * 造这种 sub-agent 的 AgentSession 工厂。形如单 factory 版的 `(task, ctx)`，但多收一个**可选**
+   * 第三参 `maxTurns`——即本 spec 声明的 `maxTurns`（见下）。`AgentSession.maxTurns` 是构造期 readonly，
+   * 故由工厂在 `new AgentSession({ ..., maxTurns })` 时落地（不给就用工厂自己的默认）。
+   */
+  sessionFactory: (task: string, ctx: HookContext, maxTurns?: number) => AgentSession;
+  /**
+   * 可选：本 spec 造出的 sub-agent 的轮数上限。给了就作为第三参透传给 `sessionFactory`，
+   * 由工厂在构造时落地。不给则第三参为 undefined，工厂沿用自身默认。
+   */
+  maxTurns?: number;
+}
+
+export interface RoutedSubAgentToolOptions {
+  /** 候选 agent 规格（至少一个）。`agent_type` 枚举 = 全部 spec 的 `type`。 */
+  specs: AgentSpec[];
+  /** tool name（默认 "subAgent"）。 */
+  name?: string;
+  /**
+   * tool description 前缀（给模型看的总体说明）。各 spec 的 `whenToUse` 会**自动拼在其后**，
+   * 故这里只写「这是个会路由的子代理工具」之类的总纲，不必重复每种 agent 的用途。
+   */
+  description?: string;
+  /** 本 tool 实例最多派多少个 sub-agent（**横向**闸：跨所有 type 合计）。默认 8。 */
+  maxSubAgents?: number;
+  /** 跨层递归**纵向**深度闸（#45），语义同单 factory 版。默认 2。 */
+  maxDepth?: number;
+}
+
+/**
+ * routed sub-agent tool factory（#59）——在单 factory 版旁加一个**多规格、按 `agent_type` 路由**的变体。
+ *
+ * 与单 factory 版共享同一套 bounded 机制：横向 `maxSubAgents` 扇出闸 + 纵向 `maxDepth` 跨层深度闸（#45）
+ * 都对 routed 变体同样生效（复用 `DEPTH_KEY` 透传 + `spawnSubAgent`）。差别只在：参数多一个 `agent_type`
+ * 枚举（值 = 各 spec 的 `type`），description 拼进每个 spec 的 `whenToUse` 供模型路由，execute 时按
+ * `agent_type` 分派到对应 spec 的 `sessionFactory`（及其可选 `maxTurns`）。
+ *
+ * **domain-free**：本工厂不认识任何业务；每种 sub-agent 用什么 tools/systemPrompt 全在调用方的 spec 里。
+ */
+export function routedSubAgentTool(opts: RoutedSubAgentToolOptions): HarnessTool {
+  const specs = opts.specs;
+  if (specs.length === 0) {
+    throw new Error("routedSubAgentTool: specs must not be empty");
+  }
+  // type 须唯一——重复会让枚举/路由表二义，构造期 fail-loud 比运行时静默撞车好。
+  const byType = new Map<string, AgentSpec>();
+  for (const s of specs) {
+    if (byType.has(s.type)) {
+      throw new Error(`routedSubAgentTool: duplicate agent type "${s.type}"`);
+    }
+    byType.set(s.type, s);
+  }
+
+  const max = opts.maxSubAgents ?? 8;
+  const maxDepth = opts.maxDepth ?? 2;
+  let spawned = 0;
+
+  const types = specs.map((s) => s.type);
+  // description 拼进每个 spec 的 whenToUse → 模型据此挑 agent_type。
+  const routingLines = specs.map((s) => `- ${s.type}: ${s.whenToUse}`).join("\n");
+  const description =
+    (opts.description ??
+      "Delegate a self-contained sub-task to a bounded sub-agent, routed by agent_type.") +
+    `\n\nAvailable agent types:\n${routingLines}`;
+
+  return {
+    name: opts.name ?? "subAgent",
+    description,
+    parameters: Type.Object({
+      agent_type: Type.Union(
+        types.map((t) => Type.Literal(t)),
+        { description: `Which kind of sub-agent to route this task to. One of: ${types.join(", ")}.` },
+      ),
+      task: Type.String({
+        description: "A self-contained task for the chosen sub-agent to carry out.",
+      }),
+    }),
+
+    async execute(args, ctx, signal) {
+      const task = typeof args.task === "string" ? args.task : "";
+      // throw 是 HarnessTool 的错误合约（kernel 包成 isError 回灌模型）——空任务 / 非法 type / 超预算 / 超深都 fail-loud。
+      if (task.trim().length === 0) {
+        throw new Error("subAgent: empty task");
+      }
+      // 路由防御性校验：缺失 / 非枚举的 agent_type → 明确 error（不崩、不静默）。即使内核 validate 已按枚举
+      // schema 拦过，这里仍兜一层，便于直接 execute（绕过内核）时也有清晰错误。
+      const agentType = typeof args.agent_type === "string" ? args.agent_type : "";
+      const spec = byType.get(agentType);
+      if (!spec) {
+        throw new Error(
+          `subAgent: unknown agent_type "${agentType}" (expected one of: ${types.join(", ")})`,
+        );
+      }
+      // 纵向闸（#45）：读**当前** session 深度（缺省 0）。到顶就不 spawn——挡在横向计数之前，
+      // 让超深的尝试不消耗本层 maxSubAgents 预算（二闸正交）。
+      const depth = ctx.state.get(DEPTH_KEY) ?? 0;
+      if (depth >= maxDepth) {
+        throw new Error(`subAgent: depth limit (maxDepth=${maxDepth}) reached`);
+      }
+      // 横向闸：本 tool 实例的扇出预算（跨所有 type 合计）。
+      if (spawned >= max) {
+        throw new Error(`subAgent: budget exhausted (max ${max} sub-agents per tool)`);
+      }
+      spawned++;
+
+      const sub = spec.sessionFactory(task, ctx, spec.maxTurns);
+      return spawnSubAgent(sub, task, depth, signal);
     },
   };
 }
