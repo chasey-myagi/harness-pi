@@ -327,7 +327,13 @@ export class AgentSession {
     // 不写,与 model 的扁平冻结粒度一致,不构成新风险面。
     const configView: SessionConfigView = Object.freeze({
       sessionId: this.id,
-      model: Object.freeze({ id: this.model.id, provider: this.model.provider }),
+      model: Object.freeze({
+        id: this.model.id,
+        provider: this.model.provider,
+        // X2(#57):暴露有效窗口给 autoCompaction 算绝对阈值。值取自 pi-ai Model 同名字段(调用方权威)。
+        contextWindow: this.model.contextWindow,
+        maxTokens: this.model.maxTokens,
+      }),
       toolNames: Object.freeze(this.tools.map((t) => t.name)),
       // 只暴露 pi-ai Tool 三字段（与每请求随发的 piTools 同形），冻结每个元素防 plugin 改 schema。
       tools: Object.freeze(
