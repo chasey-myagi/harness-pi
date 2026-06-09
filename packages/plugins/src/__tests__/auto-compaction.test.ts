@@ -1,8 +1,12 @@
 import { describe, it, expect } from "vitest";
 import { AgentSession, createUserMessage } from "@harness-pi/core";
 import { createTestContext, createFakeModel } from "@harness-pi/core/testing";
-import type { Message } from "@earendil-works/pi-ai";
-import { autoCompaction, estimateTokensByChars } from "../auto-compaction.js";
+import type { Message, Tool } from "@earendil-works/pi-ai";
+import {
+  autoCompaction,
+  estimateTokensByChars,
+  estimateRequestTokens,
+} from "../auto-compaction.js";
 
 function textOf(m: Message): string {
   return typeof m.content === "string"
@@ -19,7 +23,7 @@ describe("autoCompaction", () => {
       maxContextTokens: 100,
       triggerRatio: 0.5, // threshold = 50
       keepRecent: 2,
-      estimateTokens: (msgs) => msgs.length * 20, // 5 msgs => 100 > 50
+      tokenCounter: { estimate: ({ messages }) => messages.length * 20 }, // 5 msgs => 100 > 50
       summarize: (e) => {
         early = e;
         return `SUM:${e.length}`;
@@ -41,7 +45,7 @@ describe("autoCompaction", () => {
       maxContextTokens: 100,
       triggerRatio: 0.5, // threshold 50
       keepRecent: 2,
-      estimateTokens: () => 10, // < 50
+      tokenCounter: { estimate: () => 10 }, // < 50
       summarize: () => {
         calls++;
         return "S";
@@ -164,7 +168,7 @@ describe("autoCompaction", () => {
       maxContextTokens: 1,
       triggerRatio: 1,
       keepRecent: 3,
-      estimateTokens: () => 999, // over threshold → would compact if it could
+      tokenCounter: { estimate: () => 999 }, // over threshold → would compact if it could
       summarize: () => {
         calls++;
         return "S";
@@ -183,7 +187,7 @@ describe("autoCompaction", () => {
       triggerRatio: 1,
       keepRecent: 2,
       resummarizeEvery: 2,
-      estimateTokens: () => 999, // always over threshold -> always evaluate
+      tokenCounter: { estimate: () => 999 }, // always over threshold -> always evaluate
       summarize: (e) => {
         calls++;
         return `S${e.length}`;
@@ -236,7 +240,7 @@ describe("autoCompaction", () => {
           maxContextTokens: 100,
           triggerRatio: 0.8, // threshold 80
           keepRecent: 2,
-          estimateTokens: (msgs) => msgs.length * 50, // 7 msgs * 50 = 350 > 80
+          tokenCounter: { estimate: ({ messages }) => messages.length * 50 }, // 7 msgs * 50 = 350 > 80
           summarize: () => "RECAP",
         }),
       ],
@@ -266,7 +270,7 @@ describe("autoCompaction", () => {
           maxContextTokens: 100,
           triggerRatio: 0.8, // threshold 80
           keepRecent: 2,
-          estimateTokens: (msgs) => msgs.length * 50, // 7 msgs * 50 = 350 > 80 → 会尝试压缩
+          tokenCounter: { estimate: ({ messages }) => messages.length * 50 }, // 7 msgs * 50 = 350 > 80 → 会尝试压缩
           summarize: () => {
             throw new Error("summary backend down");
           },
@@ -282,5 +286,81 @@ describe("autoCompaction", () => {
     // 完整历史未被破坏：6 初始 + "go" + assistant = 8。
     expect(session.messages.length).toBe(8);
     fake.teardown();
+  });
+
+  it("X1: triggers earlier when tools are big (messages small but tool schema large)", async () => {
+    // 仅 2 条小消息：messages-only 估算远低于阈值、绝不触发；但带上大 tool schema 的请求级估算越过阈值 → 触发。
+    // 这正是 D0 53-vs-381 低估 7x 的修复方向：tool schema 每请求随发，必须计入。
+    const messages = [m("hi"), m("ok"), m("more"), m("again")]; // 小
+    const bigTool: Tool = {
+      name: "submit_evidence",
+      description: "Submit structured evidence. ".repeat(40),
+      parameters: {
+        type: "object",
+        properties: {
+          questionId: { type: "string", description: "the question id ".repeat(20) },
+          evidence: { type: "string", description: "the evidence body ".repeat(20) },
+        },
+        required: ["questionId", "evidence"],
+      },
+    } as Tool;
+
+    // 阈值卡在「messages-only 之上、含 tools 之下」之间。
+    const messagesOnly = estimateTokensByChars(messages);
+    const withTools = estimateRequestTokens({ messages, tools: [bigTool] });
+    expect(withTools).toBeGreaterThan(messagesOnly); // sanity：tools 确实抬高了估值
+    const threshold = (messagesOnly + withTools) / 2;
+
+    let summarized = false;
+    const compact = autoCompaction({
+      maxContextTokens: threshold,
+      triggerRatio: 1, // threshold = maxContextTokens
+      keepRecent: 1,
+      summarize: () => {
+        summarized = true;
+        return "RECAP";
+      },
+    });
+
+    // ctx 暴露 bigTool：autoCompaction 经 ctx.config.tools 把它计入 → 触发。
+    const { ctx } = createTestContext({ config: { tools: [bigTool] } });
+    const view = await compact.transformMessagesBeforeLlm!(messages, ctx);
+    expect(view).toBeDefined(); // 改进估算触发了
+    expect(summarized).toBe(true);
+
+    // 对照：同样 messages、同样阈值，但 ctx 没有 tools（messages-only 等价）→ 不触发。
+    let summarized2 = false;
+    const compact2 = autoCompaction({
+      maxContextTokens: threshold,
+      triggerRatio: 1,
+      keepRecent: 1,
+      summarize: () => {
+        summarized2 = true;
+        return "RECAP";
+      },
+    });
+    const { ctx: ctxNoTools } = createTestContext(); // config.tools = []
+    expect(await compact2.transformMessagesBeforeLlm!(messages, ctxNoTools)).toBeUndefined();
+    expect(summarized2).toBe(false);
+  });
+
+  it("X1: a custom tokenCounter overrides the default", async () => {
+    const calls: number[] = [];
+    const compact = autoCompaction({
+      maxContextTokens: 100,
+      triggerRatio: 1, // threshold 100
+      keepRecent: 1,
+      tokenCounter: {
+        estimate: ({ messages }) => {
+          calls.push(messages.length);
+          return 200; // 永远超阈值 → 触发
+        },
+      },
+      summarize: () => "RECAP",
+    });
+    const { ctx } = createTestContext();
+    const view = await compact.transformMessagesBeforeLlm!(grow(5), ctx);
+    expect(view).toBeDefined();
+    expect(calls.length).toBeGreaterThan(0); // 注入的 counter 真的被调用
   });
 });

@@ -24,7 +24,7 @@
 
 import type { Hook, HookContext } from "@harness-pi/core";
 import { createUserMessage } from "@harness-pi/core";
-import type { Message } from "@earendil-works/pi-ai";
+import type { Message, Tool } from "@earendil-works/pi-ai";
 
 export interface AutoCompactionOptions {
   /** context token 预算（通常 = 模型上下文窗口，或你愿意用满的上限）。须 > 0。 */
@@ -39,10 +39,12 @@ export interface AutoCompactionOptions {
     ctx: HookContext,
   ) => string | Promise<string>;
   /**
-   * token 估算器。默认 {@link estimateTokensByChars}：CJK 感知（≈ 1 token/字）+ 图片感知（每图扁平估值），
-   * 整体偏**保守高估**（低估会漏触发压缩→窗口溢出，是安全 bug）；零依赖。接入真 tokenizer 可覆盖。
+   * Token 计数器（issue #55）。默认 {@link defaultTokenCounter}：`estimate` = {@link estimateRequestTokens}，
+   * 在 messages 字符估算之上**加回** tool schema + systemPrompt + 每消息格式开销（只数消息会低估真 usage ~7x）。
+   * 触发判据据此算，故有 tools 时**触发点比旧 messages-only 更早 = 更贴近真实窗口压力**（0.x 可接受的行为变更）。
+   * tools / systemPrompt 由内核经 `ctx.config` 提供，无需调用方传。接入真 tokenizer 时覆盖本选项即可。
    */
-  estimateTokens?: (messages: Message[]) => number;
+  tokenCounter?: TokenCounter;
   /**
    * 「想覆盖的前缀」比上次缓存增长达到这么多条才重算 summary；默认 = keepRecent。
    * 调大省 LLM 调用，调小更省 token。须 ≥ 1。
@@ -93,7 +95,9 @@ function estimateText(text: string): number {
  *   既不按短 ref 的字符数低估、也不按内联 base64 `data` 的字符数疯狂高估。
  * - **其余文本**（ASCII 等）：≈ 1/4 token/字符（向上取整），故纯英文仍 ≈ chars/4。
  *
- * 想接真 tokenizer：覆盖 `estimateTokens` 选项即可。
+ * **仅数消息文本**——不含每请求随发的 tool schema / systemPrompt / 格式开销（那些会**严重低估**真 usage，
+ * 见 {@link estimateRequestTokens}）。保留本函数原样是为向后兼容；消费插件默认走请求级的 {@link defaultTokenCounter}。
+ * 想接真 tokenizer：覆盖插件的 `tokenCounter` 选项即可。
  */
 export function estimateTokensByChars(messages: Message[]): number {
   let tokens = 0;
@@ -115,6 +119,64 @@ export function estimateTokensByChars(messages: Message[]): number {
   }
   return tokens;
 }
+
+/** 每条消息的固定格式开销（role / 分隔符 / 模板包装），主流 chat 模板约 3–4 tok/消息，取保守 4。 */
+const PER_MESSAGE_OVERHEAD = 4;
+
+/** {@link estimateRequestTokens} 的输入：一次 LLM 请求随发的三部分（tools / systemPrompt 每请求都发）。 */
+export interface RequestTokenInput {
+  messages: Message[];
+  /** 本次请求随发的 tool schema（pi-ai `Tool`：name + description + parameters）。 */
+  tools?: ReadonlyArray<Tool>;
+  /** 本次请求的 system prompt。 */
+  systemPrompt?: string;
+}
+
+/**
+ * 估算**整次 LLM 请求**的 token —— 在 {@link estimateTokensByChars}(messages) 之上，**加回**那些每请求随发、
+ * 却被「只数消息文本」漏掉的固定开销（issue #55 / D0 实测：只数消息低估真 usage ~7x，根因正是漏了下面三项）：
+ *
+ *   1. **tool schema**：每个 tool 的 `name` + `description` + `JSON.stringify(parameters)` 字符估算（走 1/4 规则）。
+ *      工具一多、parameters schema 一深，这块就是估算盲区里最大的一块。
+ *   2. **systemPrompt**：整段 system prompt 的字符估算（复用 CJK 感知的 {@link estimateTokensByChars}）。
+ *   3. **每消息格式开销**：每条消息一个小常量（{@link PER_MESSAGE_OVERHEAD}），覆盖 role / 分隔符 / 模板包装。
+ *
+ * CJK / image / chars-1/4 规则全部沿用 estimateTokensByChars，整体仍偏**保守高估**（压缩触发判据宁高勿低）。
+ * tools / systemPrompt **不传**时本函数退化为「estimateTokensByChars(messages) + 每消息常量」——比纯 messages-only
+ * 仍多算每消息常量，但语义一致。
+ */
+export function estimateRequestTokens(input: RequestTokenInput): number {
+  let tokens = estimateTokensByChars(input.messages);
+  tokens += input.messages.length * PER_MESSAGE_OVERHEAD;
+  if (input.systemPrompt) {
+    tokens += estimateText(input.systemPrompt);
+  }
+  if (input.tools) {
+    for (const t of input.tools) {
+      tokens += estimateText(t.name);
+      tokens += estimateText(t.description);
+      tokens += estimateText(JSON.stringify(t.parameters));
+    }
+  }
+  return tokens;
+}
+
+/**
+ * Token 计数 seam（issue #55）。`estimate` = 同步、零依赖的字符估算（默认 {@link estimateRequestTokens}）；
+ * `count` = 未来 opt-in 的**真** tokenizer（async）。
+ *
+ * **当前不实现 `count`**：pi-ai 0.74.2 无 `countTokens`（D0 已核），保留可选签名只为留一个不破坏 API 的接入口
+ * （将来接真 tokenizer / provider count endpoint 时填它，消费方按需 `await counter.count?.(...)`）。
+ */
+export interface TokenCounter {
+  estimate(input: RequestTokenInput): number;
+  count?(input: RequestTokenInput): Promise<number>;
+}
+
+/** 默认 TokenCounter：`estimate` = {@link estimateRequestTokens}；不提供 `count`。 */
+export const defaultTokenCounter: TokenCounter = {
+  estimate: estimateRequestTokens,
+};
 
 /**
  * 构造一个 autoCompaction hook。三条**使用须知**（issue #13，违反会得到悄无声息的错误压缩）：
@@ -146,7 +208,7 @@ export function autoCompaction(opts: AutoCompactionOptions): Hook {
   if (resummarizeEvery < 1) {
     throw new Error("autoCompaction: resummarizeEvery must be >= 1");
   }
-  const estimate = opts.estimateTokens ?? estimateTokensByChars;
+  const counter = opts.tokenCounter ?? defaultTokenCounter;
   const threshold = opts.maxContextTokens * triggerRatio;
   const wrap =
     opts.summaryText ??
@@ -159,8 +221,13 @@ export function autoCompaction(opts: AutoCompactionOptions): Hook {
     name: "autoCompaction",
 
     async transformMessagesBeforeLlm(messages, ctx) {
-      // 未到 token 阈值 → 原样。
-      if (estimate(messages) <= threshold) return undefined;
+      // 未到 token 阈值 → 原样。tools / systemPrompt 由 ctx.config 提供，计入每请求随发的固定开销（X1）。
+      const estimated = counter.estimate({
+        messages,
+        tools: ctx.config.tools,
+        systemPrompt: ctx.config.systemPrompt,
+      });
+      if (estimated <= threshold) return undefined;
       // 已经压无可压（tail 即全部）→ 总结救不了，交给 overflow 兜底，不在这里空转。
       if (messages.length <= keepRecent) return undefined;
 

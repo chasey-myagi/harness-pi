@@ -341,6 +341,8 @@ export function createTestContext(opts: TestContextOptions = {}): TestContextHan
     sessionId: opts.sessionId ?? "test-session",
     model: Object.freeze({ id: "test-model", provider: "test" }),
     toolNames: Object.freeze([]),
+    tools: Object.freeze([]),
+    systemPrompt: "",
     maxTurns: 200,
     maxContinuations: 5,
     ...(opts.config ?? {}),
