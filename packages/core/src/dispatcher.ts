@@ -28,6 +28,8 @@ import type {
   HookResult,
   LlmEndInput,
   MergedHookResult,
+  OnAfterFlushInput,
+  OnAfterFlushResult,
   PostToolUseInput,
   PreToolUseInput,
   SessionEndInput,
@@ -160,6 +162,45 @@ export class HookDispatcher {
         this._invokeSafe<void>(h, "onError", [input, ctx], "event"),
       ),
     );
+  }
+
+  /**
+   * Special: onAfterFlush —— **collect-return** 语义（C1）。并行问每个 hook（event 形态、per-hook
+   * timeout、fire-and-observe），把它们**返回**的 `compactionBoundary` 按注册顺序收集成数组交给内核。
+   *
+   * 关键不变量：dispatcher 只负责「拿到非超时/非抛错 hook 的返回值」，**不持有任何 store 写能力**。
+   * 超时的 hook 经 `_invokeSafe` 的 `Promise.race` 被丢弃（`error != null` / `value === undefined`），
+   * 其返回的 boundary 永远到不了这个数组 → 内核拿不到 → 不写。这是「超时绝不产生 detached store 写」的
+   * 机制根基（替换上一版给 hook detached 写能力的错误设计）。返回值的写入由内核 in-band、awaited、
+   * 串行执行（见 session.ts），dispatcher 不碰 store。
+   *
+   * timeout：默认走 event 类（100ms）；但 summarize 可调 LLM，挂此 hook 的 plugin 应自设较长 `timeout`。
+   */
+  async fireAfterFlush(
+    input: OnAfterFlushInput,
+    ctx: HookContext,
+  ): Promise<Message[]> {
+    const matched = this.hooks.filter(
+      (h) => typeof h.onAfterFlush === "function",
+    );
+    const results = await Promise.all(
+      matched.map((h) =>
+        this._invokeSafe<OnAfterFlushResult | void>(
+          h,
+          "onAfterFlush",
+          [input, ctx],
+          "event",
+        ),
+      ),
+    );
+    const boundaries: Message[] = [];
+    for (const r of results) {
+      // 超时 / 抛错的 hook：value === undefined（race 丢弃），其 boundary 永不入列。
+      if (r.value && r.value.compactionBoundary) {
+        boundaries.push(r.value.compactionBoundary);
+      }
+    }
+    return boundaries;
   }
 
   /* ────────────── Decision: 顺序 short-circuit ────────────── */

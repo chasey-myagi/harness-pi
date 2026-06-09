@@ -14,6 +14,8 @@ export type {
   SteerInput,
   LlmEndInput,
   ContextOverflowInput,
+  OnAfterFlushInput,
+  OnAfterFlushResult,
   PreToolUseInput,
   PostToolUseInput,
   UserPromptSubmitInput,

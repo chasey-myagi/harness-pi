@@ -138,6 +138,38 @@ export interface ContextOverflowInput {
   messageCount: number;
 }
 
+/**
+ * After-flush 信号（C1，docs/09 §4.2「写 compaction 边界进 store」的内核 seam）。每个 turn 在
+ * `_flushToStore()` 之后 fire（仅当 session 有 store）。
+ *
+ * **collect-return 语义（区别于普通 event）**：hook 可**返回** `{ compactionBoundary }` 让**内核**在
+ * in-band、awaited、串行的路径上把它当作一条 `compaction_boundary` entry append 进 store——hook 自己
+ * **没有**任何「可调用的写能力」。这是上一版设计（给 hook 一个 detached `appendCompactionBoundary`）
+ * 被 review 三轮抓出 data-loss / store-corruption 后的重做：detached 写在 hook 超时时仍在飞，会乱序落在
+ * 后续 turn / terminal 之后（resume 当成「丢弃之前一切」→ 静默删已完成 turn），且与下一轮 flush 的
+ * appendEntry 并发打同一 sessionId（违反串行契约）。改成「hook 返回、内核串行写」后，**超时的 hook 其
+ * 返回被 dispatcher 的 race 丢弃 → 内核拿不到 boundary → 不写 → 干净跳过，绝不产生 detached 写**。
+ *
+ * boundary 是 store 侧的额外 entry，**绝不动** `_persistedCount` / `_messages`：live session 继续用全量
+ * `_messages`；只有 `resume()` 重建时才用 boundary 把前缀裁成 summary。与 view-only 压缩
+ * （compactSummarize / autoCompaction 改的是「模型 view」、保 tail）是不同层、正交：那些省 token，
+ * 这里省 resume 重放。
+ */
+export interface OnAfterFlushInput {
+  turnIdx: number;
+  /** 本次 flush 后已持久化的 message 数（= `_persistedCount`）。 */
+  persistedCount: number;
+}
+
+/**
+ * `onAfterFlush` 的返回 envelope。返回 `void` = 本 turn 不落 boundary；返回 `{ compactionBoundary }`
+ * = 请内核在 store 末尾串行 append 一条覆盖全部已持久化前缀的 `compaction_boundary`。
+ */
+export interface OnAfterFlushResult {
+  /** 内核据此 append 一条 `compaction_boundary{summary}`（in-band、awaited、串行）。 */
+  compactionBoundary?: Message;
+}
+
 export interface PreToolUseInput {
   call: ToolCall;
   tool: HarnessTool;
@@ -418,6 +450,15 @@ export interface Hook {
     input: ContextOverflowInput,
     ctx: HookContext,
   ): HookResult | void | Promise<HookResult | void>;
+  /**
+   * After-flush 观测点：每 turn flush 到 store 后 fire（仅有 store 时）。**collect-return**：返回
+   * `{ compactionBoundary }` 让内核在 store 末尾串行落一条 boundary（无「可调用写能力」，超时即被丢弃，
+   * 见 `OnAfterFlushInput` / `OnAfterFlushResult`）。`summarize` 可调 LLM，故应设较长 `timeout`。
+   */
+  onAfterFlush?(
+    input: OnAfterFlushInput,
+    ctx: HookContext,
+  ): OnAfterFlushResult | void | Promise<OnAfterFlushResult | void>;
   onPostToolUse?(
     input: PostToolUseInput,
     ctx: HookContext,
