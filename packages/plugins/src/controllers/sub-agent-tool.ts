@@ -144,16 +144,11 @@ export interface AgentSpec {
   /** 给模型看的选择依据——拼进 tool description，让模型据此决定派给哪种 agent。 */
   whenToUse: string;
   /**
-   * 造这种 sub-agent 的 AgentSession 工厂。形如单 factory 版的 `(task, ctx)`，但多收一个**可选**
-   * 第三参 `maxTurns`——即本 spec 声明的 `maxTurns`（见下）。`AgentSession.maxTurns` 是构造期 readonly，
-   * 故由工厂在 `new AgentSession({ ..., maxTurns })` 时落地（不给就用工厂自己的默认）。
+   * 造这种 sub-agent 的 AgentSession 工厂——与单 factory 版 `SubAgentToolOptions.sessionFactory`
+   * 同型 `(task, ctx)`。这种 sub-agent 的轮数/预算（maxTurns 等）由工厂在 `new AgentSession(...)`
+   * 时自行闭包决定，不在 spec 上重复声明。
    */
-  sessionFactory: (task: string, ctx: HookContext, maxTurns?: number) => AgentSession;
-  /**
-   * 可选：本 spec 造出的 sub-agent 的轮数上限。给了就作为第三参透传给 `sessionFactory`，
-   * 由工厂在构造时落地。不给则第三参为 undefined，工厂沿用自身默认。
-   */
-  maxTurns?: number;
+  sessionFactory: (task: string, ctx: HookContext) => AgentSession;
 }
 
 export interface RoutedSubAgentToolOptions {
@@ -178,7 +173,7 @@ export interface RoutedSubAgentToolOptions {
  * 与单 factory 版共享同一套 bounded 机制：横向 `maxSubAgents` 扇出闸 + 纵向 `maxDepth` 跨层深度闸（#45）
  * 都对 routed 变体同样生效（复用 `DEPTH_KEY` 透传 + `spawnSubAgent`）。差别只在：参数多一个 `agent_type`
  * 枚举（值 = 各 spec 的 `type`），description 拼进每个 spec 的 `whenToUse` 供模型路由，execute 时按
- * `agent_type` 分派到对应 spec 的 `sessionFactory`（及其可选 `maxTurns`）。
+ * `agent_type` 分派到对应 spec 的 `sessionFactory`。
  *
  * **domain-free**：本工厂不认识任何业务；每种 sub-agent 用什么 tools/systemPrompt 全在调用方的 spec 里。
  */
@@ -248,7 +243,7 @@ export function routedSubAgentTool(opts: RoutedSubAgentToolOptions): HarnessTool
       }
       spawned++;
 
-      const sub = spec.sessionFactory(task, ctx, spec.maxTurns);
+      const sub = spec.sessionFactory(task, ctx);
       return spawnSubAgent(sub, task, depth, signal);
     },
   };
