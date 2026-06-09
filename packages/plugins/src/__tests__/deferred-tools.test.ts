@@ -91,6 +91,92 @@ describe("deferredTools: activation takes effect next turn (b)", () => {
     const turn2 = namesOf(fake.getCalls()[1]!.tools);
     expect(turn1).not.toContain("WebFetch");
     expect(turn2).toContain("WebFetch");
+    // 激活是**累加**进 listing，不是替换 —— 原本可见的工具仍在。
+    expect(turn2).toEqual(expect.arrayContaining(["read", "toolSearch", "WebFetch"]));
+    fake.teardown();
+  });
+
+  it("keyword fuzzy-match activates matching tools next turn", async () => {
+    const search = toolSearch();
+    const fake = createFakeModel([
+      // keyword "fetch" 命中 WebFetch 的 name+description（"WebFetch tool"）。
+      {
+        content: [
+          { type: "toolCall", name: "toolSearch", arguments: { keyword: "fetch" } },
+        ],
+      },
+      { content: [{ type: "text", text: "done" }], stopReason: "stop" },
+    ]);
+    const session = new AgentSession({
+      model: fake,
+      tools: [trivialTool("read"), trivialTool("WebFetch"), search],
+      hooks: [
+        deferredTools({ deferred: ["WebFetch"], alwaysListed: ["read", search.name] }),
+      ],
+    });
+    await session.run("go");
+
+    expect(namesOf(fake.getCalls()[0]!.tools)).not.toContain("WebFetch");
+    expect(namesOf(fake.getCalls()[1]!.tools)).toContain("WebFetch");
+    fake.teardown();
+  });
+
+  it("no match (incl. phantom select name) activates nothing and says so", async () => {
+    const search = toolSearch();
+    const fake = createFakeModel([
+      {
+        content: [
+          { type: "toolCall", name: "toolSearch", arguments: { select: ["nonexistent"] } },
+        ],
+      },
+      { content: [{ type: "text", text: "done" }], stopReason: "stop" },
+    ]);
+    const session = new AgentSession({
+      model: fake,
+      tools: [trivialTool("read"), trivialTool("WebFetch"), search],
+      hooks: [
+        deferredTools({ deferred: ["WebFetch"], alwaysListed: ["read", search.name] }),
+      ],
+    });
+    await session.run("go");
+
+    const tr = session.messages.find((m) => m.role === "toolResult") as
+      | { content: { text?: string }[] }
+      | undefined;
+    expect(tr!.content.map((b) => b.text ?? "").join("")).toContain("No tools matched");
+    // 不存在的名字（模型瞎编）不激活任何工具：下一 turn WebFetch 仍隐藏。
+    expect(namesOf(fake.getCalls()[1]!.tools)).not.toContain("WebFetch");
+    fake.teardown();
+  });
+});
+
+describe("deferredTools: predicate-form deferred (function)", () => {
+  it("supports deferred as a (name) => boolean predicate", async () => {
+    const fake = createFakeModel([
+      { content: [{ type: "text", text: "ok" }], stopReason: "stop" },
+    ]);
+    const search = toolSearch();
+    const session = new AgentSession({
+      model: fake,
+      tools: [
+        trivialTool("read"),
+        trivialTool("WebFetch"),
+        trivialTool("WebSearch"),
+        search,
+      ],
+      hooks: [
+        deferredTools({
+          deferred: (n) => n.startsWith("Web"),
+          alwaysListed: ["read", search.name],
+        }),
+      ],
+    });
+    await session.run("go");
+
+    const listing = namesOf(fake.getCalls()[0]!.tools);
+    expect(listing).toEqual(expect.arrayContaining(["read", "toolSearch"]));
+    expect(listing).not.toContain("WebFetch");
+    expect(listing).not.toContain("WebSearch");
     fake.teardown();
   });
 });
@@ -186,6 +272,7 @@ describe("deferredTools + autoCompaction: estimation linkage (f)", () => {
     // 全集 3 个工具，deferred 掉一个大工具（bigTool），激活集只剩 read + toolSearch。
     // 通过自定义 tokenCounter 把「随发 tools 的条目数」暴露出来断言。
     const seenToolCounts: number[] = [];
+    const seenToolNames: string[][] = [];
     const bigTool = trivialTool("WebFetch");
     const search = toolSearch();
     // 跑 2 个 turn：turn-0 的 estimate 在本 turn 的 deferredTools 写 activeListing **之前**跑
@@ -211,6 +298,7 @@ describe("deferredTools + autoCompaction: estimation linkage (f)", () => {
           tokenCounter: {
             estimate: ({ tools }) => {
               seenToolCounts.push((tools ?? []).length);
+              seenToolNames.push(namesOf(tools));
               return 0;
             },
           },
@@ -226,6 +314,9 @@ describe("deferredTools + autoCompaction: estimation linkage (f)", () => {
     expect(seenToolCounts[0]).toBe(3);
     // turn-1：读到上一 turn 写入的激活子集 → 2（证明 estimate 确实改读 activeListing 而非永远全集）。
     expect(seenToolCounts[1]).toBe(2);
+    // 且被丢的恰是 deferred 的 WebFetch（不只是数量对，drop 对了工具）。
+    expect(seenToolNames[1]).toEqual(expect.arrayContaining(["read", "toolSearch"]));
+    expect(seenToolNames[1]).not.toContain("WebFetch");
     fake.teardown();
   });
 });
