@@ -1,6 +1,6 @@
 {
   "name": "@harness-pi/adapters",
-  "version": "0.2.2",
+  "version": "0.2.3",
   "description": "SessionStore adapters for harness-pi (JSONL file + Postgres). Concrete I/O behind the kernel SessionStore protocol.",
   "license": "MIT",
   "repository": {
