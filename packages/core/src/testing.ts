@@ -339,7 +339,12 @@ export function createTestContext(opts: TestContextOptions = {}): TestContextHan
 
   const defaultConfig: SessionConfigView = Object.freeze({
     sessionId: opts.sessionId ?? "test-session",
-    model: Object.freeze({ id: "test-model", provider: "test" }),
+    model: Object.freeze({
+      id: "test-model",
+      provider: "test",
+      contextWindow: 200_000,
+      maxTokens: 4096,
+    }),
     toolNames: Object.freeze([]),
     tools: Object.freeze([]),
     systemPrompt: "",
