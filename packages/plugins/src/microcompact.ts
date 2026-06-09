@@ -23,7 +23,7 @@
 
 import type { Hook } from "@harness-pi/core";
 import type { Message } from "@earendil-works/pi-ai";
-import { estimateTokensByChars } from "./auto-compaction.js";
+import { defaultTokenCounter, type TokenCounter } from "./auto-compaction.js";
 
 export interface MicrocompactOptions {
   /** 只清这些工具产生的 toolResult。**不 hardcode 工具名**——由调用方传（domain-free）。string[] 会归一成 Set。 */
@@ -44,8 +44,12 @@ export interface MicrocompactOptions {
   gapMinutes?: number;
   /** 当前时刻（ms）。默认 `Date.now`；测试可注入以走 `gapMinutes` 路径。 */
   now?: () => number;
-  /** token 估算器。默认 {@link estimateTokensByChars}（与 autoCompaction 同款、保守高估）。 */
-  estimateTokens?: (messages: Message[]) => number;
+  /**
+   * Token 计数器（issue #55）。默认 {@link defaultTokenCounter}（请求级估算：messages + tool schema +
+   * systemPrompt + 每消息开销）。触发判据与初始 running-total 据此算，故有 tools 时**触发点比旧 messages-only
+   * 更早**。tools / systemPrompt 由内核经 `ctx.config` 提供。接真 tokenizer 时覆盖即可。
+   */
+  tokenCounter?: TokenCounter;
   /** 占位符文案（默认带工具名 + 原内容字符数提示）。 */
   placeholderText?: (toolName: string, originalChars: number) => string;
 }
@@ -66,7 +70,8 @@ function contentChars(content: ToolResult["content"]): number {
  * 构造一个 microcompact hook。
  *
  * 触发判据（满足任一即动手）：
- *   1. **体积**：`estimateTokens(messages) > triggerTokens` → 从最旧白名单 toolResult 起清，降到 `targetTokens` 以下即停。
+ *   1. **体积**：`tokenCounter.estimate({messages, tools, systemPrompt}) > triggerTokens`（请求级估算，含每请求随发的
+ *      tool schema + systemPrompt）→ 从最旧白名单 toolResult 起清，降到 `targetTokens` 以下即停。
  *   2. **gap**（可选）：`now() - 最后一条消息的 timestamp > gapMinutes` 分钟（cache 已冷）→ 把**所有**可清的白名单
  *      toolResult 清掉（cache 反正要冷启重发，激进清以缩短下次冷启动 prompt，不受 targetTokens 早停约束）。
  *
@@ -89,7 +94,7 @@ export function microcompact(opts: MicrocompactOptions): Hook {
     throw new Error("microcompact: gapMinutes must be > 0");
   }
   const now = opts.now ?? Date.now;
-  const estimate = opts.estimateTokens ?? estimateTokensByChars;
+  const counter = opts.tokenCounter ?? defaultTokenCounter;
   const placeholderText =
     opts.placeholderText ??
     ((tool, chars) => `[microcompact: ${tool} output cleared, ~${chars} chars]`);
@@ -98,7 +103,16 @@ export function microcompact(opts: MicrocompactOptions): Hook {
     name: "microcompact",
     timeout: 50,
 
-    transformMessagesBeforeLlm(messages, _ctx) {
+    transformMessagesBeforeLlm(messages, ctx) {
+      // 请求级估算：messages 之外把每请求随发的 tool schema + systemPrompt 也计入（X1，issue #55）。
+      // 这两项是**固定常量**（清消息不改它），故下面增量 running-total 的 delta 里会自然抵消（见 142 行注释）。
+      const reqExtras = {
+        tools: ctx.config.tools,
+        systemPrompt: ctx.config.systemPrompt,
+      };
+      // 单消息估值（不含 tools/systemPrompt；其每消息开销常量在 delta 里抵消）——用于增量 running-total。
+      const estimateOne = (m: Message): number => counter.estimate({ messages: [m] });
+
       // gap 判据：最后一条消息的 timestamp 距 now 超过 gapMinutes（cache 已冷）。
       let coldCache = false;
       if (opts.gapMinutes !== undefined && messages.length > 0) {
@@ -108,7 +122,11 @@ export function microcompact(opts: MicrocompactOptions): Hook {
       }
 
       // 体积没超阈值、且 cache 不冷 → 原样返回。
-      if (estimate(messages) <= opts.triggerTokens && !coldCache) return undefined;
+      if (
+        counter.estimate({ messages, ...reqExtras }) <= opts.triggerTokens &&
+        !coldCache
+      )
+        return undefined;
 
       // 找出**可清**的白名单 toolResult 下标（排除最近 keepRecent 条 toolResult）。
       const toolResultIdxs: number[] = [];
@@ -129,13 +147,15 @@ export function microcompact(opts: MicrocompactOptions): Hook {
       // 体积触发：从最旧开始清，清到 ≤ targetTokens 即停（不必全清）。
       // gap 触发（coldCache）：不设早停，把所有可清的都清掉（cache 反正冷了）。
       //
-      // **增量 running total，不每轮全量重估。** estimateTokensByChars 是逐消息/逐块累加，故替换一条时
-      // `estimate([原]) - estimate([占位])` 正是整体估值的精确变化量——结果与全量重估完全一致，但复杂度从
-      // O(N·K) 降到 O(N+K)。这点很关键：本 transform 是**同步**的，`timeout:50` 拦不住同步循环（计时器在
-      // 同步阻塞期间根本没机会 fire），而本插件正是为大文件读取场景设计、harness 又是多 session 跑在单
-      // event loop（WorkPool/LeaseQueue）——全量重估的 O(N·K) 会让一个 session 的压缩同步冻住其余所有 session。
+      // **增量 running total，不每轮全量重估。** estimateRequestTokens 在 messages 字符估算之上只加**固定常量**
+      // （tool schema + systemPrompt + 每消息开销 ×N，N 不变）；其 messages 部分逐消息可加，故替换一条时
+      // `estimateOne(原) - estimateOne(占位)` 正是整体估值的精确变化量——固定常量在差值里抵消，结果与
+      // 全量 `counter.estimate({messages: out, ...reqExtras})` 重估**完全一致**，复杂度仍从 O(N·K) 降到 O(N+K)。
+      // 这点很关键：本 transform 是**同步**的，`timeout:50` 拦不住同步循环（计时器在同步阻塞期间根本没机会
+      // fire），而本插件正是为大文件读取场景设计、harness 又是多 session 跑在单 event loop（WorkPool/
+      // LeaseQueue）——全量重估的 O(N·K) 会让一个 session 的压缩同步冻住其余所有 session。
       const out = messages.slice(); // copy-on-write，绝不改原数组 / session.messages
-      let total = estimate(out); // 开头估一次
+      let total = counter.estimate({ messages: out, ...reqExtras }); // 开头估一次（含固定常量）
       for (const idx of clearable) {
         if (!coldCache && total <= targetTokens) break; // O(1) 比较；降到目标即停（gap 路径不早停）
         const msg = out[idx]! as ToolResult;
@@ -144,7 +164,7 @@ export function microcompact(opts: MicrocompactOptions): Hook {
           ...msg,
           content: [{ type: "text" as const, text: placeholderText(msg.toolName, chars) }],
         };
-        total -= estimate([msg]) - estimate([placeholder]); // 精确减去本条清理带来的体积下降
+        total -= estimateOne(msg) - estimateOne(placeholder); // 精确减去本条清理带来的体积下降（固定常量抵消）
         out[idx] = placeholder;
       }
 

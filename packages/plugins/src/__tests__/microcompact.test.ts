@@ -1,8 +1,9 @@
 import { describe, it, expect } from "vitest";
 import { AgentSession, createUserMessage } from "@harness-pi/core";
 import { createTestContext, createFakeModel } from "@harness-pi/core/testing";
-import type { Message } from "@earendil-works/pi-ai";
+import type { Message, Tool } from "@earendil-works/pi-ai";
 import { microcompact } from "../microcompact.js";
+import { estimateRequestTokens } from "../auto-compaction.js";
 
 function textOf(m: Message): string {
   return typeof m.content === "string"
@@ -331,5 +332,115 @@ describe("microcompact", () => {
     expect(textOf(session.messages[0]!)).toContain("FILE_A");
     expect(textOf(session.messages[1]!)).toContain("FILE_B");
     fake.teardown();
+  });
+
+  it("X1: triggers earlier when tools are big (messages just under, tools push over)", () => {
+    // 3 条小 read（远低于 triggerTokens 的 messages-only 体积），加上大 tool schema 后请求级估算越过阈值。
+    const msgs: Message[] = [
+      tr("read", "small-1"),
+      tr("read", "small-2"),
+      tr("read", "recent"), // keepRecent=1 保护
+    ];
+    const bigTool: Tool = {
+      name: "submit_evidence",
+      description: "Submit structured evidence with a long description. ".repeat(40),
+      parameters: {
+        type: "object",
+        properties: { body: { type: "string", description: "the body ".repeat(30) } },
+      },
+    } as Tool;
+
+    // 阈值卡在「无 tools 估算之下、有 tools 估算之上」之间。
+    const noTools = estimateRequestTokens({ messages: msgs });
+    const withTools = estimateRequestTokens({ messages: msgs, tools: [bigTool] });
+    expect(withTools).toBeGreaterThan(noTools);
+    const trigger = Math.floor((noTools + withTools) / 2);
+
+    const compact = microcompact({
+      compactableTools: ["read"],
+      triggerTokens: trigger,
+      targetTokens: 1,
+      keepRecent: 1,
+    });
+
+    // 有 tools（经 ctx.config）→ 触发清理。
+    const { ctx } = createTestContext({ config: { tools: [bigTool] } });
+    const view = compact.transformMessagesBeforeLlm!(msgs, ctx) as Message[];
+    expect(view).toBeDefined();
+    expect(textOf(view[0]!)).toContain("microcompact");
+
+    // 无 tools（messages-only 等价）→ 不触发。
+    const { ctx: ctxNoTools } = createTestContext();
+    expect(compact.transformMessagesBeforeLlm!(msgs, ctxNoTools)).toBeUndefined();
+  });
+
+  it("X1: incremental running-total equals a full re-estimate even with fixed tools/system constants", () => {
+    // 5 条大 read + 大 tools + system。增量 total（清一条减 estimateOne 差值）必须与「对清理后视图全量
+    // estimateRequestTokens」完全一致——固定常量（tools/system/每消息开销）在差值里抵消，数学等价。
+    const msgs: Message[] = Array.from({ length: 5 }, (_, i) =>
+      tr("read", `R${i}_` + "x".repeat(4000)),
+    );
+    const tools: Tool[] = [
+      {
+        name: "read",
+        description: "Read a file. ".repeat(30),
+        parameters: { type: "object", properties: { path: { type: "string" } } },
+      } as Tool,
+    ];
+    const systemPrompt = "You are a careful agent. ".repeat(50);
+
+    // triggerTokens = targetTokens = 2500：总体积 ~5000 > 2500 → 触发；清到 ≤2500 即停（中途早停、清部分），
+    // 考验早停判据用的增量 total 是否与全量重估一致。
+    const compact = microcompact({
+      compactableTools: ["read"],
+      triggerTokens: 2500,
+      targetTokens: 2500,
+      keepRecent: 0,
+    });
+    const { ctx } = createTestContext({ config: { tools, systemPrompt } });
+    const view = compact.transformMessagesBeforeLlm!(msgs, ctx) as Message[];
+    expect(view).toBeDefined();
+
+    // 部分被清（早停语义）：既有占位符也有原文留存。
+    const cleared = view.filter((mm) => textOf(mm).includes("microcompact")).length;
+    expect(cleared).toBeGreaterThan(0);
+    expect(cleared).toBeLessThan(5);
+
+    // 关键回归：对最终视图做全量请求级估算 ≤ targetTokens（增量 total 早停判据若与全量重估不一致，这里会破）。
+    const fullReEstimate = estimateRequestTokens({ messages: view, tools, systemPrompt });
+    expect(fullReEstimate).toBeLessThanOrEqual(2500);
+    // 且清掉最后一条之前的视图仍 > targetTokens（证明没有过度早停）——再恢复一条原文必然超标。
+    const idxsCleared: number[] = [];
+    view.forEach((mm, i) => {
+      if (textOf(mm).includes("microcompact")) idxsCleared.push(i);
+    });
+    const lastClearedIdx = idxsCleared[idxsCleared.length - 1]!;
+    const oneFewer = view.slice();
+    oneFewer[lastClearedIdx] = msgs[lastClearedIdx]!; // 把最后清的一条换回原文
+    const beforeLastClear = estimateRequestTokens({ messages: oneFewer, tools, systemPrompt });
+    expect(beforeLastClear).toBeGreaterThan(2500);
+  });
+
+  it("X1: a custom tokenCounter overrides the default", () => {
+    const calls: number[] = [];
+    const msgs: Message[] = [tr("read", "a"), tr("read", "b"), tr("read", "recent")];
+    const compact = microcompact({
+      compactableTools: ["read"],
+      triggerTokens: 100,
+      targetTokens: 1,
+      keepRecent: 1,
+      tokenCounter: {
+        estimate: ({ messages }) => {
+          calls.push(messages.length);
+          // 全量（>1 条）报超阈值以触发；单条 delta 用真实小值（这里给固定 50/条便于测调用）。
+          return messages.length === 1 ? 50 : 9999;
+        },
+      },
+    });
+    const { ctx } = createTestContext();
+    const view = compact.transformMessagesBeforeLlm!(msgs, ctx) as Message[];
+    expect(view).toBeDefined();
+    expect(textOf(view[0]!)).toContain("microcompact"); // 注入 counter 触发了清理
+    expect(calls.length).toBeGreaterThan(0); // counter 真被调用
   });
 });

@@ -13,6 +13,7 @@
 import type {
   AssistantMessage,
   Message,
+  Tool,
   ToolCall,
 } from "@earendil-works/pi-ai";
 import type { HarnessTool } from "./types.js";
@@ -314,6 +315,16 @@ export interface SessionConfigView {
   readonly sessionId: string;
   readonly model: { id: string; provider: string };
   readonly toolNames: ReadonlyArray<string>;
+  /**
+   * 发给 LLM 的 tool schema（pi-ai `Tool` 形态 `{name, description, parameters}`，与每次请求随发的
+   * 完全一致）。token 估算插件（X1）需要它来把「每请求随发的 tool schema 体积」计进 context 估算——
+   * 只数 `toolNames` 会**严重低估**真实 usage（D0 实测低估 ~7x）。只读、构造期冻结。
+   */
+  readonly tools: ReadonlyArray<Tool>;
+  /**
+   * 当前 system prompt（与每次请求随发的一致；无则空串）。同样是 token 估算需计入的固定开销。只读。
+   */
+  readonly systemPrompt: string;
   readonly maxTurns: number;
   readonly maxContinuations: number;
 }
