@@ -167,6 +167,13 @@ export function estimateRequestTokens(input: RequestTokenInput): number {
  *
  * **当前不实现 `count`**：pi-ai 0.74.2 无 `countTokens`（D0 已核），保留可选签名只为留一个不破坏 API 的接入口
  * （将来接真 tokenizer / provider count endpoint 时填它，消费方按需 `await counter.count?.(...)`）。
+ *
+ * **`estimate` 的 additivity 契约（自定义实现须遵守）**：`microcompact` 的增量 running-total
+ * （`total -= estimate({messages:[原]}) - estimate({messages:[占位]})`）只有在「`estimate` 对 messages 逐条可加、
+ * 且 tools/systemPrompt/每消息开销是**与单条消息无关的固定常量**」时才与全量重估逐 token 等价。默认
+ * {@link estimateRequestTokens} 满足。**非可加的真 BPE tokenizer 不满足**（token 跨消息边界、request framing 非线性）——
+ * 注入这类 counter 会让 microcompact 的体积早停漂移。届时应让 microcompact 改为每步全量 `estimate(整段)`，或只在
+ * autoCompaction（无增量假设）里用它。
  */
 export interface TokenCounter {
   estimate(input: RequestTokenInput): number;

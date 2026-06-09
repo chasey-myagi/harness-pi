@@ -120,6 +120,26 @@ describe("estimateTokensByChars (regression — must stay unchanged by X1)", () 
   it("empty message is still 0 (no per-message overhead added)", () => {
     expect(estimateTokensByChars([m("")])).toBe(0);
   });
+
+  it("counts the tool parameters schema (the largest D0 blind spot), not just name+description", () => {
+    // 两个 tool 仅 parameters 不同:大 schema 必须让估值严格更高。
+    // 防回归:若只数 name+description 漏了 JSON.stringify(parameters),本测试会失败。
+    const messages = [m("hi")];
+    const small = [tool("t", "d", { type: "object", properties: {} })];
+    const bigSchema = {
+      type: "object",
+      properties: Object.fromEntries(
+        Array.from({ length: 30 }, (_, i) => [
+          `field_${i}`,
+          { type: "string", description: "a reasonably long field description ".repeat(3) },
+        ]),
+      ),
+    };
+    const big = [tool("t", "d", bigSchema)];
+    expect(estimateRequestTokens({ messages, tools: big })).toBeGreaterThan(
+      estimateRequestTokens({ messages, tools: small }),
+    );
+  });
 });
 
 describe("defaultTokenCounter", () => {
