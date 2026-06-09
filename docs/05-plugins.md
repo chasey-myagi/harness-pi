@@ -1111,7 +1111,9 @@ export function getCostStats(ctx: HookContext): CostStats | undefined {
 
 #### Hook 形态
 
-Event (`onSessionStart` 建 tracker + `onTurnEnd` 检查 + 可触发 `continue: true` 注 nudge 或 abort)
+Event (`onSessionStart` 建 tracker + `onTurnStart` 每 turn 注入 remaining 提示 + `onTurnEnd` 做停止决策)
+
+> **X4(#43）更新**：持续反馈已移到 `onTurnStart`——**每 turn**(含第 1 call)注入结构化 remaining 提示,越过 `completionThreshold` 升级为 urgency;`onTurnEnd` 只保留停止决策(预算耗尽 / diminishing)。下方「完整设计」代码块为**早期示意**(命名/结构与现行 `packages/plugins/src/token-budget.ts` 已有出入),以实现为准。
 
 #### 完整设计
 

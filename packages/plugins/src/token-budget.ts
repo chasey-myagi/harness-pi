@@ -18,14 +18,14 @@ declare module "@harness-pi/core" {
 export interface TokenBudgetOptions {
   /** session 总 token 预算。null = 不限。 */
   budget: number | null;
-  /** 当前累计超 budget × completionThreshold 时停止 nudge（默认 0.9）。 */
+  /** 累计超 budget × completionThreshold 时,每 turn 的 remaining 提示升级为「该收尾」urgency（默认 0.9）。 */
   completionThreshold?: number;
   /** Diminishing returns 阈值。连续 N turn delta < 这个值视为收敛（默认 500）。 */
   diminishingThreshold?: number;
-  /** 触发 diminishing 判定前最少 continuation 次数（默认 3）。 */
+  /** 触发 diminishing 判定前最少 turn 数（默认 3）。 */
   diminishingMinNudges?: number;
-  /** 触发 nudge 的文案。 */
-  nudgeMessage?: (pct: number, turnTokens: number, budget: number) => string;
+  /** 每 turn 注入的 remaining 提示文案。`usedTokens` 是**累计**已用 token（非单 turn）。 */
+  nudgeMessage?: (pct: number, usedTokens: number, budget: number) => string;
 }
 
 interface BudgetTracker {
@@ -41,10 +41,11 @@ const KEY = "token-budget.tracker" as const;
 
 function defaultNudge(
   pct: number,
-  turnTokens: number,
+  usedTokens: number,
   budget: number,
 ): string {
-  return `You've used ${turnTokens.toLocaleString()} / ${budget.toLocaleString()} tokens (${pct}%). Continue if more useful work remains; otherwise summarize and stop.`;
+  const remaining = Math.max(0, budget - usedTokens);
+  return `Token budget: ${usedTokens.toLocaleString()} / ${budget.toLocaleString()} tokens used (${pct}%), ${remaining.toLocaleString()} remaining. Plan remaining work to fit the budget; summarize and stop if little remains.`;
 }
 
 function readCumulativeTokens(ctx: HookContext): number {
@@ -87,6 +88,24 @@ export function tokenBudget(opts: TokenBudgetOptions): Hook {
       tr.fallbackOutput += input.msg.usage.output ?? 0;
     },
 
+    // X4（issue #43）：每 turn 开始注入「剩余预算」结构化提示——**持续反馈**(不只停时)，让模型据此
+    // 规划剩余工作。补上原先 0.9~1.0 临界区无反馈的缺口。additionalContext 一次性消费语义正好匹配
+    // 「每 call 注入」；走通用 prompt 注入，不依赖 provider beta（实仓核验 pi-ai 无 task_budget）。
+    onTurnStart(_input, ctx): HookResult | void {
+      if (opts.budget == null || opts.budget <= 0) return;
+      const totalTokens = readCumulativeTokens(ctx);
+      const pct = Math.round((totalTokens / opts.budget) * 100);
+      // 越过 completionThreshold 进入临界区 → reminder 升级为「该收尾」紧急提示（补原先 0.9~1.0 无反馈的缺口）。
+      const urgent = totalTokens >= opts.budget * completionThreshold;
+      const body =
+        nudgeMsg(pct, totalTokens, opts.budget) +
+        (urgent ? " You are near the budget limit — wrap up and stop soon." : "");
+      return {
+        additionalContext: `<system-reminder>${body}</system-reminder>`,
+      };
+    },
+
+    // turn 收尾只做**停止决策**（预算耗尽 / diminishing 收敛）——持续 remaining 反馈已移到 onTurnStart。
     onTurnEnd(_input, ctx): HookResult | void {
       if (opts.budget == null || opts.budget <= 0) return;
 
@@ -94,7 +113,6 @@ export function tokenBudget(opts: TokenBudgetOptions): Hook {
       if (!tr) return;
 
       const totalTokens = readCumulativeTokens(ctx);
-      const pct = Math.round((totalTokens / opts.budget) * 100);
       const delta = totalTokens - tr.lastTotalTokens;
 
       const isDiminishing =
@@ -116,16 +134,8 @@ export function tokenBudget(opts: TokenBudgetOptions): Hook {
         };
       }
 
-      if (totalTokens < opts.budget * completionThreshold) {
-        tr.nudgeCount++;
-        tr.lastDeltaTokens = delta;
-        tr.lastTotalTokens = totalTokens;
-        return {
-          additionalContext: `<system-reminder>${nudgeMsg(pct, totalTokens, opts.budget)}</system-reminder>`,
-        };
-      }
-
-      // 已到完成阈值但未爆——不强停，让 LLM 自然收尾
+      // 每 turn 推进收敛跟踪（nudgeCount 现作「已观察 turn 数」，喂 diminishing 判定）。
+      tr.nudgeCount++;
       tr.lastDeltaTokens = delta;
       tr.lastTotalTokens = totalTokens;
       return;
