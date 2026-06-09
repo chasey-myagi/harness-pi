@@ -5,6 +5,7 @@ import {
   estimateTokensByChars,
   estimateRequestTokens,
   defaultTokenCounter,
+  PER_MESSAGE_OVERHEAD,
 } from "../auto-compaction.js";
 
 const m = (t: string): Message => createUserMessage(t);
@@ -90,8 +91,8 @@ describe("estimateRequestTokens (X1, issue #55)", () => {
     // CJK：每码点 ≈ 1 token，仍生效。
     const cjk = "你好世界".repeat(10); // 40 码点
     const cjkEst = estimateRequestTokens({ messages: [m(cjk)] });
-    // ≈ 40 (CJK) + 4 (每消息开销)。
-    expect(cjkEst).toBe(40 + 4);
+    // ≈ 40 (CJK) + 每消息开销。
+    expect(cjkEst).toBe(40 + PER_MESSAGE_OVERHEAD);
 
     // 图片：扁平 1000，不随 data 长度膨胀。
     const imgMsg: Message = {
@@ -100,13 +101,13 @@ describe("estimateRequestTokens (X1, issue #55)", () => {
       timestamp: 0,
     };
     const imgEst = estimateRequestTokens({ messages: [imgMsg] });
-    expect(imgEst).toBe(1000 + 4); // 1000 (image) + 每消息开销
+    expect(imgEst).toBe(1000 + PER_MESSAGE_OVERHEAD); // 1000 (image) + 每消息开销
   });
 
   it("equals messages-only + per-message overhead when tools/systemPrompt are omitted", () => {
     const messages = [m("hello world"), m("second message")];
     expect(estimateRequestTokens({ messages })).toBe(
-      estimateTokensByChars(messages) + messages.length * 4,
+      estimateTokensByChars(messages) + messages.length * PER_MESSAGE_OVERHEAD,
     );
   });
 });
