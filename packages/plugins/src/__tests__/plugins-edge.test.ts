@@ -570,7 +570,7 @@ describe("token-budget edge", () => {
     expect(summary.reason).toBe("done");
   });
 
-  it("nudge attached when token% in middle range", async () => {
+  it("injects a budget reminder into the next call (now unconditional per-turn via onTurnStart)", async () => {
     const model = createFakeModel([
       {
         content: [
@@ -606,6 +606,102 @@ describe("token-budget edge", () => {
         (m.content as string).includes("tokens"),
     );
     expect(nudge).toBeDefined();
+  });
+
+  it("X4: continuous remaining reminder fires on the very first call (turn-start, not only at stop)", async () => {
+    const model = createFakeModel([
+      { content: [{ type: "text", text: "ok" }], usage: { input: 5, output: 2 } },
+    ]);
+    let firstCall: any[] = [];
+    let captured = false;
+    const spy: Hook = {
+      name: "spy",
+      transformMessagesBeforeLlm(msgs) {
+        if (!captured) {
+          firstCall = msgs;
+          captured = true;
+        }
+        return undefined;
+      },
+    };
+    const session = new AgentSession({
+      model,
+      tools: [],
+      hooks: [tokenBudget({ budget: 1000 }), spy],
+    });
+    await session.run("go");
+    // 第 1 个 LLM call 就带 remaining 反馈(onTurnStart 持续注入),不是只在停时。
+    const reminder = firstCall.find(
+      (m: any) =>
+        typeof m.content === "string" &&
+        (m.content as string).includes("system-reminder") &&
+        (m.content as string).includes("remaining"),
+    );
+    expect(reminder).toBeDefined();
+    // <completionThreshold(此处 0%)不应升级为 urgency —— 锁住升级是条件性的。
+    expect(reminder!.content as string).not.toContain("near the budget limit");
+  });
+
+  it("X4: reminder still fires above completionThreshold (0.9~1.0 gap) and escalates to urgency", async () => {
+    const model = createFakeModel([
+      // turn-1 用掉 95/100 → 越过 completionThreshold(默认 0.9):旧代码此区间不 nudge,X4 仍注入 + urgency。
+      {
+        content: [{ type: "toolCall", name: "echo", arguments: { msg: "x" } }],
+        usage: { input: 95, output: 0 },
+        stopReason: "toolUse",
+      },
+      { content: [{ type: "text", text: "ok" }], usage: { input: 1, output: 1 } },
+    ]);
+    let seen: any[] = [];
+    const spy: Hook = {
+      name: "spy",
+      transformMessagesBeforeLlm(msgs) {
+        seen = msgs;
+        return undefined;
+      },
+    };
+    const session = new AgentSession({
+      model,
+      tools: [echoTool],
+      hooks: [costTracker(), tokenBudget({ budget: 100 }), spy],
+    });
+    await session.run("go");
+    // turn-2 在 95/100(>0.9)仍收到 reminder,且含 urgency 收尾提示。
+    const reminder = seen.find(
+      (m: any) =>
+        typeof m.content === "string" &&
+        (m.content as string).includes("system-reminder") &&
+        (m.content as string).includes("remaining"),
+    );
+    expect(reminder).toBeDefined();
+    expect(reminder!.content as string).toContain("near the budget limit");
+  });
+
+  it("X4: diminishing-returns still stops the run under the every-turn nudgeCount", async () => {
+    // 每 turn ~50 token(<diminishingThreshold 500),累计远未爆 budget。X4 把 nudgeCount 改为每 turn
+    // 递增——这里锁住「连续小 delta + nudgeCount 累积 → diminishing 收敛仍能强停」,防未来重构回退。
+    const model = createFakeModel(
+      Array.from({ length: 6 }, () => ({
+        content: [{ type: "text", text: "x" }],
+        usage: { input: 50, output: 0 },
+        stopReason: "toolUse" as const,
+      })),
+    );
+    const session = new AgentSession({
+      model,
+      tools: [],
+      hooks: [
+        costTracker(),
+        tokenBudget({
+          budget: 100_000,
+          diminishingThreshold: 500,
+          diminishingMinNudges: 3,
+        }),
+      ],
+    });
+    const summary = await session.run("go");
+    expect(summary.reason).toBe("aborted");
+    expect(summary.abortReason).toContain("diminishing returns");
   });
 });
 
