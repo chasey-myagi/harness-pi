@@ -207,6 +207,42 @@ export const defaultTokenCounter: TokenCounter = {
 };
 
 /**
+ * 混合 token 计量（issue #13 / C5）：取 messages 里**最近一条带真 `Usage` 的 assistant** 作基线
+ * （`input + cacheRead + cacheWrite + output` —— 那一刻真实的 prompt+output 体积，**已含 tools/systemPrompt**），
+ * 只对其后的消息走字符估算补尾（{@link estimateTokensByChars}，messages-only，**不再加 tools/systemPrompt**：
+ * 它们已计在真基线里，再加会双重计）。有真 usage 时基线精确——修掉 D0 实测的残差（messages-only 低估
+ * ~7x；X1 加回 tools/sys 后仍 ~2x，因 chat 模板/tool schema 自有格式比 char/4 重）。
+ *
+ * 无可用真 usage 时退回 {@link estimateRequestTokens}（X1，含 tools/systemPrompt）：(a) turn-0 还没 assistant；
+ * (b) assistant `usage` 全 0（fake-model / provider 未回 usage）—— 视为「无真值」而非「真的 0」。这保证不挂真
+ * provider 时（如 fake-model 测试）行为与 {@link defaultTokenCounter} 完全一致。
+ *
+ * **不满足 additivity 契约**（基线随「最近 assistant」跳变、非逐条可加）——故**别**用作 microcompact 的增量
+ * counter；它专给 autoCompaction（每 turn 全量 estimate、无增量假设）做更准的触发判据。
+ */
+export const hybridTokenCounter: TokenCounter = {
+  estimate(input: RequestTokenInput): number {
+    const msgs = input.messages;
+    for (let i = msgs.length - 1; i >= 0; i--) {
+      const m = msgs[i];
+      if (m === undefined || m.role !== "assistant") continue;
+      const u = m.usage;
+      // 判别「有无真值」**故意只看 input+output、忽略 cache**：fake-model / 未回 usage 的标志是
+      // input==output==0(testing.ts zeroUsage);真 assistant 输出内容必有 output>0。别把判别改成含
+      // cacheRead/cacheWrite —— 否则纯缓存命中(理论上 input=output=0、cacheRead>0)会被误判为真值,
+      // 且会让 fake 全 0 的 parity 假设变脆。continue(非 break):越过零-usage 继续往前找最近真值。
+      if (!u || u.input + u.output <= 0) continue;
+      // 基线 = 那一刻真实 prompt+output footprint(= pi-ai 自己的 totalTokens;input 已排除 cached,故 +cache)。
+      const baseline = u.input + u.cacheRead + u.cacheWrite + u.output;
+      // 补尾只数后缀消息字符(messages-only)。注:未加后缀的每消息 framing(~4tok/条),故对后缀略偏低估;
+      // 后缀在 turn 间有界(就最近几条)、基线主导且精确,这点偏差对「宁高勿低」的触发阈值可忽略。
+      return baseline + estimateTokensByChars(msgs.slice(i + 1));
+    }
+    return estimateRequestTokens(input);
+  },
+};
+
+/**
  * 构造一个 autoCompaction hook。三条**使用须知**（issue #13，违反会得到悄无声息的错误压缩）：
  *
  * 1. **Hook 顺序**：本插件从 `transformMessagesBeforeLlm` 收到的 `messages`（≈ `session.messages`）估算
@@ -243,7 +279,8 @@ export function autoCompaction(opts: AutoCompactionOptions): Hook {
   if (opts.safetyBuffer !== undefined && opts.safetyBuffer < 0) {
     throw new Error("autoCompaction: safetyBuffer must be >= 0");
   }
-  const counter = opts.tokenCounter ?? defaultTokenCounter;
+  // 默认走混合计量（C5）：有真 usage 用真基线（更准、修 D0 残差），无真 usage（turn-0 / fake）退回 X1。
+  const counter = opts.tokenCounter ?? hybridTokenCounter;
   const safetyBuffer = opts.safetyBuffer ?? 0;
   // 百分比路径阈值是构造期常量；窗口路径阈值依赖 ctx.config.model.contextWindow，须每请求算。
   const percentThreshold =
