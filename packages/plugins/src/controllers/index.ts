@@ -48,8 +48,12 @@ export type {
   CompactRestartResult,
 } from "./compact-restart-fresh.js";
 
-export { subAgentTool } from "./sub-agent-tool.js";
-export type { SubAgentToolOptions } from "./sub-agent-tool.js";
+export { subAgentTool, routedSubAgentTool } from "./sub-agent-tool.js";
+export type {
+  SubAgentToolOptions,
+  AgentSpec,
+  RoutedSubAgentToolOptions,
+} from "./sub-agent-tool.js";
 
 export { persistCompactionBoundary } from "./persist-compaction-boundary.js";
 export type { PersistCompactionBoundaryOptions } from "./persist-compaction-boundary.js";

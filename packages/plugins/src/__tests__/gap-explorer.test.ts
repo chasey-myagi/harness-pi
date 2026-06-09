@@ -7,9 +7,11 @@ import { AgentSession, Type, type HarnessTool } from "@harness-pi/core";
 import { createFakeModel, createTestContext } from "@harness-pi/core/testing";
 import {
   subAgentTool,
+  routedSubAgentTool,
   GapExplorer,
   type Gap,
   type ExplorerFinding,
+  type AgentSpec,
 } from "../controllers/index.js";
 
 function blockText(content: unknown): string {
@@ -298,6 +300,252 @@ describe("subAgentTool depth gate (#45)", () => {
     const result = await tool.execute({ task: "t" }, ctx, new AbortController().signal);
     expect(blockText(result.content)).toContain("ok");
     subFake.teardown();
+  });
+});
+
+/* ──────────────── routedSubAgentTool (#59 / S3) ──────────────── */
+
+describe("routedSubAgentTool (#59)", () => {
+  /** 从 TypeBox Union(of Literals) schema 抽出枚举值（形如 anyOf:[{const},...]）。 */
+  function enumValues(params: unknown): string[] {
+    const props = (params as { properties?: Record<string, unknown> }).properties ?? {};
+    const at = props["agent_type"] as { anyOf?: Array<{ const?: string }> } | undefined;
+    return (at?.anyOf ?? []).map((b) => b.const).filter((c): c is string => typeof c === "string");
+  }
+
+  it("exposes agent_type as an enum of all spec types and folds each whenToUse into the description", () => {
+    const specs: AgentSpec[] = [
+      {
+        type: "researcher",
+        whenToUse: "use for open-ended investigation",
+        sessionFactory: () => new AgentSession({ model: createFakeModel([]), tools: [] }),
+      },
+      {
+        type: "coder",
+        whenToUse: "use for writing or editing code",
+        sessionFactory: () => new AgentSession({ model: createFakeModel([]), tools: [] }),
+      },
+    ];
+    const tool = routedSubAgentTool({ specs });
+    expect(enumValues(tool.parameters).sort()).toEqual(["coder", "researcher"]);
+    // description 拼进每个 spec 的 whenToUse（含 type 标签），供模型路由。
+    expect(tool.description).toContain("use for open-ended investigation");
+    expect(tool.description).toContain("use for writing or editing code");
+    expect(tool.description).toContain("researcher");
+    expect(tool.description).toContain("coder");
+  });
+
+  it("routes a valid agent_type to that spec's sessionFactory (distinguishable results)", async () => {
+    // 两个 spec 各自 fake 出可区分的终态文本 → 断言路由命中正确 factory。
+    const aFake = createFakeModel([{ content: [{ type: "text", text: "ANSWER-A" }], stopReason: "stop" }]);
+    const bFake = createFakeModel([{ content: [{ type: "text", text: "ANSWER-B" }], stopReason: "stop" }]);
+    let aCalls = 0;
+    let bCalls = 0;
+    const tool = routedSubAgentTool({
+      specs: [
+        {
+          type: "alpha",
+          whenToUse: "alpha tasks",
+          sessionFactory: () => {
+            aCalls++;
+            return new AgentSession({ model: aFake, tools: [] });
+          },
+        },
+        {
+          type: "beta",
+          whenToUse: "beta tasks",
+          sessionFactory: () => {
+            bCalls++;
+            return new AgentSession({ model: bFake, tools: [] });
+          },
+        },
+      ],
+    });
+    const { ctx } = createTestContext();
+    const sig = new AbortController().signal;
+
+    const rb = await tool.execute({ agent_type: "beta", task: "do it" }, ctx, sig);
+    expect(blockText(rb.content)).toContain("ANSWER-B");
+    expect(bCalls).toBe(1);
+    expect(aCalls).toBe(0); // 没误派给 alpha
+
+    const ra = await tool.execute({ agent_type: "alpha", task: "do it" }, ctx, sig);
+    expect(blockText(ra.content)).toContain("ANSWER-A");
+    expect(aCalls).toBe(1);
+
+    aFake.teardown();
+    bFake.teardown();
+  });
+
+  it("passes the task + parent ctx (and spec maxTurns) to the routed sessionFactory", async () => {
+    const subFake = createFakeModel([{ content: [{ type: "text", text: "ok" }], stopReason: "stop" }]);
+    let gotTask = "";
+    let gotCtx: unknown = null;
+    let gotMaxTurns: number | undefined = -1;
+    const { ctx } = createTestContext();
+    const tool = routedSubAgentTool({
+      specs: [
+        {
+          type: "x",
+          whenToUse: "x",
+          maxTurns: 7,
+          sessionFactory: (task, c, maxTurns) => {
+            gotTask = task;
+            gotCtx = c;
+            gotMaxTurns = maxTurns;
+            return new AgentSession({ model: subFake, tools: [], ...(maxTurns ? { maxTurns } : {}) });
+          },
+        },
+      ],
+    });
+    await tool.execute({ agent_type: "x", task: "hello" }, ctx, new AbortController().signal);
+    expect(gotTask).toBe("hello");
+    expect(gotCtx).toBe(ctx);
+    expect(gotMaxTurns).toBe(7); // spec.maxTurns 透传给工厂第三参
+    subFake.teardown();
+  });
+
+  it("throws a clear error on an unknown agent_type (fail-loud, no crash)", async () => {
+    const subFake = createFakeModel([{ content: [{ type: "text", text: "ok" }], stopReason: "stop" }]);
+    let factoryCalls = 0;
+    const tool = routedSubAgentTool({
+      specs: [
+        {
+          type: "known",
+          whenToUse: "k",
+          sessionFactory: () => {
+            factoryCalls++;
+            return new AgentSession({ model: subFake, tools: [] });
+          },
+        },
+      ],
+    });
+    const { ctx } = createTestContext();
+    const sig = new AbortController().signal;
+    await expect(
+      tool.execute({ agent_type: "nope", task: "t" }, ctx, sig),
+    ).rejects.toThrow(/unknown agent_type "nope".*expected one of: known/);
+    expect(factoryCalls).toBe(0); // 非法 type 绝不 spawn
+    subFake.teardown();
+  });
+
+  it("throws a clear error on a missing agent_type", async () => {
+    const subFake = createFakeModel([{ content: [{ type: "text", text: "ok" }], stopReason: "stop" }]);
+    const tool = routedSubAgentTool({
+      specs: [{ type: "k", whenToUse: "k", sessionFactory: () => new AgentSession({ model: subFake, tools: [] }) }],
+    });
+    const { ctx } = createTestContext();
+    await expect(
+      tool.execute({ task: "t" }, ctx, new AbortController().signal),
+    ).rejects.toThrow(/unknown agent_type/);
+    subFake.teardown();
+  });
+
+  it("throws on an empty/missing task (HarnessTool error contract)", async () => {
+    const subFake = createFakeModel([]);
+    const tool = routedSubAgentTool({
+      specs: [{ type: "k", whenToUse: "k", sessionFactory: () => new AgentSession({ model: subFake, tools: [] }) }],
+    });
+    const { ctx } = createTestContext();
+    const sig = new AbortController().signal;
+    await expect(tool.execute({ agent_type: "k", task: "" }, ctx, sig)).rejects.toThrow(/empty task/);
+    await expect(tool.execute({ agent_type: "k", task: "   " }, ctx, sig)).rejects.toThrow(/empty task/);
+    subFake.teardown();
+  });
+
+  it("rejects empty specs and duplicate types at construction (fail-loud)", () => {
+    expect(() => routedSubAgentTool({ specs: [] })).toThrow(/specs must not be empty/);
+    const dup: AgentSpec[] = [
+      { type: "dup", whenToUse: "a", sessionFactory: () => new AgentSession({ model: createFakeModel([]), tools: [] }) },
+      { type: "dup", whenToUse: "b", sessionFactory: () => new AgentSession({ model: createFakeModel([]), tools: [] }) },
+    ];
+    expect(() => routedSubAgentTool({ specs: dup })).toThrow(/duplicate agent type "dup"/);
+  });
+
+  it("enforces the maxSubAgents budget across all types (fail-loud after the cap)", async () => {
+    const subFake = createFakeModel([{ content: [{ type: "text", text: "1" }], stopReason: "stop" }]);
+    const mk = () => new AgentSession({ model: subFake, tools: [] });
+    const tool = routedSubAgentTool({
+      maxSubAgents: 1,
+      specs: [
+        { type: "a", whenToUse: "a", sessionFactory: mk },
+        { type: "b", whenToUse: "b", sessionFactory: mk },
+      ],
+    });
+    const { ctx } = createTestContext();
+    const sig = new AbortController().signal;
+    await tool.execute({ agent_type: "a", task: "t" }, ctx, sig); // spawned=1
+    // 即便换一种 type，横向预算是跨 type 合计 → 第 2 个被拦。
+    await expect(
+      tool.execute({ agent_type: "b", task: "t" }, ctx, sig),
+    ).rejects.toThrow(/budget exhausted/);
+    subFake.teardown();
+  });
+
+  it("honors the vertical depth gate (#45): top-level spawn blocked when maxDepth=0", async () => {
+    const subFake = createFakeModel([{ content: [{ type: "text", text: "x" }], stopReason: "stop" }]);
+    let factoryCalls = 0;
+    const tool = routedSubAgentTool({
+      maxDepth: 0,
+      specs: [
+        {
+          type: "k",
+          whenToUse: "k",
+          sessionFactory: () => {
+            factoryCalls++;
+            return new AgentSession({ model: subFake, tools: [] });
+          },
+        },
+      ],
+    });
+    const { ctx } = createTestContext(); // depth 缺省 0
+    await expect(
+      tool.execute({ agent_type: "k", task: "t" }, ctx, new AbortController().signal),
+    ).rejects.toThrow(/depth limit \(maxDepth=0\) reached/);
+    expect(factoryCalls).toBe(0);
+    subFake.teardown();
+  });
+
+  it("propagates depth across layers (#45): nested routed spawn hits the depth limit at maxDepth", async () => {
+    // 嵌套：每层 routed tool 先 spawn 一层再收尾。depth 沿 lineage +1，maxDepth=2 时孙(depth 2)被挡。
+    const fakes: Array<ReturnType<typeof createFakeModel>> = [];
+    const depthsSeen: number[] = [];
+    const build = (): AgentSession => {
+      const fake = createFakeModel([
+        { content: [{ type: "toolCall", name: "subAgent", arguments: { agent_type: "worker", task: "deeper" } }] },
+        { content: [{ type: "text", text: "layer done" }], stopReason: "stop" },
+      ]);
+      fakes.push(fake);
+      const tool = routedSubAgentTool({
+        maxDepth: 2,
+        specs: [
+          {
+            type: "worker",
+            whenToUse: "worker",
+            sessionFactory: (_task, c) => {
+              depthsSeen.push(c.state.get("subAgent.depth") ?? 0);
+              return build();
+            },
+          },
+        ],
+      });
+      return new AgentSession({ model: fake, tools: [tool] });
+    };
+    const root = build();
+    const res = await root.run("start");
+    expect(res.reason).toBe("done");
+
+    // 孙(depth 2)层 execute 读到 depth=2>=2 → throw，kernel 包成 isError toolResult。
+    const errText = fakes
+      .flatMap((f) => f.getCalls())
+      .flatMap((c) => c.messages)
+      .filter((m) => m.role === "toolResult")
+      .map((m) => blockText((m as { content: unknown }).content))
+      .join("\n");
+    expect(errText).toContain("depth limit (maxDepth=2) reached");
+    // spawn 只发生在 depth 0、1（孙被挡，不进 sessionFactory）。
+    expect(depthsSeen).toEqual([0, 1]);
+    fakes.forEach((f) => f.teardown());
   });
 });
 
