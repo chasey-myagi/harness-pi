@@ -73,7 +73,7 @@ Controllers (`@harness-pi/plugins/controllers`):
 - **forkSession / forkSessionAll** — branch a session into one or more isolated forks.
 - **LifecycleRestart** — restart-on-lifecycle supervision for long-running sessions.
 - **compactOnOverflow / CompactRestartFresh** — restart a session fresh from a compacted summary on context overflow.
-- **subAgentTool** — wrap a child session as a callable tool.
+- **subAgentTool / routedSubAgentTool** — wrap a child session as a callable tool; the routed variant picks among multiple `AgentSpec`s by `agent_type`.
 - **GapExplorer** — explore and report coverage gaps in a result set.
 
 Metrics:
