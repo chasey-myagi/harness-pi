@@ -1,6 +1,6 @@
 {
   "name": "@harness-pi/plugins",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "Standard library of harness-pi plugins + controllers + sinks",
   "license": "MIT",
   "repository": {
