@@ -278,9 +278,11 @@ export function autoCompaction(opts: AutoCompactionOptions): Hook {
       if (threshold === undefined) return undefined;
 
       // 未到 token 阈值 → 原样。tools / systemPrompt 由 ctx.config 提供，计入每请求随发的固定开销（X1）。
+      // deferredTools 在场时，本 turn 实际随发的是激活子集（deferred.activeListing），按它估更准；
+      // 无 deferredTools 则退回 ctx.config.tools 全集（0.2.x 行为）。
       const estimated = counter.estimate({
         messages,
-        tools: ctx.config.tools,
+        tools: ctx.state.get("deferred.activeListing") ?? ctx.config.tools,
         systemPrompt: ctx.config.systemPrompt,
       });
       if (estimated <= threshold) return undefined;
