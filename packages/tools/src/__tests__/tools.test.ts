@@ -187,7 +187,43 @@ describe("read tool", () => {
       limit: 5,
       maxTokens: 100,
     });
-    expect(text(sliced)).toContain("xxxx");
+    // 切片成功路径要精确钉住窗口大小:以 5 行原文开头、且不含第 6 行
+    // (read 对部分读会追加续读页脚,故不能整串相等;但"恰好 5 行"必须钉死)。
+    const fiveLines = Array.from({ length: 5 }, () => "x".repeat(40)).join("\n");
+    const sixLines = Array.from({ length: 6 }, () => "x".repeat(40)).join("\n");
+    expect(text(sliced).startsWith(fiveLines)).toBe(true);
+    expect(text(sliced).startsWith(sixLines)).toBe(false);
+  });
+
+  it("treats an estimate exactly equal to maxTokens as within the cap (boundary, not off-by-one)", async () => {
+    // 整个特性就是一个阈值判定 `estimated > maxTokens`——把临界点两侧都钉死,
+    // 防 `>` 被改成 `>=` 这类回归在边界静默改变行为。
+    await writeFile(path.join(dir, "exact.txt"), "x".repeat(40)); // 40B / 4 = 10 === cap
+    const atCap = await runTool(createReadTool(dir), { path: "exact.txt", maxTokens: 10 });
+    expect(text(atCap)).toBe("x".repeat(40)); // 恰好等于 → 返回完整内容,不 throw
+
+    await writeFile(path.join(dir, "over.txt"), "x".repeat(41)); // 41B / 4 → ceil = 11 > cap
+    await expect(
+      runTool(createReadTool(dir), { path: "over.txt", maxTokens: 10 }),
+    ).rejects.toThrow(/exceeds maxTokens=10/); // 超 1 token → throw
+  });
+
+  it("rejects a negative maxTokens via the shared positive-integer validator", async () => {
+    await writeFile(path.join(dir, "notes.txt"), "hi");
+    await expect(
+      runTool(createReadTool(dir), { path: "notes.txt", maxTokens: -1 }),
+    ).rejects.toThrow(/must be a non-negative number/);
+  });
+
+  it("still applies normal byte truncation when content is within maxTokens", async () => {
+    // token 检查跑在 truncateHead 之前的 selected 上;未超 cap 时不该干扰既有 lines/bytes 截断。
+    await writeFile(path.join(dir, "big.txt"), "x".repeat(400)); // 400B / 4 = 100 估算
+    const result = await runTool(createReadTool(dir, { maxBytes: 100 }), {
+      path: "big.txt",
+      maxTokens: 200, // 100 <= 200 → 不 throw,落到字节截断
+    });
+    expect(result.details).toBeDefined(); // 发生了截断(details 带 truncation 元数据)
+    expect(Buffer.byteLength(text(result), "utf8")).toBeLessThan(400); // 返回的是截断后内容
   });
 
   it("rejects symlink escapes and bounded default exports reject outside cwd", async () => {
