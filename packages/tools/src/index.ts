@@ -24,6 +24,7 @@ import {
   DEFAULT_MAX_BYTES,
   DEFAULT_MAX_LINES,
   GREP_MAX_LINE_LENGTH,
+  estimateReadTokens,
   formatSize,
   truncateHead,
   truncateLine,
@@ -225,6 +226,7 @@ export function createReadTool(
       path: Type.String({ description: "Path to the file to read (relative or absolute)" }),
       offset: Type.Optional(Type.Number({ description: "Line number to start reading from (1-indexed)" })),
       limit: Type.Optional(Type.Number({ description: "Maximum number of lines to read" })),
+      maxTokens: Type.Optional(Type.Number({ description: "If the estimated token count of the content exceeds this, return a short error instead of content. Re-read a smaller range with offset+limit." })),
     }),
     isConcurrencySafe: () => true,
     async execute(args, _ctx, signal) {
@@ -256,6 +258,7 @@ export function createReadTool(
         requestedPath,
         offset: asOptionalPositiveInteger(args["offset"], "offset"),
         limit: asOptionalPositiveInteger(args["limit"], "limit"),
+        maxTokens: asOptionalPositiveInteger(args["maxTokens"], "maxTokens"),
         maxLines: options.maxLines,
         maxBytes: options.maxBytes,
       });
@@ -715,6 +718,7 @@ function buildReadTextOutput(opts: {
   requestedPath: string;
   offset?: number | undefined;
   limit?: number | undefined;
+  maxTokens?: number | undefined;
   maxLines?: number | undefined;
   maxBytes?: number | undefined;
 }): ReadTextOutput {
@@ -733,6 +737,15 @@ function buildReadTextOutput(opts: {
     userLimitedLines = endLine - startLine;
   } else {
     selected = allLines.slice(startLine).join("\n");
+  }
+
+  if (opts.maxTokens !== undefined) {
+    const estimated = estimateReadTokens(selected, opts.requestedPath);
+    if (estimated > opts.maxTokens) {
+      throw new Error(
+        `Content ~${estimated} tokens exceeds maxTokens=${opts.maxTokens}. Retry with offset+limit to read in smaller chunks.`,
+      );
+    }
   }
 
   const truncation = truncateHead(selected, {

@@ -27,6 +27,17 @@ export function formatSize(bytes: number): string {
   return `${(bytes / (1024 * 1024)).toFixed(1)}MB`;
 }
 
+/**
+ * Self-contained char-based token estimate for read output. Denser formats
+ * (json/jsonl) pack fewer chars per token, so use 2 bytes/token there and
+ * 4 bytes/token elsewhere. Estimate = ceil(utf8 bytes / bytesPerToken).
+ */
+export function estimateReadTokens(content: string, filePath: string): number {
+  const ext = filePath.slice(filePath.lastIndexOf(".") + 1).toLowerCase();
+  const bytesPerToken = ext === "json" || ext === "jsonl" ? 2 : 4;
+  return Math.ceil(Buffer.byteLength(content, "utf8") / bytesPerToken);
+}
+
 export function truncateHead(
   content: string,
   options: TruncationOptions = {},

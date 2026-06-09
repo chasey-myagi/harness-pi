@@ -39,7 +39,8 @@ const PI_053_CODING_DEFAULTS = ["read", "bash", "edit", "write"] as const;
 const PI_053_READ_ONLY_DEFAULTS = ["read", "grep", "find", "ls"] as const;
 
 const PI_053_SCHEMA_KEYS = {
-  read: ["path", "offset", "limit"],
+  // maxTokens 是 X3(#60)的第一方扩展,有意超出上游 0.53 的 read schema。
+  read: ["path", "offset", "limit", "maxTokens"],
   bash: ["command", "timeout"],
   edit: ["path", "oldText", "newText"],
   write: ["path", "content"],
