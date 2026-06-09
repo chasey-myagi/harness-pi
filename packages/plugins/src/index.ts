@@ -49,6 +49,7 @@ export {
   estimateTokensByChars,
   estimateRequestTokens,
   defaultTokenCounter,
+  hybridTokenCounter,
 } from "./auto-compaction.js";
 export type {
   AutoCompactionOptions,

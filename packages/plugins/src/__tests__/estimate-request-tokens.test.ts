@@ -5,6 +5,7 @@ import {
   estimateTokensByChars,
   estimateRequestTokens,
   defaultTokenCounter,
+  hybridTokenCounter,
   PER_MESSAGE_OVERHEAD,
 } from "../auto-compaction.js";
 
@@ -155,5 +156,104 @@ describe("defaultTokenCounter", () => {
 
   it("does not implement count (count? is a future opt-in seam)", () => {
     expect(defaultTokenCounter.count).toBeUndefined();
+  });
+});
+
+/** 造一条带真 Usage 的 assistant message。 */
+function assistantMsg(
+  text: string,
+  u: { input: number; output: number; cacheRead?: number; cacheWrite?: number },
+): Message {
+  return {
+    role: "assistant",
+    content: [{ type: "text", text }],
+    usage: {
+      input: u.input,
+      output: u.output,
+      cacheRead: u.cacheRead ?? 0,
+      cacheWrite: u.cacheWrite ?? 0,
+      totalTokens: u.input + u.output,
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+    },
+    timestamp: 0,
+  } as Message;
+}
+
+describe("hybridTokenCounter (C5, issue #13)", () => {
+  it("uses the most-recent real-usage assistant as baseline + char-estimates only the suffix", () => {
+    const messages = [m("hello"), assistantMsg("hi", { input: 1000, output: 200, cacheRead: 50 }), m("a follow-up")];
+    const suffix = [m("a follow-up")];
+    // 基线 = input+cacheRead+cacheWrite+output = 1000+50+0+200 = 1250；只对后缀字符估算。
+    expect(hybridTokenCounter.estimate({ messages })).toBe(1250 + estimateTokensByChars(suffix));
+  });
+
+  it("does NOT re-add tools/systemPrompt on the hybrid path (they're already in the real baseline)", () => {
+    // 关键正确性:有真基线时,tools/systemPrompt 不再加(避免双重计) —— 与 estimateRequestTokens 相反。
+    const messages = [m("hi"), assistantMsg("a", { input: 1000, output: 100 })];
+    const bigTool = tool("read", "read a file from disk", {
+      type: "object",
+      properties: Object.fromEntries(
+        Array.from({ length: 20 }, (_, i) => [`f${i}`, { type: "string", description: "x".repeat(50) }]),
+      ),
+    });
+    const without = hybridTokenCounter.estimate({ messages });
+    const withToolsSys = hybridTokenCounter.estimate({
+      messages,
+      tools: [bigTool],
+      systemPrompt: "a fairly long system prompt ".repeat(20),
+    });
+    expect(withToolsSys).toBe(without); // 真基线已含 tools/sys,不再加
+    // 对照:estimateRequestTokens(纯估算路径)会把它们加进去 → 严格更大。
+    expect(estimateRequestTokens({ messages, tools: [bigTool], systemPrompt: "a fairly long system prompt ".repeat(20) }))
+      .toBeGreaterThan(estimateRequestTokens({ messages }));
+  });
+
+  it("picks the LATEST assistant carrying real usage when several exist", () => {
+    const messages = [
+      m("q1"),
+      assistantMsg("a1", { input: 500, output: 100 }),
+      m("q2"),
+      assistantMsg("a2", { input: 1500, output: 300 }),
+      m("q3"),
+    ];
+    // 用最近的 a2 作基线(1800),后缀 = [q3]。
+    expect(hybridTokenCounter.estimate({ messages })).toBe(1800 + estimateTokensByChars([m("q3")]));
+  });
+
+  it("degrades to estimateRequestTokens (X1) when there is no assistant yet (turn-0)", () => {
+    const messages = [m("just a user message")];
+    const input = { messages, tools: [tool("read", "read", { type: "object", properties: {} })], systemPrompt: "sys" };
+    expect(hybridTokenCounter.estimate(input)).toBe(estimateRequestTokens(input));
+  });
+
+  it("treats an all-zero-usage assistant as 'no real usage' and degrades to X1 (fake-model parity)", () => {
+    // fake-model 的 assistant usage 全 0 → 视为无真值 → 退回 X1。这保证 fake 测试行为与 defaultTokenCounter 一致。
+    const messages = [m("hello"), assistantMsg("hi", { input: 0, output: 0 }), m("more")];
+    const input = { messages, tools: [tool("read", "read", { type: "object", properties: {} })], systemPrompt: "sys" };
+    expect(hybridTokenCounter.estimate(input)).toBe(estimateRequestTokens(input));
+  });
+
+  it("includes cacheWrite in the baseline (pins the +cacheWrite term)", () => {
+    const messages = [m("q"), assistantMsg("a", { input: 1000, output: 100, cacheRead: 50, cacheWrite: 30 })];
+    // 基线 = 1000+50+30+100 = 1180;后缀为空。
+    expect(hybridTokenCounter.estimate({ messages })).toBe(1180);
+  });
+
+  it("skips a later zero-usage assistant and uses an earlier REAL one as baseline", () => {
+    // 非平凡控制流:guard 用 continue(非 break),故越过零-usage 的 assistant 继续往前找真值。
+    const real = assistantMsg("real", { input: 800, output: 120 });
+    const zero = assistantMsg("zero", { input: 0, output: 0 });
+    const messages = [m("q1"), real, m("q2"), zero, m("q3")];
+    // 用更早的 real(基线 920),后缀 = real 之后的全部 [q2, zero, q3]。
+    const suffix = messages.slice(messages.indexOf(real) + 1);
+    expect(hybridTokenCounter.estimate({ messages })).toBe(920 + estimateTokensByChars(suffix));
+  });
+
+  it("treats an assistant with NO usage object as 'no real usage' (the !u guard branch)", () => {
+    // 显式构造一条无 usage 字段的 assistant —— 命中 `!u` 分支 → continue → 退回 X1。
+    const noUsage = { role: "assistant", content: [{ type: "text", text: "a" }], timestamp: 0 } as Message;
+    const messages = [m("hello"), noUsage, m("more")];
+    const input = { messages };
+    expect(hybridTokenCounter.estimate(input)).toBe(estimateRequestTokens(input));
   });
 });
