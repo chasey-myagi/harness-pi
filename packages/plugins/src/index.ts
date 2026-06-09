@@ -119,3 +119,6 @@ export type { DeferredToolsOptions } from "./deferred-tools.js";
 
 export { toolSearch } from "./tool-search.js";
 export type { ToolSearchOptions } from "./tool-search.js";
+
+export { skills } from "./skills.js";
+export type { SkillSpec, SkillsOptions } from "./skills.js";
