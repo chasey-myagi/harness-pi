@@ -317,12 +317,15 @@ export interface SessionConfigView {
   readonly toolNames: ReadonlyArray<string>;
   /**
    * 发给 LLM 的 tool schema（pi-ai `Tool` 形态 `{name, description, parameters}`，与每次请求随发的
-   * 完全一致）。token 估算插件（X1）需要它来把「每请求随发的 tool schema 体积」计进 context 估算——
-   * 只数 `toolNames` 会**严重低估**真实 usage（D0 实测低估 ~7x）。只读、构造期冻结。
+   * piTools 同形且内容一致——tools 不经 pipe 改写）。token 估算插件（X1）需要它把「每请求随发的 tool
+   * schema 体积」计进 context 估算——只数 `toolNames` 会**严重低估**真实 usage（D0 实测低估 ~7x）。
+   * 只读:数组与每个元素冻结;但 `parameters` 是 schema 对象引用、未深冻（估算只读不写）。
    */
   readonly tools: ReadonlyArray<Tool>;
   /**
-   * 当前 system prompt（与每次请求随发的一致；无则空串）。同样是 token 估算需计入的固定开销。只读。
+   * **base** system prompt（构造期传入的原值；无则空串）。token 估算据此计入「每请求随发的 system 开销」。
+   * 注意:若挂了 `transformSystemPromptBeforeLlm` pipe hook 改写 system prompt,实际随发的是 **pipe 后**的值,
+   * 本视图给的是 **pre-pipe base**——估算可能略低估被 hook 注入的增量（目前无 first-party hook 这么做）。只读。
    */
   readonly systemPrompt: string;
   readonly maxTurns: number;

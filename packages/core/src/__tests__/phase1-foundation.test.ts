@@ -208,6 +208,7 @@ describe("Phase 1: ctx.config", () => {
       model: fake,
       tools: [echo],
       hooks: [probe],
+      systemPrompt: "You are a test agent.",
       maxTurns: 12,
       maxContinuations: 3,
     });
@@ -219,6 +220,56 @@ describe("Phase 1: ctx.config", () => {
     expect(captured!.maxContinuations).toBe(3);
     expect(Array.from(captured!.toolNames)).toEqual(["echo"]);
     expect(captured!.model.id).toMatch(/^fake-model-/);
+    // X1(#55):真 session 把完整 tool schema + systemPrompt 灌进 ctx.config —— 这是请求级估算修 7x 低估的本体。
+    expect(captured!.tools).toHaveLength(1);
+    expect(captured!.tools[0]!.name).toBe("echo");
+    expect(captured!.tools[0]!.description).toBe("echo");
+    expect(captured!.tools[0]!.parameters).toBe(echo.parameters); // schema 原样透传(引用)
+    expect(captured!.systemPrompt).toBe("You are a test agent.");
+    fake.teardown();
+  });
+
+  it("config.systemPrompt 默认空串(未配置时)— 估算不应误把 undefined 当内容", async () => {
+    let captured: HookContext["config"] | null = null;
+    const probe: Hook = {
+      name: "probe",
+      onSessionStart(_input, ctx) {
+        captured = ctx.config;
+      },
+    };
+    const fake = createFakeModel([{ content: [{ type: "text", text: "done" }] }]);
+    const session = new AgentSession({ model: fake, tools: [], hooks: [probe] });
+    await session.run("go");
+    expect(captured!.systemPrompt).toBe("");
+    expect(captured!.tools).toEqual([]);
+    fake.teardown();
+  });
+
+  it("config.tools 逐元素冻结 — plugin 不能增删元素或改 tool 字段", async () => {
+    const echo: HarnessTool = {
+      name: "echo",
+      description: "echo",
+      parameters: Type.Object({}),
+      async execute() {
+        return { content: [{ type: "text", text: "hi" }] };
+      },
+    };
+    const probe: Hook = {
+      name: "probe",
+      onSessionStart(_input, ctx) {
+        // 数组冻结:不能 push
+        expect(() => {
+          (ctx.config.tools as unknown as unknown[]).push({});
+        }).toThrow();
+        // 元素冻结:不能改 name/description
+        expect(() => {
+          (ctx.config.tools[0] as unknown as { name: string }).name = "hack";
+        }).toThrow();
+      },
+    };
+    const fake = createFakeModel([{ content: [{ type: "text", text: "done" }] }]);
+    const session = new AgentSession({ model: fake, tools: [echo], hooks: [probe] });
+    await session.run("go");
     fake.teardown();
   });
 
