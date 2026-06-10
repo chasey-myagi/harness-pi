@@ -119,7 +119,8 @@ export function postCompactFileReread(
         let body = content;
         let truncated = "";
         if (Buffer.byteLength(body, "utf8") > maxBytes) {
-          // 按字节上界截断（slice 到 maxBytes 字节内的最长合法 UTF-8 前缀）。
+          // 按字节上界截断到 maxBytes。注意：在多字节 UTF-8 字符中间切会让末尾出现一个替换字符
+          // （U+FFFD）——注入内容是给模型看的 advisory，可接受；故不保证截断点落在码点边界。
           body = Buffer.from(body, "utf8").subarray(0, maxBytes).toString("utf8");
           truncated = `\n[truncated to ${maxBytes} bytes]`;
         }

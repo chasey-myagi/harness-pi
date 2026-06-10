@@ -80,6 +80,9 @@ export class SubAgentRegistry {
    * 保留此前上下文）→ 返回与 `spawnSubAgent` **同形状**的 ToolExecResult（text + details 含 sessionId + usage）。
    *
    * id 不存在 / 已被驱逐（LRU/TTL/abort）→ 抛清晰 error（不静默返回空）。
+   *
+   * **不可重入**：同一 id 的上一次 `run` 未结束时再续聊会让内核抛「already in progress」（子 session 互斥）。
+   * 调用方须串行续聊同一子 agent（不同 id 之间并发无碍）。
    */
   async continueSubAgent(
     id: string,

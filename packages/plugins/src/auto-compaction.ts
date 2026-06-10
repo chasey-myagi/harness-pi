@@ -25,6 +25,7 @@
 import type { Hook, HookContext } from "@harness-pi/core";
 import { createUserMessage } from "@harness-pi/core";
 import type { Message, Tool } from "@earendil-works/pi-ai";
+import { POST_COMPACT_PENDING_KEY } from "./post-compact-file-reread.js";
 
 export interface AutoCompactionOptions {
   /**
@@ -333,10 +334,11 @@ export function autoCompaction(opts: AutoCompactionOptions): Hook {
         // 赋值在 await 之后，抛错时 cache 不被脏写。
         const text = await opts.summarize(messages.slice(0, targetCover), ctx);
         cache = { coveredCount: targetCover, text };
+        // 仅在**本 turn 真跑了一次新总结**时标记，供 postCompactFileReread 下一 turn 重读关键文件
+        // （opt-in，缺该插件无副作用）。**不可**放在分支外：messages 是 append-only 原始 _messages，
+        // 一旦越阈值就永久在阈值之上，分支外 set 会让每个越界 turn 都重置标记 → 重读每 turn 重复注入。
+        ctx.state.set(POST_COMPACT_PENDING_KEY, ctx.turnIdx);
       }
-
-      // 标记「本 turn 发生了压缩」，供 postCompactFileReread 在下一 turn 重读关键文件（opt-in，缺该插件无副作用）。
-      ctx.state.set("post-compact-file-reread.pending", ctx.turnIdx);
 
       const summaryMsg = createUserMessage(wrap(cache.text, cache.coveredCount));
       return [summaryMsg, ...messages.slice(cache.coveredCount)];

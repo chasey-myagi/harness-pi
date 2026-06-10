@@ -33,6 +33,21 @@ describe("turnEndGuard", () => {
     ).toThrow();
   });
 
+  it("sets a generous default hook timeout (event-class 100ms is too short for I/O checks)", () => {
+    // onContinuationCheck 是 event 类、dispatcher 默认仅 100ms；check 做 I/O 必然超时被静默丢弃 → 闸失效。
+    // 故返回 Hook 自设宽 timeout（默认 30s），可经 timeoutMs 覆盖。
+    expect(turnEndGuard({ check: () => ({ ok: true }) }).timeout).toBe(30_000);
+    expect(
+      turnEndGuard({ check: () => ({ ok: true }), timeoutMs: 5_000 }).timeout,
+    ).toBe(5_000);
+  });
+
+  it("throws if timeoutMs <= 0", () => {
+    expect(() =>
+      turnEndGuard({ check: () => ({ ok: true }), timeoutMs: 0 }),
+    ).toThrow();
+  });
+
   it("blocks stop: persists blocking message + forces a retry, then passes", async () => {
     // 两条 assistant 回复：第一条「以为做完了」，第二条是看到阻断消息后的「修好了」。
     const model = createFakeModel([
@@ -182,9 +197,10 @@ describe("turnEndGuard", () => {
     expect(injected).toHaveLength(1);
   });
 
-  it("retry budget resets after a pass (independent stop events within one run)", async () => {
-    // 序列：done → check fail（强制）→ fixed → check pass（放行）。
-    // 用 state 重置语义保证一次 pass 后预算回满（这里只验证 pass 后能正常停，不串味）。
+  it("passes cleanly when check is satisfied on the retry (single fail→force→pass cycle)", async () => {
+    // 序列：done → check fail（强制一轮）→ fixed → check pass（放行）。maxRetries=1 下走完一个
+    // fail→force→pass 周期后干净停止。（注：一次 pass 即终止本 run，故「pass 后预算回满」无法在单 run 内
+    // 再触发一次 fail 来观测——那条 reset 分支与 onSessionStart 的重置在 continue() 场景才各自有意义。）
     const model = createFakeModel([
       { content: [{ type: "text", text: "v1" }] },
       { content: [{ type: "text", text: "v2" }] },

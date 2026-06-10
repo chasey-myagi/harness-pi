@@ -28,6 +28,11 @@
  * `false` 也不会取消已 `appendMessage` 的持久阻断消息（那是即时副作用）。`appendMessage` 不经 merge、直接
  * push 进 session.messages，故多个 turnEndGuard / 其它注入 hook 共存时各自的消息都会落上，互不抢占。
  *
+ * **超时**：`onContinuationCheck` 是 **event 类** hook，dispatcher 默认 per-hook timeout 仅 100ms；而本插件的
+ * `check` 通常做 I/O（跑测试 / lint / 调 LLM）必然超 100ms，一旦超时其 `{continue:true}` 会被 `_invokeSafe`
+ * 静默丢弃 → 质量闸形同虚设。故返回的 Hook **自设较宽的 `timeout`**（默认 30s，对齐 `onAfterFlush` 对
+ * 「可调 LLM 的 hook 应放宽 timeout」的同款约定），调用方可经 `timeoutMs` 覆盖。
+ *
  * **domain-free**：插件不认识「测试」「lint」这类业务；`check` 全由调用方注入，`message` 是要回灌给模型的
  * 阻断说明（如 "测试未过：<输出>，修复后再停"）。
  */
@@ -67,11 +72,17 @@ export interface TurnEndGuardOptions {
    * 与内核 `maxContinuations` 互补，避免后者很大时空转。计数随一次 `ok:true` 重置。
    */
   maxRetries?: number;
+  /**
+   * 返回 Hook 的 per-hook timeout（毫秒，默认 30000）。`onContinuationCheck` 是 event 类、dispatcher
+   * 默认仅 100ms，而 `check` 通常做 I/O 必然超时被静默丢弃 → 闸失效。故放宽默认；`check` 更慢时调大。
+   */
+  timeoutMs?: number;
 }
 
 const KEY = "turn-end-guard.retries" as const;
 
 const DEFAULT_MAX_RETRIES = 3;
+const DEFAULT_TIMEOUT_MS = 30_000;
 const DEFAULT_BLOCK_MESSAGE =
   "turn-end-guard: quality check did not pass; please fix the issue before stopping.";
 
@@ -80,9 +91,15 @@ export function turnEndGuard(opts: TurnEndGuardOptions): Hook {
   if (maxRetries <= 0) {
     throw new Error("turnEndGuard: maxRetries must be > 0");
   }
+  const timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+  if (timeoutMs <= 0) {
+    throw new Error("turnEndGuard: timeoutMs must be > 0");
+  }
 
   return {
     name: "turn-end-guard",
+    // event 类默认 100ms 远不够 check 做 I/O——放宽，否则超时丢弃 {continue:true} → 闸静默失效。
+    timeout: timeoutMs,
 
     onSessionStart(_input, ctx) {
       // 每次 run/continue 重置，避免续跑串味（对齐 emptyRunGuard）。
