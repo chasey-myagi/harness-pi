@@ -1,6 +1,8 @@
 # 05 · Plugins
 
-> Plugin 解剖、命名/状态约定、11 个标准库 plugin 的完整设计。
+> Plugin 解剖、命名/状态约定、标准库 plugin 的完整设计。
+>
+> **计数（以 `packages/plugins/src/index.ts` 实际导出为准）**：**20 个返回 `Hook` 的 plugin 工厂** + **2 个面向模型的工具/技能工厂**（`toolSearch` 返回 `HarnessTool`、`skills` 返回 `{hook, tool}`）+ **1 个 summary 模板辅助件**（`defaultSummarize` / `DEFAULT_SUMMARY_TEMPLATE`，给压缩插件的 `summarize` 用）。分「核心 12」（§5.1–5.12，bidding-agent parity 起点）与「高级 / 0.3.0 新增」（§5.13–5.21，compaction 体系 + 权限 + deferred/skills）两档。
 
 ## 0. 目录
 
@@ -8,7 +10,9 @@
 2. [Plugin 工厂模式](#2-plugin-工厂模式)
 3. [`ctx.state` 约定](#3-ctxstate-约定)
 4. [文件组织](#4-文件组织)
-5. 标准库 12 个 plugin（每个独立小节）
+5. 标准库 plugin（每个独立小节）
+
+   **核心 12**
    - [5.1 watchdog](#51-watchdog)
    - [5.2 trim-history](#52-trim-history)
    - [5.3 empty-run-guard](#53-empty-run-guard)
@@ -20,7 +24,18 @@
    - [5.9 metrics](#59-metrics)
    - [5.10 cost-tracker](#510-cost-tracker)
    - [5.11 token-budget](#511-token-budget) **advanced**
-   - [5.12 repeated-call-guard](#512-repeated-call-guard) **v0.0.2 新增**
+   - [5.12 repeated-call-guard](#512-repeated-call-guard)
+
+   **高级 / 0.3.0 新增**
+   - [5.13 tool-stats](#513-tool-stats)
+   - [5.14 compact-summarize](#514-compact-summarize)
+   - [5.15 auto-compaction](#515-auto-compaction)（+ `TokenCounter` / hybrid 计量 / per-model 窗口）
+   - [5.16 microcompact](#516-microcompact)
+   - [5.17 summary-template](#517-summary-template)（`defaultSummarize` + 9 段模板）
+   - [5.18 post-compact-file-reread](#518-post-compact-file-reread)
+   - [5.19 turn-end-guard](#519-turn-end-guard)
+   - [5.20 permission-gate](#520-permission-gate)
+   - [5.21 deferred-tools + tool-search + skills](#521-deferred-tools--tool-search--skills)（O1/O2 渐进式暴露）
 6. [测试规约](#6-测试规约)
 
 ## 1. Plugin 是什么
@@ -168,7 +183,11 @@ export function _resetForTests(): void { ... }
 
 ---
 
-## 5. 标准库 12 个 plugin
+## 5. 标准库 plugin
+
+> 共 **20 个 `Hook` 工厂** + **2 个工具/技能工厂**（`toolSearch` / `skills`）+ **1 个 summary 模板辅助件**（`defaultSummarize`）。下分「核心 12」（§5.1–5.12）与「高级 / 0.3.0 新增」（§5.13–5.21）。
+
+### 核心 12
 
 ### 5.1 watchdog
 
@@ -1285,6 +1304,521 @@ export function repeatedCallGuard(opts: {
 - **跟 token-budget 互补**：token-budget 是定量（token 量），repeated-call-guard 是定性（pattern 重复）
 - **跟 metrics 配合**：`onRepeat` 里 `getMetricsSink(ctx)?.enqueue({ kind: "stuck.detected", ... })` 上报
 - **跟 system-reminder 配合**：`onRepeat` 里 `ctx.state.set("stuck.flag", true)`，system-reminder trigger 读 flag 注 "尝试不同的角度" 提醒
+
+---
+
+### 高级 / 0.3.0 新增
+
+> 这一档主要是 **compaction 体系**（§5.14–5.18 互相协作）、**声明式权限**（§5.20）、**渐进式工具/技能暴露**（§5.21）。源文件均在 `packages/plugins/src/`，测试在 `packages/plugins/src/__tests__/`。
+
+### 5.13 tool-stats
+
+#### 目的
+
+按真实 tool 执行 span（start/end 时间戳同一时钟窗）做 session 级聚合：每工具调用数 / ok / error / 耗时（avg/max）/ truncation / fullOutputPath 计数，并按「同 turn 内重叠 span 的并行节省」估算 `estimatedParallelSavingsMs`（串行耗时和 − 并集墙钟时长）。
+
+#### Hook 形态
+
+Event（`onSessionStart` 建 stats / `onTurnStart` / `onTurnEnd` 结算本 turn 并行节省）+ Around（`wrapToolExec` 计 span）+ `onSessionEnd` finalize + emit metric。`internal: true`（不上报 hook 自身 metric）。
+
+#### 完整设计
+
+详见 [`packages/plugins/src/tool-stats.ts`](../packages/plugins/src/tool-stats.ts)。要点：
+
+- 只用 `wrapToolExec` 取首尾时间戳（同一时钟），故能可靠估并行节省；不用分散的 `onPreToolUse`/`onPostToolUse`。
+- `estimateParallelSavings(spans)` 导出供外部直接调；按 turnIdx 分组，对每组求 `Σduration − unionDuration`。
+- `onSessionEnd` 经 `emitMetric` 推一条 `tool.stats`（cumulative）自定义 kind（用 TS module augmentation 注册到 `UserMetricKinds`，不改内核）。
+
+签名：
+```ts
+export function toolStats(opts?: {
+  onSessionFinalized?: (ctx, stats: ToolStats) => void;
+  retainRecentSpans?: number;  // 默认 200，仅 bound 原始 span（聚合是 lifetime）
+}): Hook;
+export function getToolStats(ctx: HookContext): ToolStats | undefined;
+export function estimateParallelSavings(spans: readonly ToolSpan[]): number;
+```
+
+#### 配置选项
+
+- `retainRecentSpans` 默认 200：聚合（byTool / 计数）是终生累积；只有原始 `spans[]` 按这个上限做 ring（0 = 不留 span）。
+- `onSessionFinalized`：session end 回调，典型落 sink / 打报告。
+
+#### 与其他 plugin 交互
+
+- **跟 metrics 配合**：`emitMetric(ctx, {kind:"tool.stats",...})` 走 `metrics` plugin 注入的 sink（未挂 metrics 则 emitMetric no-op）。
+- **dogfood agent** 用它出「并行节省了多少墙钟」报告。
+
+#### 失败模式
+
+- **stats 未建**（`onSessionStart` 没跑就 `wrapToolExec`）：`recordSpan` guard `if (!stats) return`。
+- **tool 抛错**：`wrapToolExec` 的 catch 仍记一条 `isError` span 后 rethrow，不吞错。
+
+#### 测试要点
+
+- 多 tool 计数 / avg / max 正确
+- 同 turn 重叠 span → 估出正向 parallelSavings；不重叠 → 0
+- `retainRecentSpans` ring 生效；聚合不受 ring 截断影响
+- `getToolStats` 拿得到、session end emit 一条 metric
+
+---
+
+### 5.14 compact-summarize
+
+#### 目的
+
+compaction 策略之一（与 §5.21 的 controller `compactRestartFresh` 互补）。**按消息条数**超阈值时，用调用方提供的 `summarize`（可调 LLM）把**早期消息**总结成一条 summary，拼上最近 `keepRecent` 条 recent tail 发给模型。**view-only**：只改本 turn 发给 LLM 的 view（`transformMessagesBeforeLlm`），**绝不动 `session.messages`**；完整历史仍由内核 durable 保存、可 resume。
+
+#### Hook 形态
+
+Transform pipe（`transformMessagesBeforeLlm`，内核 §3.6 指定的「compaction 改写消息」唯一 hook 点）。
+
+#### 完整设计
+
+详见 [`packages/plugins/src/compact-summarize.ts`](../packages/plugins/src/compact-summarize.ts)。
+
+签名：
+```ts
+export function compactSummarize(opts: {
+  maxMessages: number;          // 条数 > 它才压缩；须 > keepRecent
+  keepRecent: number;           // 原样保留的最近条数；须 ≥ 1
+  summarize: (early: Message[], ctx) => string | Promise<string>;
+  resummarizeEvery?: number;    // 默认 = keepRecent
+  summaryText?: (summary, coveredCount) => string;
+}): Hook;
+```
+
+**缓存**：summary 按它覆盖的前缀长度缓存；只有「想覆盖的前缀」比上次缓存增长 ≥ `resummarizeEvery` 才重算 LLM，否则复用旧 summary + 把其后消息原样带上（避免每 turn 都花一次 LLM）。summary 用 `role:"user"` 承载（一条「用户从没发过的回顾 turn」，对齐 Claude Code compaction 惯例、稳定占前缀参与 cache）。
+
+#### 配置选项
+
+- `maxMessages`（必）：触发阈值（条数）。
+- `keepRecent`（必）：recent tail 下界（稳态下 tail 在 `keepRecent` ~ `keepRecent + resummarizeEvery − 1` 之间浮动）。
+- `resummarizeEvery`：调大省 LLM 调用、调小更省 token。
+- `summaryText`：自定义 summary 包装文案。
+
+#### 与其他 plugin 交互
+
+- **与 auto-compaction 二选一**：两者都是 view-only compaction，挂同 session 会各自维护独立缓存、产生未定义的压缩边界。选一个。条数阈值直观（本插件）；token 阈值贴近真实窗口压力（auto-compaction）。
+- **与 trim-history 可叠用**：先 summarize 早期，再 trim 中段 toolResult。
+- **与 post-compact-file-reread 协作**：真跑一次新总结时 `ctx.state.set(POST_COMPACT_PENDING_KEY, turnIdx)`，让 §5.18 下一 turn 重读关键文件。**只在重算 turn 标记**（不放分支外），否则每个越阈 turn 都会重复注入。
+- **summarize 后端**：可直接用 §5.17 的 `defaultSummarize({complete})`。
+
+#### 失败模式
+
+- **summarize 抛错（LLM 超时/限流）**：让它冒泡——内核 pipe 对 transform 是 fail-open，记一笔后丢弃本 hook 输出 → 退化为不压缩（全量 messages 原样给模型）。赋值在 `await` 之后，抛错时 cache 不被脏写。
+- **跨 session 复用同一实例**：闭包缓存（`coveredCount`）会被另一 session 的前缀污染 → view 错位。每 session 一个实例。
+
+#### 测试要点
+
+- 未超 `maxMessages` → 返回 undefined（不改）
+- 超阈 → summary + recent tail，覆盖前缀正确、无缝无重叠
+- 缓存复用：增长不足 `resummarizeEvery` 不重算 LLM
+- summarize 抛错 → fail-open 退化为不压缩、cache 不脏写
+
+---
+
+### 5.15 auto-compaction
+
+#### 目的
+
+与 §5.14 同款 view-only 压缩，但**触发判据从「消息条数」换成「估算的 context token 体积」**——这才是 context 压力的真实信号（一段超长 tool 输出会让很少几条消息就逼近窗口，按条数测不出来）。这是 Claude Code 式「自动」compaction：业务侧不再手搓触发逻辑。
+
+#### Hook 形态
+
+Transform pipe（`transformMessagesBeforeLlm`）+ 可选 Event（`onContextOverflow`）。
+
+#### 完整设计
+
+详见 [`packages/plugins/src/auto-compaction.ts`](../packages/plugins/src/auto-compaction.ts)。
+
+签名（要点）：
+```ts
+export function autoCompaction(opts: {
+  maxContextTokens?: number;    // 给了 → 走百分比路径（尊重显式上限）
+  triggerRatio?: number;        // 默认 0.8，∈ (0,1]
+  reserveForOutput?: number;    // 窗口路径：默认 min(model.maxTokens, 4096)
+  safetyBuffer?: number;        // 窗口路径：默认 0
+  keepRecent?: number;          // 默认 6，须 ≥ 1
+  summarize: (early: Message[], ctx) => string | Promise<string>;
+  tokenCounter?: TokenCounter;  // 默认 hybridTokenCounter
+  resummarizeEvery?: number;    // 默认 = keepRecent
+  summaryText?: (summary, coveredCount) => string;
+  abortOnOverflow?: boolean;    // 默认 false
+}): Hook;
+```
+
+**触发路径优先级（X2 / #57）**：
+1. 显式给了 `maxContextTokens` → 永远走百分比路径 `estimated > maxContextTokens * triggerRatio`（尊重显式上限）。
+2. 未给、但 `model.contextWindow > 0` → 走**绝对窗口路径** `estimated > contextWindow − reserveForOutput − safetyBuffer`（更贴近真实窗口）。`reserve + safetyBuffer ≥ contextWindow` 这种 misconfig → 视为算不出有意义阈值 → 本 turn no-op（不是每 turn 空压）。
+3. 两者都不可得（无 `maxContextTokens` 且 `contextWindow` 为 0/缺）→ 本 turn 不压缩（contextWindow 是运行时值，退化为 no-op 而非构造期报错）。
+
+**TokenCounter / 计量（issue #55 / #13）**：
+- `estimateTokensByChars(messages)`：CJK 感知（每 CJK 码点 ≈ 1 token，按码点迭代，正确处理扩展 B+ 代理对）+ 图片扁平 `IMAGE_TOKENS=1000`，整体偏保守高估（压缩判据宁高勿低）。**仅数消息文本**。
+- `estimateRequestTokens(input)`：在上者之上**加回**每请求随发却被「只数消息」漏掉的三项——tool schema、systemPrompt、每消息格式开销（`PER_MESSAGE_OVERHEAD=4`）。D0 实测「只数消息」低估真 usage ~7x，根因正是漏了这三项。
+- `defaultTokenCounter`：`estimate = estimateRequestTokens`，不提供 `count`（pi-ai 0.74.2 无 `countTokens`，保留可选 `count` 签名只为留接入口）。
+- `hybridTokenCounter`（**本插件默认**）：取最近一条带真 `Usage` 的 assistant 作基线（`input + cacheRead + cacheWrite + output`，已含 tools/systemPrompt），只对其后消息做字符补尾。有真 usage 时更准（修 D0 残差）；无真 usage（turn-0 / fake-model 全 0）退回 `estimateRequestTokens`，保证不挂真 provider 时与 `defaultTokenCounter` 行为一致。
+- `TokenCounter` 接口的 **additivity 契约**：`estimate` 须逐条可加、固定开销与单条无关——`microcompact`（§5.16）的增量 running-total 依赖它。`hybridTokenCounter` 不满足该契约（基线随「最近 assistant」跳变），**只给 auto-compaction 用、别注进 microcompact**。
+
+**与 deferredTools 联动**：本插件估算时读 `ctx.state.get("deferred.activeListing")`——deferred 在场时按本 turn 实际随发的激活子集估更准，无则退回 `ctx.config.tools` 全集。
+
+#### 配置选项
+
+见上签名。`abortOnOverflow: true`（默认关）：命中真实 `onContextOverflow` 时 `ctx.abort("compaction: ...")`，把恢复交给 §5.21 的 `compactRestartFresh` / `compactResumeFromBoundary` 兜底（`compaction:` 前缀是它们识别重启的契约）。
+
+#### 与其他 plugin 交互
+
+- **Hook 顺序**：本插件读到的 messages 体积应是裁剪**前**的真实 context，故它必须排在 `trimHistory` 这类**内容裁剪型** transform **之前**（否则读到陈旧裁剪后体积、漏触发）。
+- **与 compactSummarize 二选一**（同 §5.14）。
+- **与 microcompact 顺序**：`microcompact` 排在它**之前**（先廉价清白名单 tool 输出，auto-compaction 再据清理后 view 决定是否花钱总结）。
+- **与 post-compact-file-reread / summary-template**：同 §5.14（经 `POST_COMPACT_PENDING_KEY` 协作、可用 `defaultSummarize`）。
+- **每 session 一个实例**（闭包缓存假设）。
+
+#### 失败模式
+
+- **summarize 抛错**：内核 pipe fail-open，退化为不压缩；cache 不脏写。
+- **错误注入非 additive 的 counter 到 microcompact**：体积早停漂移（见上契约）。
+
+#### 测试要点
+
+- 百分比路径 / 窗口路径 / 两者不可得 → no-op 三条路径
+- `estimateRequestTokens` 加回 tools/systemPrompt（`estimate-request-tokens.test.ts`）
+- hybrid 有真 usage 用基线、无真 usage 退回 estimate
+- 缓存复用、与 deferredTools 激活子集联动（`deferred-tools.test.ts` §f）
+- `abortOnOverflow` 触发 `compaction:` 前缀 abort
+
+---
+
+### 5.16 microcompact
+
+#### 目的
+
+tool-result 级的**廉价**分档清理（issue #46 / C2），借鉴 claude-code microcompact：作为「full summarize」之前便宜的一手。**不调 LLM、不总结**，只把「旧的、可重取的」**白名单工具**输出换成短占位符（原文仍由内核 durable 保存，模型真需要可重新调用工具）。永远保留最近 N 条 toolResult 原文。
+
+#### Hook 形态
+
+Transform pipe（`transformMessagesBeforeLlm`，**同步**）。`timeout: 50`。
+
+#### 完整设计
+
+详见 [`packages/plugins/src/microcompact.ts`](../packages/plugins/src/microcompact.ts)。
+
+签名：
+```ts
+export function microcompact(opts: {
+  compactableTools: Set<string> | string[];  // 只清这些工具（不 hardcode，调用方传）
+  triggerTokens: number;        // 估算 > 它才触发；须 > 0
+  targetTokens?: number;        // 清到 ≤ 它即停；默认 = triggerTokens；须 ∈ (0, triggerTokens]
+  keepRecent?: number;          // 默认 5；负数视为 0
+  gapMinutes?: number;          // cache 冷阈值（可选）
+  now?: () => number;           // 默认 Date.now（测试注入）
+  tokenCounter?: TokenCounter;  // 默认 defaultTokenCounter
+  placeholderText?: (toolName, originalChars) => string;
+}): Hook;
+```
+
+**触发判据（满足任一即动手）**：
+1. **体积**：`estimate({messages, tools, systemPrompt}) > triggerTokens` → 从最旧白名单 toolResult 起清，降到 `targetTokens` 以下即停（不必全清）。
+2. **gap**（可选）：`now() − 最后一条消息 timestamp > gapMinutes` 分钟（cache 已冷）→ 把**所有**可清白名单 toolResult 清掉（不受 `targetTokens` 早停约束；cache 反正要冷启重发，激进清以缩短下次冷启 prompt）。
+
+两种动作都永远跳过最近 `keepRecent` 条 toolResult 与所有非白名单工具。**增量 running-total**：替换一条时 `estimateOne(原) − estimateOne(占位)` 即整体估值的精确变化量（固定常量在差值里抵消），复杂度从 O(N·K) 降到 O(N+K)——这点关键，因为本 transform 同步、`timeout:50` 拦不住同步循环，且 harness 多 session 跑在单 event loop（全量重估会冻住其余 session）。
+
+#### 配置选项
+
+见上。默认 `defaultTokenCounter`（满足 additivity 契约，增量假设成立）；**别注 `hybridTokenCounter`**（非 additive，体积早停会漂移）。
+
+#### 与其他 plugin 交互
+
+- **Hook 顺序**：排在 `autoCompaction` **之前**（先廉价清、后据清理后 view 决定是否花钱总结）。注意**别**套用 auto-compaction「排在裁剪型 transform 之前」那条规则反推——microcompact 不是无条件机械裁剪，它是有条件清可重取的白名单输出，比总结更靠前。
+- **与 trim-history**：本插件是其「按 token 体积 + 白名单 + keepRecent」升级版，一般二选一。
+
+#### 失败模式
+
+- **没有可清的**（全在 keepRecent 内 / 全非白名单）→ 返回 undefined（no-op）。
+- **体积/gap 都不触发** → no-op。
+
+#### 测试要点
+
+- 保留最近 N、清旧白名单为命名占位符
+- 少量但巨大的结果触发体积路径；清到 target 即停
+- gap 冷 cache 激进清、忽略 target 早停；gap 窗内 + 体积小不触发
+- view-only：不 mutate 输入数组
+- 增量 running-total == 全量重估（`microcompact.test.ts` X1）
+
+---
+
+### 5.17 summary-template
+
+#### 目的
+
+给 §5.14 / §5.15 的 `summarize` 契约提供一个**默认实现**：借鉴 Claude Code compaction 的「9 段结构化回顾」模板，但**完全 domain-free**（不硬编任何业务），让模型把早期对话压成高保真的结构化 summary。这不是 plugin（不返回 Hook），是 summarize 后端辅助件。
+
+#### 形态
+
+工厂 `defaultSummarize(opts)` 返回一个兼容 `CompactSummarizeOptions.summarize` / `AutoCompactionOptions.summarize` 的函数 + 导出 `DEFAULT_SUMMARY_TEMPLATE` / `renderSummaryPrompt`。
+
+#### 完整设计
+
+详见 [`packages/plugins/src/summary-template.ts`](../packages/plugins/src/summary-template.ts)。
+
+**9 段模板**（`DEFAULT_SUMMARY_TEMPLATE`，唯一占位符 `{transcript}`）：1) Primary Request and Intent，2) Key Concepts，3) Files and Resources，4) Errors and Fixes，5) Problem Solving，6) All User Messages，7) Pending Tasks，8) Current Work，9) Next Step。要求模型 specific & faithful、保留 exact names/paths/identifiers。
+
+**接缝**：summarize 跑在 `transformMessagesBeforeLlm` 内、需再调一次 LLM，但 `HookContext` 不暴露「调 LLM」（内核刻意不把 model 句柄塞进 ctx）。故工厂要求调用方注入最薄的 `complete: (prompt) => Promise<string>`——plugins 层不依赖 pi-ai 的 complete API（seam 干净），调用方用 pi-ai `complete()` / 自己的 wrapper 实现它。
+
+签名：
+```ts
+export function defaultSummarize(opts: {
+  complete: (prompt: string) => Promise<string>;
+  template?: string;   // 覆盖默认模板，须含 {transcript}
+}): (early: Message[], ctx) => Promise<string>;
+export function renderSummaryPrompt(early: Message[], template?: string): string;
+export const DEFAULT_SUMMARY_TEMPLATE: string;
+```
+
+`renderMessage` 把 toolResult 也带上工具名（`toolResult(name): ...`）、toolCall 渲染成 `[toolCall name args]`，便于模型对账。
+
+#### 配置选项
+
+- `complete`（必）：调 LLM 的最薄 seam。
+- `template`：自定义模板（须保留 `{transcript}`，否则早期消息不被注入）。
+
+#### 与其他 plugin 交互
+
+- 直接喂给 §5.14 / §5.15 的 `summarize` 选项。
+
+#### 失败模式
+
+- **`complete` 抛错**：冒泡到压缩插件 → 内核 pipe fail-open 退化为不压缩（见 §5.14 失败模式）。
+- **自定义 template 漏 `{transcript}`**：transcript 不被替换进 prompt（模型看不到早期内容）——调用方自负。
+
+#### 测试要点
+
+- 9 段全部渲染进 prompt、早期内容嵌进 transcript
+- toolCall args / toolResult 名进 transcript
+- 自定义 template 覆盖且仍收到 transcript（`summary-template.test.ts`）
+
+---
+
+### 5.18 post-compact-file-reread
+
+#### 目的
+
+压缩后文件重读（C4）。**opt-in、默认关**。problem：compactSummarize / autoCompaction 把含 `read` 完整文件输出的早期消息压成一条 summary 后，模型 view 里只剩摘要、丢了逐字内容；若文件期间又被 edit/write 改过，summary 还可能过时。做法：压缩发生的**下一个 turn 开始**时，从最近消息收集被 read/edit/write 引用过的文件路径，用注入的 provider 取**当前**内容，经 `additionalContext`（transient）注入，让模型压缩后立刻重新看到关键文件现状。
+
+#### Hook 形态
+
+Event（`onTurnStart`）returning `additionalContext`。
+
+#### 完整设计
+
+详见 [`packages/plugins/src/post-compact-file-reread.ts`](../packages/plugins/src/post-compact-file-reread.ts)。
+
+签名：
+```ts
+export function postCompactFileReread(opts: {
+  fileContentProvider: (path: string) => Promise<string | null>;  // null = 跳过该文件
+  maxFiles?: number;     // 默认 5，须 ≥ 1
+  maxBytes?: number;     // 每文件，默认 8192，须 ≥ 1
+  toolNames?: string[];  // 默认 ["read","edit","write"]
+  pathArg?: string;      // 默认 "path"
+}): Hook;
+export const POST_COMPACT_PENDING_KEY = "post-compact-file-reread.pending";
+```
+
+**与压缩插件的协作（顺序契约）**：压缩插件在 `transformMessagesBeforeLlm` 产生 compacted view 时 `ctx.state.set(POST_COMPACT_PENDING_KEY, 压缩 turnIdx)`；本插件在**下一个** `onTurnStart` 读到该标记 → 注入一次 → 清标记。故**每次压缩只重读一次**，不每 turn 重复注入。路径按最近引用优先去重、`slice(0, maxFiles)`。**bounded**：`maxFiles` + 每文件 `maxBytes`（按字节截断、标注 `[truncated to N bytes]`，多字节边界切到 U+FFFD 可接受——注入是 advisory）。
+
+#### 配置选项
+
+见上。core 不知道 `read` 工具长什么样 → 路径解析（`fileContentProvider`）由调用方注入；返回 `null` = 跳过（已删 / 越权 / 不该重读）。
+
+#### 与其他 plugin 交互
+
+- **与压缩插件搭配使用**：单挂本插件而不挂任何压缩插件时，标记永不被 set → **零注入（纯 no-op）**。
+- 与 §5.14 / §5.15 经 `POST_COMPACT_PENDING_KEY` 协作，**只在重算 turn 触发**。
+
+#### 失败模式
+
+- **provider 抛错**：记一笔 warn、跳过该文件，其余文件照常重读（不拖垮整个 turn）。
+- **所有文件 resolve 成 null** → 不注入。
+
+#### 测试要点
+
+- 无 pending 标记 → 零注入（默认关 regression）
+- 解析路径并注入当前内容；第二 turn 不再注入（标记已清）
+- provider null 跳过、超 maxBytes 截断标注、maxFiles 上限、去重
+- e2e：压缩 set 标记 → 下一 turn 注入；**只在重算 turn** 标记（不是每个越阈 turn，`post-compact-file-reread.test.ts` regression）
+
+---
+
+### 5.19 turn-end-guard
+
+#### 目的
+
+stopHook 式「想停时先过一道闸」（O3，纯插件、零内核改动）。对齐 Claude Code stopHook 的 `preventContinuation + blockingError`：session 走到 would-be-done（`reason==="done"` 且还有续跑预算）时，内核 fire `onContinuationCheck`，本插件跑一个调用方注入的 `check`——不过则注入持久阻断消息 + 强制再跑一轮让模型修；过则放行停止。
+
+#### Hook 形态
+
+Event（`onContinuationCheck`，唯一能「强制再来一轮」的 hook——`onTurnEnd` 只能 `continue:false` 中止、不能强制续跑）+ `onSessionStart` 重置计数。
+
+#### 完整设计
+
+详见 [`packages/plugins/src/turn-end-guard.ts`](../packages/plugins/src/turn-end-guard.ts)。
+
+签名：
+```ts
+export function turnEndGuard(opts: {
+  check: (ctx) => Promise<TurnEndGuardResult> | TurnEndGuardResult;  // {ok, message?}
+  maxRetries?: number;   // 默认 3，须 > 0
+  timeoutMs?: number;    // 默认 30000，须 > 0
+}): Hook;
+```
+
+- **不过（`ok:false`）**：`ctx.appendMessage(createUserMessage(message))` 注入一条**持久**阻断消息（进 `session.messages`、下次 LLM call 可见——比 transient `additionalContext` 更忠实，对齐 cc 的 isMeta blocking user message），**并** return `{ continue: true }` 强制再跑一轮。
+- **过（`ok:true`）**：return 空（放行）+ 重置计数。
+
+**防死循环：两层兜底**：内核侧 `maxContinuations`（AgentSessionOptions 默认 5）是续跑硬上限（超出内核以 `reason:"max_continuations"` 收尾）；插件侧 `maxRetries`（默认 3）连续强制到上限后**停止强制、放行停止**（不 `abort`——domain-free，让调用方在 onSessionEnd 自行判定）。计数随一次 `ok:true` 重置。
+
+**timeout 默认 30s**：`onContinuationCheck` 是 **event 类**、dispatcher 默认 per-hook timeout 仅 **100ms**，而 `check` 通常做 I/O（跑测试 / lint / 调 LLM）必然超 100ms，一旦超时其 `{continue:true}` 会被 `_invokeSafe` **静默丢弃** → 质量闸形同虚设。故本插件自设较宽默认 `timeout: 30000`（对齐 `onAfterFlush` 对「可调 LLM 的 hook 放宽 timeout」的同款约定），可经 `timeoutMs` 覆盖。
+
+#### 配置选项
+
+- `check`（必）：domain-free，业务（测试/lint）全由调用方注入；`message` 是回灌给模型的阻断说明。
+- `maxRetries` 默认 3、`timeoutMs` 默认 30000。
+
+#### 与其他 plugin 交互
+
+- **与其它 `onContinuationCheck` hook 合并**：`continue` 合并规则是「`false` 优先，否则任一 `true` 即 `true`」——本插件 `continue:true` 不会被别的 hook 的沉默/`true` 覆盖；`appendMessage` 不经 merge、直接 push，多个注入 hook 共存各自消息都落上、互不抢占。
+
+#### 失败模式
+
+- **check I/O 慢于 timeout**：超时被丢弃 → 闸失效（故默认放宽到 30s）。
+- **maxRetries 用尽仍不过**：停止强制、以正常 `done` 收尾（不 abort）。
+
+#### 测试要点
+
+- `maxRetries <= 0` / `timeoutMs <= 0` 构造期抛
+- 设了较宽默认 timeout（event 类 100ms 太短）
+- 不过 → 持久消息 + 强制续跑，重试后过 → 单 fail→force→pass
+- maxRetries 用尽放行停止（不无限自旋）
+- 与另一 onContinuationCheck hook 共存（`continue:true` 不被掩盖）
+- 无 turnEndGuard 时不发生续跑（regression）
+
+---
+
+### 5.20 permission-gate
+
+#### 目的
+
+声明式 tool permission 规则引擎（docs/09 §4.3）。一组 `pattern → allow/ask/deny` 规则，**首条命中者胜出**；无命中走 `fallback`（默认 deny）。把 bidding 散落的多处复制守卫收敛成几条带谓词的规则。
+
+#### Hook 形态
+
+Decision（`onPreToolUse`）。`critical: true` + `failClosed: true`（默认）：规则求值抛错 / 超时 → 内核当 deny，宁可错杀。
+
+#### 完整设计
+
+详见 [`packages/plugins/src/permission-gate.ts`](../packages/plugins/src/permission-gate.ts)。
+
+签名：
+```ts
+export function permissionGate(opts: {
+  rules: PermissionRule[];   // {match, decision, reason?, name?}，按序求值、首命中胜
+  fallback?: PermissionDecision;  // 默认 "deny"
+  onAsk?: (call, ctx) => boolean | Promise<boolean>;  // ask 解析器（可 RPC 问人）
+  failClosed?: boolean;      // 默认 true
+  timeout?: number;          // 缺省走内核 decision 默认 200ms
+}): Hook;
+```
+
+`PermissionMatch` 三种：精确 tool name（string）、name 正则（RegExp）、domain 谓词（`(call, ctx) => boolean`）——**domain 判定由调用方以谓词提供**，插件不认识任何业务概念（机制 vs 策略）。
+
+`"ask"`：内核 decision 只有 allow/deny，没有 ask。ask 由 `onAsk` 解析器（可 async）落成 allow/deny；**没给 `onAsk` 时 ask → deny（fail-closed）**。
+
+#### 配置选项
+
+见上。`timeout` 可在 `onAsk` 做 RPC 时按需放宽。
+
+#### 与其他 plugin 交互
+
+- **与 lease-decision / deferred-tools 正交**：permission 是 listing-independent 的执行闸——deferred 工具不在 listing 里但被调到，仍走 permissionGate（`deferred-tools.test.ts` §d 验证）。
+
+#### 失败模式
+
+- **规则求值抛错 / 超时**：`failClosed:true` → 内核当 deny。
+- **ask 无 `onAsk`**：fail-closed deny。
+
+#### 测试要点
+
+- string / RegExp / 谓词三种 match
+- 首命中胜、无命中走 fallback
+- ask + onAsk 放行/拒绝；ask 无 onAsk → deny
+- failClosed 抛错当 deny（`permission-gate.test.ts`）
+
+---
+
+### 5.21 deferred-tools + tool-search + skills
+
+> O1（deferredTools + toolSearch）与 O2（skills）共享同一个激活集 seam（`ctx.state` 的 `"deferred.activated"`，单一 key 真相源），故合并一节。三者都是 0.3.0「渐进式工具/技能暴露」。
+
+#### 目的
+
+把大 tool listing 收窄成「按需暴露」：默认只列常用工具，模型用 `toolSearch` / `skill` 工具按需激活其余工具，下一 turn 才出现在 listing 里——省 prompt token、降模型选择噪声。
+
+#### Hook 形态 / 形态
+
+- `deferredTools`：返回 Hook（`onSessionStart` seed 激活集 + `transformToolsBeforeLlm` 收窄 listing）。
+- `toolSearch`：返回 `HarnessTool`（普通工具，屏障型 `isConcurrencySafe: () => false`）。
+- `skills`：返回 `{ hook, tool }`——hook 在 system prompt 末尾追加 catalog（`transformSystemPromptBeforeLlm`），tool 按名取回 skill body。
+
+#### 完整设计
+
+详见 [`deferred-tools.ts`](../packages/plugins/src/deferred-tools.ts) / [`tool-search.ts`](../packages/plugins/src/tool-search.ts) / [`skills.ts`](../packages/plugins/src/skills.ts)。
+
+**deferredTools**（listing-only，**不碰 execution**）：
+```ts
+export function deferredTools(opts: {
+  deferred: string[] | ((name: string) => boolean);  // 哪些默认不列
+  alwaysListed?: string[];   // 即便 deferred 也始终列出（典型：toolSearch 自己）
+}): Hook;
+```
+deferred 工具默认不进 LLM 看到的 listing，激活后才可见；但始终在 `session.tools` 全集里——一旦被调用，executor 照常 findToolByName / validate / 过权限闸（**激活 = 可见性，不是授权**）。`transformToolsBeforeLlm` 顺手把本 turn 实际 listing 写进 `"deferred.activeListing"` 给 autoCompaction 估算读。
+
+**激活集联动有结构性的一 turn 滞后**（与注册顺序无关）：autoCompaction 在 messages-pipe 读 `deferred.activeListing`，deferredTools 在 tools-pipe 写它——内核固定 messages-pipe 先于 tools-pipe，故读到的是**上一 turn**写入的子集；turn-0 读到 undefined → 退回全集（保守高估，安全侧）。
+
+**toolSearch**：模型调它（`select` 精确名 / `keyword` 在 name+description 本地模糊匹配）→ 命中写进 `KEY_ACTIVATED` 激活集（union，不覆盖）→ **下一 turn** 才在 listing 出现。全本地、零 provider 依赖。挂 deferredTools 时把 toolSearch 名字放进 `alwaysListed` 保证首 turn 可见。
+
+**skills**（渐进式技能加载）：
+```ts
+export function skills(specs: SkillSpec[], opts?: { toolName?: string }): { hook: Hook; tool: HarnessTool };
+// SkillSpec = { name, description, body, tools? }
+```
+- **发现**：hook 在 system prompt 末尾追加简洁 catalog（**仅 name + description，绝不含 body**），随 system prompt 每 turn 已发、无额外注入成本。
+- **加载**：`skill` 工具按名取回该 skill 的 body 全文作 toolResult 注入；若 skill 声明了 `tools`，把它们写进 O1 同一个 `"deferred.activated"` 激活集，**下一 turn** 才在 listing 出现（O1/O2 共享 seam）。
+- 构造期 fail-loud：空 specs / 重名直接抛。屏障型工具（写 ctx.state）。
+
+#### 配置选项
+
+见各签名。`skills` 的 `toolName` 默认 `"skill"`、`toolSearch` 的 `name` 默认 `"toolSearch"`。
+
+#### 与其他 plugin 交互
+
+- **deferredTools ↔ autoCompaction**：经 `deferred.activeListing` 联动（一 turn 滞后，无害）。
+- **deferredTools ↔ permissionGate**：execution 与 listing 解耦——deferred-but-not-activated 工具仍可被执行并仍过权限闸。
+- **toolSearch / skills ↔ deferredTools**：三者共享 `KEY_ACTIVATED`（`deferred-tools.ts` 导出的单一 key），skills 的 `tools` 激活只有在也挂了 deferredTools 且这些工具被 deferred 时才有视觉效果。
+
+#### 失败模式
+
+- **`transformToolsBeforeLlm` 抛错**：内核 pipe fail-open → 该 turn 退化为全量 listing（`deferred-tools.test.ts` §g）。
+- **toolSearch 无命中**（含幽灵 select 名）：激活零个、返回说明文本。
+- **skills 已知小限制**：catalog 经 `transformSystemPromptBeforeLlm` 追加在 pipe **之后**，而 `SessionConfigView.systemPrompt`（token 估算读的）是 pipe **前** base，故 catalog 字节不计入 token 估算（仅 name+description，体积小，可忽略）。
+
+#### 测试要点
+
+- deferred 隐藏、alwaysListed + 非 deferred 保留；激活下一 turn 生效（select / keyword / 谓词形式）
+- opt-in byte-equal：不挂时全量 listing
+- execution 与 listing 解耦、permissionGate 仍拦
+- toolSearch / skill 屏障型；skills catalog 不含 body、激活是 union、未知 skill 抛、空/重名构造期抛
+（见 `deferred-tools.test.ts` / `skills.test.ts`）
 
 ---
 

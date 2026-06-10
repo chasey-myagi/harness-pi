@@ -9,8 +9,8 @@
 已落地：
 
 - `@harness-pi/core`：`AgentSession`、hook dispatcher、tool executor、context injection、continuation、abort/error 路径。
-- `@harness-pi/plugins`：watchdog、trim-history、empty-run-guard、tool-output-buffer、session-log、system-reminder、batch-counter、lease-decision、metrics、cost-tracker、token-budget、repeated-call-guard。
-- `@harness-pi/plugins/controllers`：lifecycle-restart、work-pool、lease-queue。
+- `@harness-pi/plugins`（20 个 `Hook` 工厂 + `toolSearch`/`skills` 工具工厂 + `defaultSummarize` 辅助件，见 [05-plugins](05-plugins.md)）：核心 12（watchdog、trim-history、empty-run-guard、tool-output-buffer、session-log、system-reminder、batch-counter、lease-decision、metrics、cost-tracker、token-budget、repeated-call-guard）+ 0.3.0 新增（tool-stats、compact-summarize、auto-compaction、microcompact、summary-template、post-compact-file-reread、turn-end-guard、permission-gate、deferred-tools/tool-search/skills）。
+- `@harness-pi/plugins/controllers`（见 [06-controllers](06-controllers.md)）：lifecycle-restart、work-pool、lease-queue、compact-restart-fresh、compact-resume-from-boundary、persist-compaction-boundary、fork-session、parallel/pipeline（orchestrate）、sub-agent-tool/routed-sub-agent-tool/sub-agent-registry、gap-explorer。
 - `@harness-pi/tools`：第一方 `read/bash/edit/write/grep/find/ls`，API/schema/default set 对齐 `pi-coding-agent@0.53.0`，无 `pi-coding-agent` runtime dependency。
 - Offline examples：`examples/01-bare-kernel`、`examples/02-with-plugins`、`examples/03-tools`。
 
@@ -65,12 +65,21 @@ v0.1 之前必须满足：
 
 ## Controller / plugin 候选
 
-- [ ] `permissionGate` plugin：声明式 tool permission rules。
-- [ ] `progressVerifier` plugin：检测 N turn 无真实进展。
-- [ ] `sideQuestion` controller：cache-safe forked subtask。
-- [ ] `subAgent` tool factory：tool 触发隔离 context 的子 agent。
+- [x] `permissionGate` plugin：声明式 tool permission rules。见 [05-plugins §5.20](05-plugins.md#520-permission-gate)。
+- [x] `subAgent` tool factory：tool 触发隔离 context 的子 agent。见 [06-controllers §6.6](06-controllers.md#66-子代理体系subagenttool--routedsubagenttool--subagentregistry)（含 `routedSubAgentTool` + `SubAgentRegistry` 续聊）。
+- [ ] `progressVerifier` plugin：检测 N turn 无真实进展。（`repeatedCallGuard` + `turnEndGuard` 已覆盖一部分语义；通用 progress verifier 仍未做。）
+- [ ] `sideQuestion` controller：cache-safe forked subtask。仍是唯一未落地的 controller，见 [06-controllers §7.1](06-controllers.md#71-sidequestionclaude-code-btw-模式)。
 
 触发条件：第二个真实 agent 或 `bidding-agent` spike 证明需要；否则留在 application 侧。
+
+## 0.3.0 defer（按设计核验，挪到 0.3.1）
+
+0.3.0 收尾时按设计核验 defer 以下两项到 **0.3.1**——这是**有意的 by-design 取舍**，不是缺机制：
+
+- **O4（memdir 语义记忆）**：`lark-bot` 已有 MVP（多轮 LRU session cache），内核侧通用语义记忆暂无第二真实用例驱动，defer。
+- **O5（子 agent 生命周期 event）**：内核成本高于预估、优先级 P3；§6.6 的子代理体系（bounded 两闸 + 续聊 registry）已满足当前模型驱动子代理需求，生命周期事件流 defer。
+
+详细 by-design non-goals 见对应 PRD 的 non-goals 表（issue tracker）。
 
 ## bidding-agent 策略
 

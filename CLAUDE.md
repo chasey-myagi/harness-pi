@@ -26,9 +26,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 **内核极简 + 一切皆 hook。** `@harness-pi/core` 只做两件事:跑 pi-ai 的 LLM-tool 循环 + 派发 hook。**无** metric / watchdog / pool / DB / frontend——这些全是 `@harness-pi/plugins` 里的 hook 实例。改内核前先问:这能不能做成 hook?
 
-**三个概念别混(`docs/05/06/07`):**
-- **Plugin**:钩 loop 事件的装饰器(watchdog / metrics / trimHistory / toolOutputBuffer / sessionLog / emptyRunGuard / repeatedCallGuard / costTracker / autoCompaction / compactSummarize / permissionGate / tokenBudget / systemReminder / batchCounter / leaseDecision / toolStats)。
-- **Controller**:编排一/多个 session(workPool / lifecycleRestart / forkSession / leaseQueue / parallel / pipeline / compactOnOverflow / compactRestartFresh / gapExplorer / subAgentTool)。
+**三个概念别混(`docs/05/06/07`):** 权威清单 = `packages/plugins/src/index.ts`(plugin)与 `packages/plugins/src/controllers/index.ts`(controller)的实际导出。
+- **Plugin**(20 个 `Hook` 工厂 + `toolSearch`/`skills` 工具工厂 + `defaultSummarize` 辅助件):钩 loop 事件的装饰器。核心 12:watchdog / trimHistory / emptyRunGuard / toolOutputBuffer / sessionLog / systemReminder / batchCounter / leaseDecision / metrics / costTracker / tokenBudget / repeatedCallGuard。0.3.0 新增:toolStats / compactSummarize / autoCompaction(+`hybridTokenCounter`/`TokenCounter`/per-model 窗口)/ microcompact / summary-template(`defaultSummarize`)/ postCompactFileReread / turnEndGuard(timeout 默认 30s)/ permissionGate / deferredTools+toolSearch+skills(O1/O2 渐进暴露,共享 `deferred.activated` 激活集)。
+- **Controller**:编排一/多个 session。lifecycleRestart / workPool / leaseQueue / compactOnOverflow+CompactRestartFresh / CompactResumeFromBoundary / persistCompactionBoundary(C1 onAfterFlush collect-return seam)/ forkSession / parallel / pipeline / subAgentTool+routedSubAgentTool(横向 maxSubAgents + 纵向 maxDepth 两闸)+SubAgentRegistry(续聊句柄,bounded LRU/TTL/abort)/ gapExplorer。`sideQuestion` 仍未落地(docs/06 §7.1)。
 - **Adapter**:plugin 的 I/O 后端(metric sink、log sink、`SessionStore`)。**走接口 + peerDep,不强加具体 driver**;自定义 metric kind 用 TS module augmentation,不改内核。
 
 **`AgentSession`(`packages/core/src/session.ts`,本仓库最重的文件)**:`run`/`continue` → turn loop →三段式 phase(`_phaseLlmCall` → `_phaseToolBatch` → `_phaseTurnEnd`)。几个**必须知道、否则会改错**的不变量:
