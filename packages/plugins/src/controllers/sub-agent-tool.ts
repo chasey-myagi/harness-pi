@@ -9,7 +9,7 @@
  * `sessionFactory` 里。父 session 的 abort signal 透传给 sub-agent（协作式取消）。
  */
 
-import type { AgentSession, Hook, HarnessTool, HookContext, Message, ToolExecResult } from "@harness-pi/core";
+import type { AgentSession, Hook, HarnessTool, HookContext, Message, RunSummary, ToolExecResult } from "@harness-pi/core";
 import { Type } from "@earendil-works/pi-ai";
 
 /**
@@ -40,6 +40,11 @@ export interface SubAgentToolOptions {
    * 正交：一纵一横，互不干扰。
    */
   maxDepth?: number;
+  /**
+   * **opt-in 续聊接缝（S4）**：每 spawn 完一个子 session（跑完首轮）就回调一次，让调用方留住句柄以便按 id
+   * 续聊（典型：传 `SubAgentRegistry.retain`）。**默认不传 → 子 session 跑完即弃（0.2.4 逐字节一致）**。
+   */
+  onSpawn?: (session: AgentSession) => void;
 }
 
 /** 取一条 message 的纯文本（content 可能是 string 或 block 数组）。 */
@@ -53,15 +58,42 @@ function messageText(m: Message | undefined): string {
 }
 
 /**
+ * 共享：把一次子 session run/continue 的终态整形成回灌父模型的 ToolExecResult。
+ * spawn 路径与续聊路径（SubAgentRegistry.continueSubAgent）都走这里 → 两边 shape **逐字段一致**。
+ *
+ * content = 子最后一条 assistant 的纯文本（回灌父模型）；details.subAgent = 结构化终态（trace/metrics 用），
+ * 含 `sessionId`（S4：父据此对该子 agent 续聊）+ 现有 reason/turns/usage/stopReason。
+ */
+export function subAgentResult(sub: AgentSession, summary: RunSummary): ToolExecResult {
+  const text = messageText(summary.lastMessage) || "(sub-agent produced no text output)";
+  return {
+    content: [{ type: "text", text }],
+    details: {
+      subAgent: {
+        sessionId: sub.id,
+        reason: summary.reason,
+        turns: summary.turns,
+        usage: summary.usage,
+        ...(summary.stopReason ? { stopReason: summary.stopReason } : {}),
+      },
+    },
+  };
+}
+
+/**
  * 共享：spawn 一个 sub-agent session 并整形结果。单 factory 版与 routed 版（#59）都走这里——
  * 纵向深度透传（给子挂 onSessionStart hook 把深度设为 父+1）、父 signal 透传、子终态回灌全在此收口。
  * 横向/纵向闸由调用方在调用前各自判（错误文案各自独立），故本函数只管「确实要 spawn 时」的动作。
+ *
+ * `onSpawn`（opt-in）：spawn 完一拿到终态就回调，让调用方（如 SubAgentRegistry）把子 session 留住以便续聊。
+ * 不传则子 session 跑完即弃（0.2.4 行为）。在 run 之后调 → 句柄已带完整首轮上下文。
  */
 async function spawnSubAgent(
   sub: AgentSession,
   task: string,
   depth: number,
   signal: AbortSignal,
+  onSpawn?: (session: AgentSession) => void,
 ): Promise<ToolExecResult> {
   // 纵向深度透传：给子 session 挂一个 onSessionStart hook，把子 ctx.state 的深度设为 当前+1。
   // 子 session 自己的（routed）subAgentTool（若有）execute 时就读到递增后的深度——多分支各自从父继承，
@@ -76,20 +108,9 @@ async function spawnSubAgent(
   sub.use(depthInjector);
   // 父 signal 透传 → sub-agent 可被父的 abort 协作式取消。
   const summary = await sub.run(task, { signal });
-  const text = messageText(summary.lastMessage) || "(sub-agent produced no text output)";
-
-  // 把子代理终态放进 details（trace/metrics 用），content 回灌父模型。
-  return {
-    content: [{ type: "text", text }],
-    details: {
-      subAgent: {
-        reason: summary.reason,
-        turns: summary.turns,
-        usage: summary.usage,
-        ...(summary.stopReason ? { stopReason: summary.stopReason } : {}),
-      },
-    },
-  };
+  // opt-in 续聊：把跑完首轮的子 session 留住（默认不传 → 跑完即弃）。
+  onSpawn?.(sub);
+  return subAgentResult(sub, summary);
 }
 
 export function subAgentTool(opts: SubAgentToolOptions): HarnessTool {
@@ -127,7 +148,7 @@ export function subAgentTool(opts: SubAgentToolOptions): HarnessTool {
       spawned++;
 
       const sub = opts.sessionFactory(task, ctx);
-      return spawnSubAgent(sub, task, depth, signal);
+      return spawnSubAgent(sub, task, depth, signal, opts.onSpawn);
     },
   };
 }
@@ -165,6 +186,11 @@ export interface RoutedSubAgentToolOptions {
   maxSubAgents?: number;
   /** 跨层递归**纵向**深度闸（#45），语义同单 factory 版。默认 2。 */
   maxDepth?: number;
+  /**
+   * **opt-in 续聊接缝（S4）**：语义同单 factory 版——每 spawn 完一个子 session 就回调一次（跨所有 type）。
+   * 默认不传 → 子 session 跑完即弃。
+   */
+  onSpawn?: (session: AgentSession) => void;
 }
 
 /**
@@ -244,7 +270,7 @@ export function routedSubAgentTool(opts: RoutedSubAgentToolOptions): HarnessTool
       spawned++;
 
       const sub = spec.sessionFactory(task, ctx);
-      return spawnSubAgent(sub, task, depth, signal);
+      return spawnSubAgent(sub, task, depth, signal, opts.onSpawn);
     },
   };
 }
