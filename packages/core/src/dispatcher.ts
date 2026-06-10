@@ -30,6 +30,8 @@ import type {
   MergedHookResult,
   OnAfterFlushInput,
   OnAfterFlushResult,
+  OnSubagentEndInput,
+  OnSubagentStartInput,
   PostToolUseInput,
   PreToolUseInput,
   SessionEndInput,
@@ -63,6 +65,8 @@ const EVENT_METHODS = new Set([
   "onContextOverflow",
   "onPostToolUse",
   "onError",
+  "onSubagentStart",
+  "onSubagentEnd",
 ] as const);
 
 const DECISION_METHODS = new Set([
@@ -124,6 +128,8 @@ export interface EventInputMap {
   onLlmEnd: LlmEndInput;
   onContextOverflow: ContextOverflowInput;
   onPostToolUse: PostToolUseInput;
+  onSubagentStart: OnSubagentStartInput;
+  onSubagentEnd: OnSubagentEndInput;
 }
 
 export interface DecisionInputMap {

@@ -18,6 +18,8 @@ import type {
   HookContext,
   HookLogger,
   LogLevel,
+  OnSubagentEndInput,
+  OnSubagentStartInput,
   SessionConfigView,
   StateValueFor,
   TypedStateMap,
@@ -68,6 +70,13 @@ export interface HookContextDeps {
   onAbort: (reason: string) => void;
   /** emit 回调（可选；默认 noop）。 */
   onEmit?: (event: { type: string; [k: string]: unknown }) => void;
+  /**
+   * O5：kernel-wired 回调，把 `onSubagentStart` 事件派发到本 session 的 hook。缺省 = no-op
+   * （即未由 session.ts 接线、或脱离 session 的裸 ctx → `fireSubagentStart` 静默无操作）。
+   */
+  onSubagentStart?: (input: OnSubagentStartInput) => Promise<void>;
+  /** O5：同上，派发 `onSubagentEnd`。 */
+  onSubagentEnd?: (input: OnSubagentEndInput) => Promise<void>;
 }
 
 /**
@@ -205,5 +214,14 @@ export class HookContextImpl implements HookContext {
 
   emit(event: { type: string; [k: string]: unknown }): void {
     this.deps.onEmit?.(event);
+  }
+
+  async fireSubagentStart(input: OnSubagentStartInput): Promise<void> {
+    // deps 缺省（未由 session.ts 接线）时 = no-op。
+    await this.deps.onSubagentStart?.(input);
+  }
+
+  async fireSubagentEnd(input: OnSubagentEndInput): Promise<void> {
+    await this.deps.onSubagentEnd?.(input);
   }
 }
