@@ -16,6 +16,8 @@ export type {
   ContextOverflowInput,
   OnAfterFlushInput,
   OnAfterFlushResult,
+  OnSubagentStartInput,
+  OnSubagentEndInput,
   PreToolUseInput,
   PostToolUseInput,
   UserPromptSubmitInput,

@@ -85,6 +85,11 @@ export function subAgentResult(sub: AgentSession, summary: RunSummary): ToolExec
  * 纵向深度透传（给子挂 onSessionStart hook 把深度设为 父+1）、父 signal 透传、子终态回灌全在此收口。
  * 横向/纵向闸由调用方在调用前各自判（错误文案各自独立），故本函数只管「确实要 spawn 时」的动作。
  *
+ * `ctx`：**父** session 的 HookContext。O5——在子 run 前后经它把 `onSubagentStart`/`onSubagentEnd`
+ * 事件派发到父 session 的 hook（metrics / sessionLog 等据此统一观测子 agent 生命周期）。
+ * **作用域边界**：只有走本函数（subAgentTool / routedSubAgentTool）spawn 的子才 fire；forkSession /
+ * workPool / 直接 `new AgentSession` 的子无父 ctx 在 scope，**不 fire**（O5 设计的 opt-in 边界）。
+ *
  * `onSpawn`（opt-in）：spawn 完一拿到终态就回调，让调用方（如 SubAgentRegistry）把子 session 留住以便续聊。
  * 不传则子 session 跑完即弃（0.2.4 行为）。在 run 之后调 → 句柄已带完整首轮上下文。
  */
@@ -93,6 +98,7 @@ async function spawnSubAgent(
   task: string,
   depth: number,
   signal: AbortSignal,
+  ctx: HookContext,
   onSpawn?: (session: AgentSession) => void,
 ): Promise<ToolExecResult> {
   // 纵向深度透传：给子 session 挂一个 onSessionStart hook，把子 ctx.state 的深度设为 当前+1。
@@ -106,11 +112,24 @@ async function spawnSubAgent(
     },
   };
   sub.use(depthInjector);
+  // O5：spawn 前 fire onSubagentStart（子在 depth+1）。
+  await ctx.fireSubagentStart({ agentId: sub.id, task, depth: depth + 1 });
   // 父 signal 透传 → sub-agent 可被父的 abort 协作式取消。
   const summary = await sub.run(task, { signal });
   // opt-in 续聊：把跑完首轮的子 session 留住（默认不传 → 跑完即弃）。
   onSpawn?.(sub);
-  return subAgentResult(sub, summary);
+  const result = subAgentResult(sub, summary);
+  // O5：跑完后 fire onSubagentEnd（带终态）。summaryText 复用回灌父模型的同一份文本。
+  await ctx.fireSubagentEnd({
+    agentId: sub.id,
+    task,
+    depth: depth + 1,
+    reason: summary.reason,
+    turns: summary.turns,
+    usage: summary.usage,
+    summaryText: messageText(summary.lastMessage),
+  });
+  return result;
 }
 
 export function subAgentTool(opts: SubAgentToolOptions): HarnessTool {
@@ -148,7 +167,7 @@ export function subAgentTool(opts: SubAgentToolOptions): HarnessTool {
       spawned++;
 
       const sub = opts.sessionFactory(task, ctx);
-      return spawnSubAgent(sub, task, depth, signal, opts.onSpawn);
+      return spawnSubAgent(sub, task, depth, signal, ctx, opts.onSpawn);
     },
   };
 }
@@ -270,7 +289,7 @@ export function routedSubAgentTool(opts: RoutedSubAgentToolOptions): HarnessTool
       spawned++;
 
       const sub = spec.sessionFactory(task, ctx);
-      return spawnSubAgent(sub, task, depth, signal, opts.onSpawn);
+      return spawnSubAgent(sub, task, depth, signal, ctx, opts.onSpawn);
     },
   };
 }

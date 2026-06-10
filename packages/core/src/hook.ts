@@ -15,8 +15,11 @@ import type {
   Message,
   Tool,
   ToolCall,
+  Usage,
 } from "@earendil-works/pi-ai";
 import type { HarnessTool } from "./types.js";
+// type-only import：编译期擦除，不构成与 session.ts 的运行时循环依赖。
+import type { RunSummary } from "./session.js";
 
 /* ──────────────────── Tool 执行结果 ──────────────────── */
 
@@ -191,6 +194,38 @@ export interface ErrorInput {
   err: Error;
   call?: ToolCall;
   hookName?: string;
+}
+
+/**
+ * 子 agent **spawn 前**的观测信号（O5）。只有经 subAgentTool / routedSubAgentTool 造的子才会 fire——
+ * 它们在 tool 内调 `ctx.fireSubagentStart(...)` 把事件派发到**父** session 的 hook。让 metrics / sessionLog
+ * 等现有 plugin 统一观测子 agent 生命周期，无需各自插桩 sessionFactory。
+ */
+export interface OnSubagentStartInput {
+  /** 子 session 的 id（= `AgentSession.id`）。 */
+  agentId: string;
+  /** 派给子 agent 的任务文本。 */
+  task: string;
+  /** 子 agent 的递归深度（父深度 + 1，与 subAgent.depth 透传一致）。 */
+  depth: number;
+}
+
+/**
+ * 子 agent **跑完后**的观测信号（O5），带终态。配对 `OnSubagentStartInput`：start 先于 end。
+ * 字段取自子 session 的 `RunSummary` 终态 + 回灌父模型的文本。
+ */
+export interface OnSubagentEndInput {
+  agentId: string;
+  task: string;
+  depth: number;
+  /** 子 session 的终态判别（与 `RunSummary.reason` 同一枚举）。 */
+  reason: RunSummary["reason"];
+  /** 子 session 跑过的 turn 数。 */
+  turns: number;
+  /** 子 session 累计 token usage（含 cost）。 */
+  usage: Usage;
+  /** 子最后一条 assistant 的纯文本（回灌父模型的内容）；无文本输出则缺省。 */
+  summaryText?: string;
 }
 
 /* ──────────────────── 统一返回 envelope ──────────────────── */
@@ -370,6 +405,19 @@ export interface HookContext {
 
   /** 内部 emit（用于 kernel ↔ plugin 互通；极少用）。 */
   emit(event: { type: string; [k: string]: unknown }): void;
+
+  /**
+   * 把 `onSubagentStart` 事件派发到**本（父）session** 的 hook（O5）。供 controller 在 tool 内、spawn
+   * 子 agent 前调用——子在 `depth + 1`。**只有经 subAgentTool / routedSubAgentTool 造的子才会 fire**；
+   * forkSession / workPool / 直接 `new AgentSession` 的子不 fire（无父 ctx 在 scope）。
+   */
+  fireSubagentStart(input: OnSubagentStartInput): Promise<void>;
+
+  /**
+   * 把 `onSubagentEnd` 事件派发到**本（父）session** 的 hook（O5）。供 controller 在子 agent 跑完、
+   * 拿到终态后调用。作用域边界同 `fireSubagentStart`。
+   */
+  fireSubagentEnd(input: OnSubagentEndInput): Promise<void>;
 }
 
 /* ──────────────────── Hook 接口 ──────────────────── */
@@ -497,6 +545,22 @@ export interface Hook {
     ctx: HookContext,
   ): HookResult | void | Promise<HookResult | void>;
   onError?(input: ErrorInput, ctx: HookContext): void | Promise<void>;
+  /**
+   * 子 agent **spawn 前**观测点（O5）。fire-and-observe（像 onError，**返回被忽略**，无控制流）。
+   * 只对经 subAgentTool / routedSubAgentTool 造的子 fire；其它来源的子 session 不触发。
+   */
+  onSubagentStart?(
+    input: OnSubagentStartInput,
+    ctx: HookContext,
+  ): void | Promise<void>;
+  /**
+   * 子 agent **跑完后**观测点（O5），带终态。fire-and-observe（**返回被忽略**）。
+   * 与 onSubagentStart 配对、作用域相同。
+   */
+  onSubagentEnd?(
+    input: OnSubagentEndInput,
+    ctx: HookContext,
+  ): void | Promise<void>;
 
   // ─────────── Decision (sequential short-circuit) ───────────
   onPreToolUse?(

@@ -389,3 +389,52 @@ describe("mergeResults", () => {
     expect(out.systemMessages).toEqual([]);
   });
 });
+
+describe("HookDispatcher subagent events (O5)", () => {
+  it("fireEvent('onSubagentStart') dispatches to matched hooks with the input", async () => {
+    const seen: Array<{ agentId: string; task: string; depth: number }> = [];
+    const hooks: Hook[] = [
+      { name: "probe", onSubagentStart: (input) => { seen.push(input); } },
+      { name: "noop", onTurnEnd: () => {} }, // 不实现 onSubagentStart → 不被调
+    ];
+    const d = new HookDispatcher(hooks);
+    await d.fireEvent(
+      "onSubagentStart",
+      { agentId: "sub-1", task: "do x", depth: 1 },
+      fakeCtx(),
+    );
+    expect(seen).toEqual([{ agentId: "sub-1", task: "do x", depth: 1 }]);
+  });
+
+  it("fireEvent('onSubagentEnd') dispatches terminal state to matched hooks", async () => {
+    const seen: any[] = [];
+    const hooks: Hook[] = [
+      { name: "probe", onSubagentEnd: (input) => { seen.push(input); } },
+    ];
+    const d = new HookDispatcher(hooks);
+    const usage = { input: 1, output: 2 } as any;
+    await d.fireEvent(
+      "onSubagentEnd",
+      { agentId: "sub-1", task: "do x", depth: 1, reason: "done", turns: 3, usage, summaryText: "result" },
+      fakeCtx(),
+    );
+    expect(seen).toEqual([
+      { agentId: "sub-1", task: "do x", depth: 1, reason: "done", turns: 3, usage, summaryText: "result" },
+    ]);
+  });
+
+  it("subagent events are observe-only: a thrown hook does not break dispatch (returns merged)", async () => {
+    const hooks: Hook[] = [
+      { name: "thrower", internal: true, onSubagentStart: () => { throw new Error("boom"); } },
+      { name: "ok", onSubagentStart: () => {} },
+    ];
+    const d = new HookDispatcher(hooks);
+    // fire-and-observe：返回 MergedHookResult，调用方忽略；throw 被 fail-open 吞掉，不冒泡。
+    const out = await d.fireEvent(
+      "onSubagentStart",
+      { agentId: "s", task: "t", depth: 1 },
+      fakeCtx(),
+    );
+    expect(out.continue).toBeUndefined();
+  });
+});
