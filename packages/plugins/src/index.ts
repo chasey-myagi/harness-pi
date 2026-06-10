@@ -44,6 +44,12 @@ export type { LeaseDecisionOptions } from "./lease-decision.js";
 export { compactSummarize } from "./compact-summarize.js";
 export type { CompactSummarizeOptions } from "./compact-summarize.js";
 
+export { turnEndGuard } from "./turn-end-guard.js";
+export type {
+  TurnEndGuardOptions,
+  TurnEndGuardResult,
+} from "./turn-end-guard.js";
+
 export {
   autoCompaction,
   estimateTokensByChars,
