@@ -1,6 +1,6 @@
 {
   "name": "@harness-pi/coding-agent",
-  "version": "0.2.4",
+  "version": "0.3.0",
   "description": "Dogfood coding agent built on harness-pi — usable pi-tui CLI showcasing the harness-pi kernel",
   "license": "MIT",
   "repository": {
@@ -41,12 +41,12 @@
     "test:watch": "vitest"
   },
   "dependencies": {
+    "@earendil-works/pi-ai": "^0.74.2",
+    "@earendil-works/pi-tui": "0.74.2",
     "@harness-pi/adapters": "workspace:*",
     "@harness-pi/core": "workspace:*",
     "@harness-pi/plugins": "workspace:*",
-    "@harness-pi/tools": "workspace:*",
-    "@earendil-works/pi-ai": "^0.74.2",
-    "@earendil-works/pi-tui": "0.74.2"
+    "@harness-pi/tools": "workspace:*"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
