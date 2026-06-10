@@ -8,6 +8,7 @@ import { createFakeModel, createTestContext } from "@harness-pi/core/testing";
 import {
   subAgentTool,
   routedSubAgentTool,
+  SubAgentRegistry,
   GapExplorer,
   type Gap,
   type ExplorerFinding,
@@ -37,6 +38,49 @@ describe("subAgentTool", () => {
     const details = result.details as { subAgent?: { reason?: string; turns?: number } } | undefined;
     expect(details?.subAgent?.reason).toBe("done");
     expect(details?.subAgent?.turns).toBe(1);
+    subFake.teardown();
+  });
+
+  it("delivers the sub-agent sessionId + usage in details (typed delivery, S4)", async () => {
+    const subFake = createFakeModel([
+      { content: [{ type: "text", text: "ans" }], stopReason: "stop", usage: { input: 7, output: 4 } },
+    ]);
+    let subId = "";
+    const tool = subAgentTool({
+      sessionFactory: () => {
+        const s = new AgentSession({ model: subFake, tools: [] });
+        subId = s.id;
+        return s;
+      },
+    });
+    const { ctx } = createTestContext();
+    const result = await tool.execute({ task: "do X" }, ctx, new AbortController().signal);
+    const details = result.details as
+      | { subAgent?: { sessionId?: string; usage?: { input?: number; output?: number } } }
+      | undefined;
+    expect(details?.subAgent?.sessionId).toBe(subId);
+    expect(details?.subAgent?.usage?.input).toBe(7);
+    expect(details?.subAgent?.usage?.output).toBe(4);
+    subFake.teardown();
+  });
+
+  it("does NOT retain the sub-agent when no registry is wired (0.2.4 regression)", async () => {
+    // 默认（不接 onSpawn）→ 子 session 跑完即弃。建一个 registry 但**不接到** tool 上：spawn 后 registry 仍为空，
+    // 续聊该 id 报「未保留」。证明启用新能力前行为与现状一致：句柄不外泄、不被保留。
+    const subFake = createFakeModel([{ content: [{ type: "text", text: "ok" }], stopReason: "stop" }]);
+    const registry = new SubAgentRegistry();
+    let subId = "";
+    const tool = subAgentTool({
+      sessionFactory: () => {
+        const s = new AgentSession({ model: subFake, tools: [] });
+        subId = s.id;
+        return s;
+      },
+      // 故意不传 onSpawn —— 复刻 0.2.4 默认配置。
+    });
+    await tool.execute({ task: "t" }, createTestContext().ctx, new AbortController().signal);
+    expect(registry.size).toBe(0);
+    await expect(registry.continueSubAgent(subId, "more")).rejects.toThrow(/no retained sub-agent/);
     subFake.teardown();
   });
 

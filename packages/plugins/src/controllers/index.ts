@@ -54,12 +54,15 @@ export type {
   CompactResumeResult,
 } from "./compact-resume-from-boundary.js";
 
-export { subAgentTool, routedSubAgentTool } from "./sub-agent-tool.js";
+export { subAgentTool, routedSubAgentTool, subAgentResult } from "./sub-agent-tool.js";
 export type {
   SubAgentToolOptions,
   AgentSpec,
   RoutedSubAgentToolOptions,
 } from "./sub-agent-tool.js";
+
+export { SubAgentRegistry } from "./sub-agent-registry.js";
+export type { SubAgentRegistryOptions } from "./sub-agent-registry.js";
 
 export { persistCompactionBoundary } from "./persist-compaction-boundary.js";
 export type { PersistCompactionBoundaryOptions } from "./persist-compaction-boundary.js";
