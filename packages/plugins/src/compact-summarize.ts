@@ -81,6 +81,9 @@ export function compactSummarize(opts: CompactSummarizeOptions): Hook {
 
       // summary 用 role:"user" 承载（一条"用户从没发过的回顾 turn"）——对齐 Claude Code 的 compaction
       // 惯例，且 pi-ai 无独立 system role；不用 attachment 是因为它要稳定占据前缀、参与 cache。
+      // 标记「本 turn 发生了压缩」，供 postCompactFileReread 在下一 turn 重读关键文件（opt-in，缺该插件无副作用）。
+      ctx.state.set("post-compact-file-reread.pending", ctx.turnIdx);
+
       const summaryMsg = createUserMessage(wrap(cache.text, cache.coveredCount));
       // view = [summary(覆盖前 coveredCount 条)] + 其后全部原样（含未重算的早期 + recent tail）。
       // 无缝无重叠：slice 起点正是 coveredCount。stable-state 下 tail 在两次重算间从 keepRecent

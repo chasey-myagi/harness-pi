@@ -51,6 +51,19 @@ export type {
 } from "./turn-end-guard.js";
 
 export {
+  defaultSummarize,
+  renderSummaryPrompt,
+  DEFAULT_SUMMARY_TEMPLATE,
+} from "./summary-template.js";
+export type { DefaultSummarizeOptions } from "./summary-template.js";
+
+export {
+  postCompactFileReread,
+  POST_COMPACT_PENDING_KEY,
+} from "./post-compact-file-reread.js";
+export type { PostCompactFileRereadOptions } from "./post-compact-file-reread.js";
+
+export {
   autoCompaction,
   estimateTokensByChars,
   estimateRequestTokens,
