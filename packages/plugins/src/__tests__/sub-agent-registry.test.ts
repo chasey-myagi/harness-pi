@@ -85,6 +85,74 @@ describe("SubAgentRegistry — continue handle", () => {
     fakes.forEach((f) => f.teardown());
   });
 
+  it("keeps the most-recently-continued entry under LRU (not FIFO)", async () => {
+    // maxRetained=2，但 a 在 b 之后被续聊 → a 的 recency 刷新到 b 之上。再 spawn c 触发驱逐时，LRU 该逐的是
+    // **最久未用**的 b，而非最早 spawn 的 a。把「LRU≠FIFO」钉死：若实现退化成按插入序逐，本测试会红。
+    const now = { v: 1_000 };
+    vi.spyOn(Date, "now").mockImplementation(() => now.v);
+    const fakes = [0, 1, 2].map(() =>
+      createFakeModel([{ content: [{ type: "text", text: "ok" }], stopReason: "stop" }]),
+    );
+    let i = 0;
+    const registry = new SubAgentRegistry({ maxRetained: 2 });
+    const tool = subAgentTool({
+      sessionFactory: () => new AgentSession({ model: fakes[i++]!, tools: [] }),
+      onSpawn: registry.retain,
+    });
+    const { ctx } = createTestContext();
+    const sig = new AbortController().signal;
+    const idOf = (r: { details?: unknown }) =>
+      (r.details as { subAgent: { sessionId: string } }).subAgent.sessionId;
+
+    now.v = 1_000;
+    const a = idOf(await tool.execute({ task: "a" }, ctx, sig));
+    now.v = 1_001;
+    const b = idOf(await tool.execute({ task: "b" }, ctx, sig));
+    // 续聊 a（@1002）→ 把 a 的 lastUsedMs 刷新到 b 之上。
+    now.v = 1_002;
+    fakes[0]!.push({ content: [{ type: "text", text: "a2" }], stopReason: "stop" });
+    await registry.continueSubAgent(a, "again");
+    // spawn c（@1003）→ 超上限驱逐 LRU = b（1001，最久未用），a（1002）幸免。
+    now.v = 1_003;
+    await tool.execute({ task: "c" }, ctx, sig);
+    expect(registry.size).toBe(2);
+    await expect(registry.continueSubAgent(b, "x")).rejects.toThrow(/no retained sub-agent/);
+    // a 因被续聊过 recency 最新 → 仍可续。
+    fakes[0]!.push({ content: [{ type: "text", text: "a3" }], stopReason: "stop" });
+    expect(blockText((await registry.continueSubAgent(a, "x")).content)).toContain("a3");
+    fakes.forEach((f) => f.teardown());
+  });
+
+  it("sweeps out TTL-expired entries on a new retain (retain-path TTL)", async () => {
+    // retain 路径也扫 TTL：新 spawn 进来时把已过期的旧句柄清掉，而非留到下次 continue 才发现。
+    const now = { v: 1_000 };
+    vi.spyOn(Date, "now").mockImplementation(() => now.v);
+    const fakes = [0, 1].map(() =>
+      createFakeModel([{ content: [{ type: "text", text: "ok" }], stopReason: "stop" }]),
+    );
+    let i = 0;
+    const registry = new SubAgentRegistry({ ttlMs: 100 });
+    const tool = subAgentTool({
+      sessionFactory: () => new AgentSession({ model: fakes[i++]!, tools: [] }),
+      onSpawn: registry.retain,
+    });
+    const { ctx } = createTestContext();
+    const sig = new AbortController().signal;
+    const idOf = (r: { details?: unknown }) =>
+      (r.details as { subAgent: { sessionId: string } }).subAgent.sessionId;
+
+    const s1 = idOf(await tool.execute({ task: "s1" }, ctx, sig));
+    expect(registry.size).toBe(1);
+    // 时钟越过 ttl 后再 spawn s2 → retain 的 TTL 扫描把 s1 清掉。
+    now.v += 101;
+    const s2 = idOf(await tool.execute({ task: "s2" }, ctx, sig));
+    expect(registry.size).toBe(1); // 只剩 s2
+    await expect(registry.continueSubAgent(s1, "x")).rejects.toThrow(/no retained sub-agent/);
+    fakes[1]!.push({ content: [{ type: "text", text: "s2b" }], stopReason: "stop" });
+    expect(blockText((await registry.continueSubAgent(s2, "x")).content)).toContain("s2b");
+    fakes.forEach((f) => f.teardown());
+  });
+
   it("evicts entries that have outlived ttlMs", async () => {
     const now = { v: 1_000 };
     vi.spyOn(Date, "now").mockImplementation(() => now.v);

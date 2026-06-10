@@ -225,4 +225,53 @@ describe("postCompactFileReread", () => {
     expect(sawFresh).toBe(true);
     fake.teardown();
   });
+
+  it("regression: compaction marks reread ONLY on re-summarize turns, not every over-threshold turn", async () => {
+    // 锁住 blocker 回归：messages 是 append-only 原始 _messages，一旦越阈值就**永久**在阈值之上。
+    // 若 marker 每个越界 turn 都置位（旧 bug：set 在重算分支外），postCompactFileReread 会每 turn 重读重注入，
+    // 把刚省下的 token 又灌回去。正确契约：marker 只在「本 turn 真跑了一次新总结」时置位。
+    let summarizeCalls = 0;
+    const hook = compactSummarize({
+      maxMessages: 4,
+      keepRecent: 2,
+      resummarizeEvery: 3, // 想覆盖的前缀每增长 ≥3 条才重算
+      summarize: () => {
+        summarizeCalls++;
+        return "RECAP";
+      },
+    });
+    const mkMsgs = (n: number) =>
+      Array.from({ length: n }, (_, i) => createUserMessage(`m${i}`));
+    const map = new Map<string, unknown>();
+    const ctx = {
+      turnIdx: 0,
+      state: {
+        get: (k: string) => map.get(k),
+        set: (k: string, v: unknown) => void map.set(k, v),
+        has: (k: string) => map.has(k),
+        delete: (k: string) => map.delete(k),
+      },
+    } as unknown as HookContext;
+    const transform = hook.transformMessagesBeforeLlm!;
+
+    // turn A：6 条（>4），cache 空 → 重算 → 置标记。
+    await transform(mkMsgs(6), ctx);
+    expect(summarizeCalls).toBe(1);
+    expect(map.has(POST_COMPACT_PENDING_KEY)).toBe(true);
+    map.delete(POST_COMPACT_PENDING_KEY); // 模拟 reread 在下一 turn 消费即清
+
+    // turn B：7 条（仍 >4，targetCover=5；5-4=1 < 3）→ cache 命中、不重算 → **不**置标记。
+    await transform(mkMsgs(7), ctx);
+    expect(summarizeCalls).toBe(1);
+    expect(map.has(POST_COMPACT_PENDING_KEY)).toBe(false); // 关键：cache-hit 越界 turn 不触发 reread
+
+    // turn C：8 条（targetCover=6；6-4=2 < 3）→ 仍 cache 命中、不置标记。
+    await transform(mkMsgs(8), ctx);
+    expect(map.has(POST_COMPACT_PENDING_KEY)).toBe(false);
+
+    // turn D：10 条（targetCover=8；8-4=4 ≥ 3）→ 重算 → 重新置标记。
+    await transform(mkMsgs(10), ctx);
+    expect(summarizeCalls).toBe(2);
+    expect(map.has(POST_COMPACT_PENDING_KEY)).toBe(true);
+  });
 });
