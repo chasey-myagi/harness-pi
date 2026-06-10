@@ -335,6 +335,9 @@ export function autoCompaction(opts: AutoCompactionOptions): Hook {
         cache = { coveredCount: targetCover, text };
       }
 
+      // 标记「本 turn 发生了压缩」，供 postCompactFileReread 在下一 turn 重读关键文件（opt-in，缺该插件无副作用）。
+      ctx.state.set("post-compact-file-reread.pending", ctx.turnIdx);
+
       const summaryMsg = createUserMessage(wrap(cache.text, cache.coveredCount));
       return [summaryMsg, ...messages.slice(cache.coveredCount)];
     },
