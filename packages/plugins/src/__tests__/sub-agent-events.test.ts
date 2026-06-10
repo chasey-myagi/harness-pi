@@ -152,6 +152,75 @@ describe("subAgent lifecycle events (O5)", () => {
     subFake.teardown();
   });
 
+  it("observe-only end-to-end: a throwing onSubagent hook breaks neither the parent run nor sibling hooks", async () => {
+    // 端到端背书核心主张「现有 plugin 在父 session 上统一观测子生命周期」：一个在 onSubagentStart/End 里
+    // throw 的 hook 不该中断父 run、不该挡住同批其它 hook、不该丢子结果（fireEvent 并行 observe + fail-open）。
+    const probe = makeProbe();
+    const thrower: Hook = {
+      name: "thrower",
+      onSubagentStart() {
+        throw new Error("boom-start");
+      },
+      onSubagentEnd() {
+        throw new Error("boom-end");
+      },
+    };
+    const subFake = createFakeModel([
+      { content: [{ type: "text", text: "child" }], stopReason: "stop" },
+    ]);
+    const tool = subAgentTool({
+      sessionFactory: () => new AgentSession({ model: subFake, tools: [] }),
+    });
+    const parentFake = createFakeModel([
+      { content: [{ type: "toolCall", name: "subAgent", arguments: { task: "t" } }] },
+      { content: [{ type: "text", text: "parent done" }], stopReason: "stop" },
+    ]);
+    // thrower 排在 probe 之前 → 它 throw 不该挡住 probe 收事件。
+    const parent = new AgentSession({ model: parentFake, tools: [tool], hooks: [thrower, probe.hook] });
+    const summary = await parent.run("go"); // 不抛
+    expect(summary.reason).toBe("done"); // 父正常收尾
+    expect(probe.events.map((e) => e.kind)).toEqual(["start", "end"]); // sibling 仍收到两事件
+    // 子结果仍正常回灌父。
+    const tr = parent.messages.find((m) => m.role === "toolResult") as { content: unknown } | undefined;
+    const text = Array.isArray(tr!.content)
+      ? tr!.content.map((b) => ("text" in b ? (b as { text: string }).text : "")).join("")
+      : "";
+    expect(text).toBe("child");
+    parentFake.teardown();
+    subFake.teardown();
+  });
+
+  it("transports a non-done reason (max_turns) faithfully to onSubagentEnd", async () => {
+    // reason 是 summary.reason 直透；非 done 分支也得如实传到父 hook。让子撞 maxTurns=1 → reason=max_turns。
+    const probe = makeProbe();
+    const noopTool = {
+      name: "noop",
+      description: "noop",
+      parameters: { type: "object", properties: {} } as never,
+      execute: async () => ({ content: [{ type: "text" as const, text: "ok" }] }),
+    };
+    // 子每轮都发 toolCall（想继续），maxTurns=1 → 子以 max_turns 收尾。
+    const subFake = createFakeModel([
+      { content: [{ type: "toolCall", name: "noop", arguments: {} }], stopReason: "toolUse" },
+      { content: [{ type: "toolCall", name: "noop", arguments: {} }], stopReason: "toolUse" },
+    ]);
+    const tool = subAgentTool({
+      sessionFactory: () => new AgentSession({ model: subFake, tools: [noopTool as never], maxTurns: 1 }),
+    });
+    const parentFake = createFakeModel([
+      { content: [{ type: "toolCall", name: "subAgent", arguments: { task: "t" } }] },
+      { content: [{ type: "text", text: "done" }], stopReason: "stop" },
+    ]);
+    const parent = new AgentSession({ model: parentFake, tools: [tool], hooks: [probe.hook] });
+    await parent.run("go");
+
+    expect(probe.events.map((e) => e.kind)).toEqual(["start", "end"]); // start 仍先于 end
+    const end = probe.events[1]!.input as OnSubagentEndInput;
+    expect(end.reason).toBe("max_turns"); // 非 done reason 如实直透
+    parentFake.teardown();
+    subFake.teardown();
+  });
+
   it("regression: a session that never spawns a sub fires neither event", async () => {
     const probe = makeProbe();
     // 父只回一句话收尾，从不调 subAgent。

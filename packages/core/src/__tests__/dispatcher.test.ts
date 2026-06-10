@@ -4,7 +4,7 @@
 
 import { describe, it, expect, vi } from "vitest";
 import { HookDispatcher, mergeResults, defaultTimeoutFor } from "../dispatcher.js";
-import type { Hook, HookContext, MergedHookResult } from "../index.js";
+import type { Hook, HookContext } from "../index.js";
 import { createTestContext } from "../testing.js";
 
 function fakeCtx(): HookContext {
@@ -423,18 +423,19 @@ describe("HookDispatcher subagent events (O5)", () => {
     ]);
   });
 
-  it("subagent events are observe-only: a thrown hook does not break dispatch (returns merged)", async () => {
+  it("subagent events are observe-only: a thrown hook does not break dispatch nor mask sibling hooks", async () => {
+    let okRan = false;
     const hooks: Hook[] = [
       { name: "thrower", internal: true, onSubagentStart: () => { throw new Error("boom"); } },
-      { name: "ok", onSubagentStart: () => {} },
+      { name: "ok", onSubagentStart: () => { okRan = true; } },
     ];
     const d = new HookDispatcher(hooks);
-    // fire-and-observe：返回 MergedHookResult，调用方忽略；throw 被 fail-open 吞掉，不冒泡。
-    const out = await d.fireEvent(
+    // fire-and-observe：throw 被 fail-open 吞掉、不冒泡（await 不抛即证），且不挡住同批未 throw 的 hook。
+    await d.fireEvent(
       "onSubagentStart",
       { agentId: "s", task: "t", depth: 1 },
       fakeCtx(),
     );
-    expect(out.continue).toBeUndefined();
+    expect(okRan).toBe(true); // thrower 的 throw 没阻断 ok hook（并行 observe + fail-open）
   });
 });
