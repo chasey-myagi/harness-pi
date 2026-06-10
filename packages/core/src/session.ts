@@ -356,6 +356,15 @@ export class AgentSession {
       config: configView,
       onAppendMessage: (msg) => this._messages.push(msg),
       onAbort: (reason) => this._abortCtrl.abort(new Error(reason)),
+      // O5：把 controller 在 tool 内调的 fireSubagentStart/End 派发到本 session 的 hook。
+      // 闭包读 this._ctx 在调用时已构造完毕（fire* 只在 run 中、tool 内触发，无循环依赖）。
+      // 观测事件：fireEvent 返回 MergedHookResult 一律忽略（无控制流）。
+      onSubagentStart: async (input) => {
+        await this._dispatcher.fireEvent("onSubagentStart", input, this._ctx);
+      },
+      onSubagentEnd: async (input) => {
+        await this._dispatcher.fireEvent("onSubagentEnd", input, this._ctx);
+      },
     };
     if (opts.logSink) ctxDeps.logSink = opts.logSink;
     this._ctx = new HookContextImpl(ctxDeps);
