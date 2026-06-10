@@ -1,6 +1,6 @@
 {
   "name": "@harness-pi/core",
-  "version": "0.2.4",
+  "version": "0.3.0",
   "description": "Agent kernel — pi-ai loop + first-class hook system",
   "license": "MIT",
   "repository": {
@@ -41,8 +41,8 @@
     "@earendil-works/pi-ai": "^0.74.2"
   },
   "devDependencies": {
+    "@types/node": "^22.0.0",
     "typescript": "^5.6.0",
-    "vitest": "^2.1.0",
-    "@types/node": "^22.0.0"
+    "vitest": "^2.1.0"
   }
 }
