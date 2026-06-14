@@ -38,7 +38,8 @@
     "build": "tsc -p .",
     "typecheck": "tsc -p . --noEmit",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "smoke:provider": "tsx scripts/d0-smoke.ts"
   },
   "dependencies": {
     "@earendil-works/pi-ai": "^0.74.2",

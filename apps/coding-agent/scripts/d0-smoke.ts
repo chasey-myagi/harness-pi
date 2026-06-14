@@ -11,9 +11,12 @@
  *   A'. X1/X2 估算校准:estimateRequestTokens(turn-0 含 tool schema) vs 真 usage.input 偏差。
  *   B. provider error(坏 apiKey):#53 —— 真 401 → reason=error(不再静默 done)、不误判 overflow。
  *   C. 容忍型 provider 探针:大(但 < 窗口)prompt 正常完成、不误 fire overflow(记录为何真 overflow 不便宜)。
+ *   D. budget-bound continuation(#82):小预算下 autoCompaction(X2)真触发,真 provider 吃压缩后视图续跑
+ *      到 reason=done,且早期事实跨压缩存活。容忍型 provider 测不了 reactive overflow(见 C),改测这条
+ *      provider-无关的等价路径——这是 #82 的真 provider 缺口所在。
  */
 import { AgentSession, type HarnessTool } from "@harness-pi/core";
-import { estimateRequestTokens } from "@harness-pi/plugins";
+import { autoCompaction, estimateRequestTokens } from "@harness-pi/plugins";
 import { Type } from "@earendil-works/pi-ai";
 import { resolveDashScopeModel } from "../src/providers/dashscope.js";
 
@@ -30,6 +33,19 @@ let failures = 0;
 function check(name: string, cond: boolean, detail = ""): void {
   console.log(`  ${cond ? "✓" : "✗"} ${name}${detail ? ` — ${detail}` : ""}`);
   if (!cond) failures++;
+}
+
+// pi-ai 的 Message.content 可能是 string(user prompt)或 block 数组(assistant);两种都取出纯文本。
+function textOf(m: { content?: unknown } | undefined): string {
+  const c = m?.content;
+  if (typeof c === "string") return c;
+  if (Array.isArray(c)) {
+    return (c as Array<{ type?: string; text?: string }>)
+      .filter((b) => b && b.type === "text")
+      .map((b) => b.text ?? "")
+      .join(" ");
+  }
+  return "";
 }
 
 const addTool: HarnessTool = {
@@ -181,6 +197,78 @@ async function testC(): Promise<void> {
   );
 }
 
+async function testD(): Promise<void> {
+  console.log(`\n[D] budget-bound continuation:小预算下真 provider 跨自动压缩续跑 (model=${MODEL_ID})`);
+  const { model, llmOptions } = resolveDashScopeModel(MODEL_ID, {
+    DASHSCOPE_API_KEY: key,
+  });
+
+  const SECRET = "ZEBRA-42";
+  let compactions = 0;
+  let viewHadSummary = false;
+
+  const session = new AgentSession({
+    model,
+    tools: [],
+    systemPrompt: "You are a terse assistant. Always obey the user's reply-format instruction exactly.",
+    llmOptions,
+    maxTurns: 2,
+    consoleSink: () => {},
+    hooks: [
+      // 小预算自动压缩(X2 #57):估算 token > maxContextTokens*triggerRatio 即把早期消息压成
+      // 一条 summary + 保留 recent tail(view-only,不改 session.messages、不破坏 lineage)。
+      autoCompaction({
+        maxContextTokens: 900,
+        triggerRatio: 0.6,
+        keepRecent: 2,
+        summarize: (early) => {
+          compactions++;
+          // 确定性 summary(不额外烧 LLM):保留早期 user 文本原文 → 秘密词随之进入压缩视图,
+          // 用来验证「事实跨压缩存活 + 真 provider 接受压缩视图」。
+          const earlyText = early.map((m) => textOf(m)).join(" ");
+          return `[COMPACTED] earlier conversation preserved verbatim: ${earlyText}`;
+        },
+      }),
+      // 观测哨兵:压缩触发后,真正发给 provider 的视图里应能看到 [COMPACTED]。
+      // 注册在 autoCompaction 之后 → transform 管线里后跑 → 看到的是压缩后视图。
+      {
+        name: "d0-view-probe",
+        transformMessagesBeforeLlm: (messages) => {
+          if (messages.some((m) => textOf(m).includes("[COMPACTED]"))) {
+            viewHadSummary = true;
+          }
+          return messages;
+        },
+      },
+    ],
+  });
+
+  // 多轮纯文本 user turn(无 tool → 压缩切片不会切断 tool_use/tool_result 对):
+  // turn-1 埋事实 → turn-2/3 灌填充把累计估算顶过预算阈值触发压缩 → 末轮要求跨压缩回忆。
+  const filler = "Background note: the maintenance log records routine readings with no anomalies. ".repeat(40);
+  const r1 = await session.run(`Remember this secret word: ${SECRET}. Reply with only: ok`);
+  const r2 = await session.run(`${filler}\nReply with only: ok`);
+  const r3 = await session.run(`${filler}\nReply with only: ok`);
+  const rF = await session.run(
+    "What was the secret word I told you at the very start? Reply with just that word, nothing else.",
+  );
+  const finalText = textOf(rF.lastMessage);
+
+  // compactions===0 = 填充没顶过阈值、压缩根本没跑 → 这条 smoke 啥也没验,计为失败别假绿。
+  check("autoCompaction 真触发(summarize 被调用)", compactions > 0, `compactions=${compactions}`);
+  check("真 provider 收到的是压缩后视图([COMPACTED] 哨兵可见)", viewHadSummary);
+  check("turn-1 reason=done", r1.reason === "done", `r1=${r1.reason}`);
+  check("turn-2 reason=done(压缩中续跑)", r2.reason === "done", `r2=${r2.reason}`);
+  check("turn-3 reason=done(压缩后续跑)", r3.reason === "done", `r3=${r3.reason}`);
+  check("末轮 reason=done(跨压缩续跑收敛)", rF.reason === "done", `rF=${rF.reason}`);
+  check(
+    `秘密词跨压缩存活(最终回答含 ${SECRET})`,
+    finalText.toUpperCase().includes("ZEBRA"),
+    `final="${finalText.slice(0, 60)}"`,
+  );
+  console.log(`  · 末轮真 usage: input=${rF.usage.input} output=${rF.usage.output}`);
+}
+
 async function main(): Promise<void> {
   console.log(`=== D0 真 provider smoke (DashScope ${MODEL_ID}) ===`);
   try {
@@ -200,6 +288,12 @@ async function main(): Promise<void> {
   } catch (err) {
     failures++;
     console.error("  ✗ [C] 抛异常:", err instanceof Error ? err.message : err);
+  }
+  try {
+    await testD();
+  } catch (err) {
+    failures++;
+    console.error("  ✗ [D] 抛异常:", err instanceof Error ? err.message : err);
   }
   console.log(`\n=== D0 smoke 结束:${failures === 0 ? "全部 ✓" : `${failures} 项 ✗`} ===`);
   process.exit(failures === 0 ? 0 : 1);
