@@ -1,6 +1,6 @@
 # harness-pi
 
-> A minimal service-runtime harness for [pi-ai](https://github.com/badlogic/pi-mono)-based agents. Sibling to [pi-coding-agent](https://github.com/badlogic/pi-mono); not affiliated with `badlogic/pi-mono`.
+> A minimal service-runtime harness for [@earendil-works/pi-ai](https://github.com/earendil-works/pi-mono)-based agents.
 
 ## 定位
 
@@ -41,7 +41,7 @@
 
 ## 当前状态
 
-`harness-pi` 现在处在 **v0.1 readiness** 阶段：core loop、hook dispatcher、standard plugins、controllers、first-party tools、dogfood coding agent、offline examples 和测试都已经落地，足够做 spike/review。
+`harness-pi` 现在处在 **v0.3.1** 阶段：core loop、hook dispatcher、standard plugins、controllers、first-party tools、dogfood coding agent、offline examples 和测试都已经落地，足够做 spike/review。
 
 判断成熟度时区分三个层级，别把它们混为一谈：
 

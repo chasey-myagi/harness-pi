@@ -86,7 +86,7 @@ pnpm -r publish --access public --no-git-checks                    # 拓扑序,w
 
 ## 成熟度定位(别误读 / 别在文档里夸大)
 
-当前 **0.2.0 = hardened spike preview**。区分三层(`README.md`「当前状态」):
+当前 **0.3.1 = hardened spike preview**。区分三层(`README.md`「当前状态」):
 1. **机制已实现** ✅(代码 + 本地/CI 测试覆盖)。
 2. **provider 已验证**(真 LLM 跑 streaming/error/overflow smoke)——**未做**。
 3. **bidding-migration 已验证**(真 `bidding-agent` spike)——**未做**。
