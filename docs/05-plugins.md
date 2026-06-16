@@ -2,7 +2,7 @@
 
 > Plugin 解剖、命名/状态约定、标准库 plugin 的完整设计。
 >
-> **计数（以 `packages/plugins/src/index.ts` 实际导出为准）**：**20 个返回 `Hook` 的 plugin 工厂** + **2 个面向模型的工具/技能工厂**（`toolSearch` 返回 `HarnessTool`、`skills` 返回 `{hook, tool}`）+ **1 个 summary 模板辅助件**（`defaultSummarize` / `DEFAULT_SUMMARY_TEMPLATE`，给压缩插件的 `summarize` 用）。分「核心 12」（§5.1–5.12，bidding-agent parity 起点）与「高级 / 0.3.0 新增」（§5.13–5.21，compaction 体系 + 权限 + deferred/skills）两档。
+> **计数（以 `packages/plugins/src/index.ts` 实际导出为准）**：**21 个返回 `Hook` 的 plugin 工厂** + **2 个面向模型的工具/技能工厂**（`toolSearch` 返回 `HarnessTool`、`skills` 返回 `{hook, tool}`）+ **1 个 summary 模板辅助件**（`defaultSummarize` / `DEFAULT_SUMMARY_TEMPLATE`，给压缩插件的 `summarize` 用）。分「核心 12」（§5.1–5.12，bidding-agent parity 起点）与「高级 / 0.3.0 新增」（§5.13–5.22，compaction 体系 + 权限 + deferred/skills + loop-engineering verifier）两档。
 
 ## 0. 目录
 
@@ -36,6 +36,7 @@
    - [5.19 turn-end-guard](#519-turn-end-guard)
    - [5.20 permission-gate](#520-permission-gate)
    - [5.21 deferred-tools + tool-search + skills](#521-deferred-tools--tool-search--skills)（O1/O2 渐进式暴露）
+   - [5.22 progressVerifier](#522-progressverifier)（loop-engineering verifier 闸）
 6. [测试规约](#6-测试规约)
 
 ## 1. Plugin 是什么
@@ -1819,6 +1820,86 @@ export function skills(specs: SkillSpec[], opts?: { toolName?: string }): { hook
 - execution 与 listing 解耦、permissionGate 仍拦
 - toolSearch / skill 屏障型；skills catalog 不含 body、激活是 union、未知 skill 抛、空/重名构造期抛
 （见 `deferred-tools.test.ts` / `skills.test.ts`）
+
+---
+
+### 5.22 progressVerifier
+
+#### 目的
+
+loop-engineering（`/goal` 循环）的 **turn 级进展/目标 verifier hook**。在每个 turn 结束后，用调用方注入的 `judge` 函数判定：
+
+1. **目标达成**（`reached: true`）→ 立即停止 session。
+2. **连续 N turn 无真实进展**（`hasProgress: false`）→ 停止 session 或触发用户的 `onStall` 升级回调。
+
+是 roadmap「Controller / plugin 候选」`progressVerifier` 的实现。作为 `/goal` 命令的**前置依赖**——有了它，loop 不需要在业务层写 if/else 来判断「啥时候停」，而是把停止条件声明为 hook。
+
+#### Hook 形态
+
+Event（`onTurnEnd`）—— 每 turn 结束后（LLM call + tool batch 执行完）触发。`onSessionStart` 重置计数。返回 `{ continue: false }` 停止 session（`RunSummary.reason = "aborted"`，`abortReason` 含插件标识）。
+
+#### 完整设计
+
+详见 [`packages/plugins/src/progress-verifier.ts`](../packages/plugins/src/progress-verifier.ts)。
+
+签名：
+```ts
+export function progressVerifier(opts: {
+  judge: (ctx, input: TurnEndInput) => Promise<ProgressJudgement> | ProgressJudgement;
+  noProgressThreshold?: number;  // 默认 3，须 > 0
+  onStall?: (ctx, info: { consecutiveNoProgress: number }) => void | Promise<void>;
+  timeoutMs?: number;  // 默认 30000，须 > 0
+}): Hook;
+
+export interface ProgressJudgement {
+  reached: boolean;     // 目标达成 → 立即停止
+  hasProgress?: boolean; // 省略则默认 true（乐观）；false → 计入无进展计数
+  message?: string;      // 停止时写入 abortReason
+}
+```
+
+- **`reached: true`**：立即 `return { continue: false, stopReason: "progressVerifier: goal reached [...]" }`。
+- **`hasProgress: false`**：累计 `noProgressCount`；达 `noProgressThreshold` 时调 `onStall`（如有），再以 `{ continue: false }` 停止（若 `onStall` 已 `ctx.abort()`，不二次停止）。
+- **`hasProgress` 省略**（默认 `true`）：重置计数，session 继续——调用方只需在明确发现无进展时才设 `false`。
+- **judge 抛错**：中性处理（跳过本 turn 计数，不计无进展、不计进展），session 继续——避免瞬时错误误停。
+- **`onStall`**：通知回调（日志/报警/降级），可自行 `ctx.abort(customReason)`；若不 abort，插件用默认原因停止并**不** reset 计数（session 就此停止，计数留原值）。
+
+**timeout 默认 30s**：`onTurnEnd` 是 event 类、dispatcher 默认仅 100ms；`judge` 通常需调 LLM，必然超时 → 判断静默失效。故本插件自设宽默认，可经 `timeoutMs` 覆盖（对齐 `turnEndGuard` / `onAfterFlush` 同款约定）。
+
+#### 与其他 plugin 的语义边界（不重叠原则）
+
+| Plugin | hook point | 判断单位 | 触发方向 |
+|---|---|---|---|
+| `repeatedCallGuard` | `onPostToolUse` | 同 (tool, args) 重复次数 | tool-call 级语义信号，主动 abort |
+| `turnEndGuard` | `onContinuationCheck` | session **想停时**的质量闸 | "不让停"——强制再来一轮 |
+| `progressVerifier` | `onTurnEnd` | turn 级目标/进展判据 | "主动停"——达标或无进展时停止 |
+
+三者互补：`repeatedCallGuard` 检测同 pattern 的语法重复；`turnEndGuard` 在 session 认为 done 时做质量校验；`progressVerifier` 用业务谓词判定何时该停。可同时挂，无语义冲突。
+
+#### 配置选项
+
+- `judge`（必）：domain-free，调用方注入业务/LLM 判据。
+- `noProgressThreshold`：默认 3；`timeoutMs`：默认 30000。
+- `onStall`：可选升级回调；省略则直接停止。
+
+#### 失败模式
+
+- **judge 抛错**：中性（跳过计数），session 继续。
+- **judge 超时**（超 `timeoutMs`）：dispatcher 丢弃结果 → 本 turn 判断失效（如同 judge 抛错）。
+- **`onStall` 抛错**：session 照常停止（插件 catch 后以默认原因停止）。
+
+#### 测试要点
+
+- `noProgressThreshold <= 0` / `timeoutMs <= 0` 构造期抛
+- 设了较宽默认 timeout（event 类 100ms 太短）
+- reached=true → 立即停止，abortReason 含 "goal reached"（含自定义 message）
+- hasProgress=false × N → 计数达阈值后停止，abortReason 含 "no progress"
+- hasProgress=true 重置计数，随后再无进展才停（计数从 0 重新累积）
+- judge 抛错中性处理（不计数），session 继续到自然停止或 reached=true
+- onStall 被调用；onStall 调 ctx.abort() 时插件不二次停止
+- hasProgress 省略默认 true，不会意外累计无进展
+- 两 session 各自独立状态
+（见 `progress-verifier.test.ts`）
 
 ---
 
