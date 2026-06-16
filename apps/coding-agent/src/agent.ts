@@ -33,6 +33,7 @@ import {
 import { createModelSummarizer } from "./compaction.js";
 import { redactCodingToolArgs } from "./log-redaction.js";
 import { harnessPiGitignoreWarning } from "./workspace-safety.js";
+import { loadProjectInstructions } from "./project-instructions.js";
 import { defaultPermissionRules } from "./tui/permissions.js";
 import {
   createAllTools,
@@ -103,6 +104,10 @@ export interface CreateCodingAgentOptions {
    * `requestCompaction()`（TUI 的 `/compact`）临时降阈强制压缩。one-shot 模式不传本项即完全不挂。
    */
   compaction?: { maxMessages?: number; keepRecent?: number };
+  /**
+   * true ⇒ 跳过项目指令（CLAUDE.md / AGENTS.md）自动加载。默认 false（自动向上查找并注入）。
+   */
+  noProjectInstructions?: boolean;
 }
 
 export interface CodingAgent {
@@ -118,6 +123,8 @@ export interface CodingAgent {
    * `warnings` 数组（那是脆弱的隐式契约）。同一条文案也会进 `warnings`（供 run report 呈现）。
    */
   harnessPiWarning?: string | undefined;
+  /** 自动加载的项目指令文件路径；未加载时为 undefined。 */
+  projectInstructionsPath?: string | undefined;
   readOnly: boolean;
   logPath: string;
   metricsPath?: string | undefined;
@@ -383,11 +390,18 @@ function buildAgentContext(opts: CreateCodingAgentOptions): AgentContext {
       : []),
   ];
 
+  const projectInstructions =
+    !opts.noProjectInstructions ? loadProjectInstructions(cwd) : null;
+  const baseSystemPrompt = opts.systemPrompt ?? DEFAULT_SYSTEM_PROMPT;
+  const systemPrompt = projectInstructions
+    ? `${baseSystemPrompt}\n\n${projectInstructions.content}`
+    : baseSystemPrompt;
+
   const deps: AgentContext["deps"] = {
     model: opts.model,
     tools,
     hooks,
-    systemPrompt: opts.systemPrompt ?? DEFAULT_SYSTEM_PROMPT,
+    systemPrompt,
   };
   if (opts.maxTurns !== undefined) deps.maxTurns = opts.maxTurns;
   if (opts.llmOptions !== undefined) deps.llmOptions = opts.llmOptions;
@@ -406,6 +420,7 @@ function buildAgentContext(opts: CreateCodingAgentOptions): AgentContext {
         costKnown,
         warnings,
         harnessPiWarning,
+        projectInstructionsPath: projectInstructions?.sourcePath,
         readOnly,
         logPath: join(logDir, `${session.id}.ndjson`),
         metricsPath: opts.metricsFile,
