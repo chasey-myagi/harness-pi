@@ -302,4 +302,35 @@ describe("progressVerifier", () => {
     expect(sumA.reason).toBe("aborted");
     expect(sumB.reason).toBe("aborted");
   });
+
+  it("onStall that throws is caught: session still stops with 'no progress' reason, onStall called only once", async () => {
+    // threshold=1, 1 次 onTurnEnd → 1 auto-fallback。
+    // onStall 每次抛错；若无 try/catch，异常击穿 onTurnEnd → continue:false 到不了内核 → session 不停。
+    const model = createFakeModel([]);
+    const onStall = vi.fn(() => {
+      throw new Error("onStall transient failure");
+    });
+
+    const session = new AgentSession({
+      model,
+      tools: [],
+      hooks: [
+        progressVerifier({
+          judge: () => ({ reached: false, hasProgress: false }),
+          noProgressThreshold: 1,
+          onStall,
+        }),
+      ],
+      maxTurns: 20,
+    });
+    const summary = await session.run("go");
+
+    // onStall 应只被调用 1 次（阈值触发一次，session 即停）。
+    expect(onStall).toHaveBeenCalledTimes(1);
+    // session 必须停止（不能跑到 maxTurns）。
+    expect(summary.reason).toBe("aborted");
+    expect(summary.abortReason).toContain("no progress");
+    // session 只跑了 1 turn（阈值=1），不是跑满 maxTurns=20。
+    expect(summary.turns).toBe(1);
+  });
 });

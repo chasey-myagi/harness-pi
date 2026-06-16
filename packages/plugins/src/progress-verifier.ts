@@ -159,11 +159,18 @@ export function progressVerifier(opts: ProgressVerifierOptions): Hook {
       ctx.state.set(KEY, count);
 
       if (count >= threshold) {
-        // 触发 onStall 回调（如有）。
+        // 触发 onStall 回调（如有）；抛错时记 warn 并继续往下走到默认停止。
         if (opts.onStall) {
-          await opts.onStall(ctx, { consecutiveNoProgress: count });
+          try {
+            await opts.onStall(ctx, { consecutiveNoProgress: count });
+          } catch (err) {
+            ctx.log.warn("progressVerifier: onStall threw, stopping with default reason", {
+              hook: "progress-verifier",
+              error: err instanceof Error ? err.message : String(err),
+            });
+          }
         }
-        // onStall 若未 abort，插件用默认原因停止。
+        // onStall 若未 abort（或抛错被 catch），插件用默认原因停止。
         if (!ctx.signal.aborted) {
           const stopReason = judgement.message
             ? `progressVerifier: no progress — ${judgement.message}`
