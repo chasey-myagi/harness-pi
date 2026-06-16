@@ -27,6 +27,16 @@ import { formatStatusBar, formatToolCall, formatToolCalls, formatToolResult } fr
 import { routeSubmit } from "./submit-router.js";
 import { parseSlashCommand, SLASH_COMMANDS, SLASH_HELP, type SlashCommand } from "./slash.js";
 import { formatMultiSummary, orchestrateMulti, parseMultiCommand, subTaskFor } from "./multi.js";
+import {
+  buildContinuationPrompt,
+  buildGoalPrompt,
+  formatGoalFinalStatus,
+  formatGoalRoundBanner,
+  parseGoalCommand,
+  parseGoalVerdict,
+  type GoalOptions,
+  type GoalVerdict,
+} from "./goal.js";
 import { createAutocompleteProvider } from "./autocomplete.js";
 import { color, editorTheme, markdownTheme } from "./theme.js";
 
@@ -42,6 +52,7 @@ const LIVE_TYPES: ReadonlyArray<LiveEvent["type"]> = [
 export interface TuiSession {
   runStreaming(
     prompt: string,
+    opts?: { signal?: AbortSignal },
   ): AsyncIterable<SessionEvent> & { finalSummary: Promise<RunSummary> };
   /** 订阅 fine 轨 LiveEvent（token/thinking delta），返回退订函数。 */
   on<T extends LiveEvent["type"]>(
@@ -58,6 +69,8 @@ export interface TuiAgentLike {
   /** contextWindow（若已知）用于状态栏的上下文占用读数 `ctx N/W`。 */
   model: { id: string; contextWindow?: number };
   getCostEstimate?(): { amount: number; currency: string } | undefined;
+  /** 累计 cost 统计（costTracker 提供）；用于 /goal 预算跟踪。 */
+  getCostStats?(): { inputTokens: number; outputTokens: number } | undefined;
   /** 最近一次 run 的工具统计；用于状态栏 `🔧 calls/errors`。 */
   getToolStats?(): { totalCalls: number; error: number } | undefined;
   /** 注入 tool 审批"问人"实现（permissionGate.onAsk 委托到它）。 */
@@ -133,6 +146,8 @@ export function createTuiApp(opts: TuiAppOptions): TuiApp {
   let running = false;
   // 正在跑的 /multi 编排的 abort（Esc 时取消整批）。
   let multiAbort: AbortController | undefined;
+  // 正在跑的 /goal 循环的 abort（Esc 时中断整个循环）。
+  let goalAbort: AbortController | undefined;
   // 进行中的 tool 审批：输入监听据此把 y/n/Enter/Esc 当审批答复（而非普通输入/中断）。
   let pendingApproval: { resolve: (allowed: boolean) => void } | undefined;
   // 最近一次 LLM 调用的 input tokens ≈ 当前上下文大小（含整段历史）。状态栏 ctx-gauge 用它——
@@ -403,9 +418,174 @@ export function createTuiApp(opts: TuiAppOptions): TuiApp {
     }
   }
 
-  /** 处理斜杠命令（/compact、/help、/multi…）。本地动作，不发起普通 LLM turn。 */
+  /**
+   * `/goal <desc>` —— 目标 + verifier + 预算 loop-engineering 循环。
+   *
+   * 每轮调 session.runStreaming（首轮用 buildGoalPrompt，后续用 buildContinuationPrompt）；
+   * 每轮结束后解析模型自报的 GOAL_STATUS 标记（verifier）；
+   * 达标 / 预算耗尽 / maxTurns 到限 / Esc 中断时给出明确终态提示。
+   */
+  async function runGoal(rest: string): Promise<void> {
+    if (running) {
+      append(new Text(color.dim("busy — wait for the current run to finish"), 0, 0));
+      tui.requestRender();
+      return;
+    }
+    const goalOpts: GoalOptions | null = parseGoalCommand(rest);
+    if (!goalOpts) {
+      append(
+        new Text(
+          color.dim(
+            "usage: /goal <goal> [--max-turns N] [--budget N] [--success <criteria>]",
+          ),
+          0,
+          0,
+        ),
+      );
+      tui.requestRender();
+      return;
+    }
+
+    append(
+      new Text(
+        color.cyan(
+          `⟳ /goal start · max ${goalOpts.maxTurns} rounds${goalOpts.budgetTokens ? ` · budget ${goalOpts.budgetTokens.toLocaleString()} tokens` : ""}`,
+        ),
+        0,
+        0,
+      ),
+    );
+    running = true;
+    const ac = new AbortController();
+    goalAbort = ac;
+    status.start();
+    renderStatusBar("goal");
+    tui.requestRender();
+
+    let round = 0;
+    let verdict: GoalVerdict = "unknown";
+    let aborted = false;
+    let budgetExhausted = false;
+
+    try {
+      while (round < goalOpts.maxTurns && !aborted) {
+        round++;
+
+        // 每轮开始前：预算前置检查 + 状态行
+        const usedTokens = readUsedTokens();
+        if (goalOpts.budgetTokens !== undefined && usedTokens >= goalOpts.budgetTokens) {
+          budgetExhausted = true;
+          round--; // 本轮未实际执行
+          break;
+        }
+        append(
+          new Text(
+            color.dim(
+              formatGoalRoundBanner({
+                round,
+                maxTurns: goalOpts.maxTurns,
+                ...(goalOpts.budgetTokens !== undefined
+                  ? { budgetTokens: goalOpts.budgetTokens, usedTokens }
+                  : {}),
+              }),
+            ),
+            0,
+            0,
+          ),
+        );
+
+        status.setMessage(`/goal 第 ${round} 轮…`);
+        tui.requestRender();
+
+        const prompt =
+          round === 1 ? buildGoalPrompt(goalOpts) : buildContinuationPrompt(round, goalOpts);
+
+        // 每轮独立订阅 fine 轨（先订阅再 runStreaming，同普通 submit）
+        const acc = new LiveStreamAccumulator();
+        let lastAssistantText = "";
+        const onLive = (event: LiveEvent): void => {
+          for (const op of acc.onEvent(event)) {
+            applyStreamOp(op);
+            if (op.kind === "end") lastAssistantText = op.text;
+          }
+          tui.requestRender();
+        };
+        const unsubs = LIVE_TYPES.map((type) => opts.agent.session.on(type, onLive));
+
+        try {
+          const stream = opts.agent.session.runStreaming(prompt, { signal: ac.signal });
+          for await (const ev of stream) {
+            if (ev.type === "llm-end") lastInputTokens = ev.msg.usage?.input ?? lastInputTokens;
+            for (const a of coarseEventToActions(ev, { suppressAssistant: true })) applyAction(a);
+            tui.requestRender();
+          }
+          await stream.finalSummary.catch(() => undefined);
+        } catch (err) {
+          if (ac.signal.aborted) {
+            aborted = true;
+          } else {
+            applyAction({
+              kind: "error",
+              phase: "goal",
+              message: err instanceof Error ? err.message : String(err),
+            });
+          }
+        } finally {
+          for (const unsub of unsubs) unsub();
+          current = {};
+        }
+
+        if (aborted) break;
+
+        // verifier：解析模型自报的 GOAL_STATUS 标记
+        verdict = parseGoalVerdict(lastAssistantText);
+        if (verdict === "reached") break;
+
+        // 预算后置检查（本轮消耗后）
+        if (goalOpts.budgetTokens !== undefined) {
+          if (readUsedTokens() >= goalOpts.budgetTokens) {
+            budgetExhausted = true;
+            break;
+          }
+        }
+      }
+    } finally {
+      goalAbort = undefined;
+      running = false;
+      status.stop();
+      status.setMessage("");
+      renderStatusBar();
+    }
+
+    // 终态提示
+    const finalText = formatGoalFinalStatus(verdict, round, aborted, budgetExhausted);
+    append(
+      new Text(
+        verdict === "reached"
+          ? color.green(finalText)
+          : aborted
+            ? color.dim(finalText)
+            : color.red(finalText),
+        0,
+        0,
+      ),
+    );
+    tui.requestRender();
+  }
+
+  /** 读取当前累计 token（cost-tracker 统计；不可用时返回 0）。 */
+  function readUsedTokens(): number {
+    const stats = opts.agent.getCostStats?.();
+    if (!stats) return 0;
+    return stats.inputTokens + stats.outputTokens;
+  }
+
+  /** 处理斜杠命令（/compact、/help、/multi、/goal…）。本地动作，不发起普通 LLM turn。 */
   async function handleSlash(cmd: SlashCommand): Promise<void> {
     switch (cmd.kind) {
+      case "goal":
+        await runGoal(cmd.rest);
+        return;
       case "multi":
         await runMulti(cmd.rest);
         return;
@@ -458,9 +638,17 @@ export function createTuiApp(opts: TuiAppOptions): TuiApp {
     const route = routeSubmit(text, running);
     if (route.kind === "ignore") return;
     if (route.kind === "steer") {
-      // /multi 在跑时没有 LLM turn 可插话——steer 会错误地 park 进父 session inbox。明确提示改用 Esc。
-      if (multiAbort) {
-        append(new Text(color.dim("a /multi run is in progress — press Esc to cancel it"), 0, 0));
+      // /multi 或 /goal 在跑时没有 LLM turn 可插话——steer 会错误地 park 进父 session inbox。明确提示改用 Esc。
+      if (multiAbort || goalAbort) {
+        append(
+          new Text(
+            color.dim(
+              `a /${multiAbort ? "multi" : "goal"} run is in progress — press Esc to cancel it`,
+            ),
+            0,
+            0,
+          ),
+        );
         tui.requestRender();
         return;
       }
@@ -555,8 +743,9 @@ export function createTuiApp(opts: TuiAppOptions): TuiApp {
       if (matchesKey(data, "escape") && running) {
         // 裸 Esc 且正在跑、且无 overlay。先让输入框关掉打开的补全下拉，不抢它的 Esc。
         if (editor.isShowingAutocomplete()) return undefined;
-        // /multi 在跑则取消整批；否则中断在飞的 LLM run。
+        // /multi 在跑则取消整批；/goal 循环同；否则中断在飞的 LLM run。
         if (multiAbort) multiAbort.abort();
+        else if (goalAbort) goalAbort.abort();
         else opts.agent.session.abort?.("user interrupt");
         return { consume: true };
       }
