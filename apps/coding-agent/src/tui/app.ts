@@ -23,7 +23,7 @@ import {
 import { createUserMessage, type LiveEvent, type Message, type RunSummary, type SessionEvent, type ToolCall } from "@harness-pi/core";
 import { coarseEventToActions, type TuiAction } from "./event-bridge.js";
 import { LiveStreamAccumulator, type StreamOp } from "./live-stream.js";
-import { formatStatusBar, formatToolCall, formatToolCalls, formatToolResult } from "./format.js";
+import { formatApprovalPreview, formatStatusBar, formatToolCall, formatToolCalls, formatToolResult } from "./format.js";
 import { routeSubmit } from "./submit-router.js";
 import { parseSlashCommand, SLASH_COMMANDS, SLASH_HELP, type SlashCommand } from "./slash.js";
 import { formatMultiSummary, orchestrateMulti, parseMultiCommand, subTaskFor } from "./multi.js";
@@ -312,6 +312,8 @@ export function createTuiApp(opts: TuiAppOptions): TuiApp {
     return new Promise<boolean>((resolve) => {
       pendingApproval = { resolve };
       append(new Text(color.yellow(`⚠ Approve tool call?  ${formatToolCall(call)}`), 0, 0));
+      const preview = formatApprovalPreview(call);
+      if (preview.length > 0) append(new Text(preview, 0, 0));
       append(new Text(color.dim("  [y] allow once   ·   [n] deny   (Enter = allow, Esc = deny)"), 0, 0));
       status.setMessage("waiting for approval…");
       tui.requestRender();
