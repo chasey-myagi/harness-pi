@@ -22,6 +22,14 @@ describe("parseSlashCommand", () => {
     expect(parseSlashCommand("/quit")).toEqual({ kind: "exit" });
   });
 
+  it("parses /goal with arguments (rest is passed through)", () => {
+    expect(parseSlashCommand("/goal x")).toEqual({ kind: "goal", rest: "x" });
+    expect(parseSlashCommand("/goal make tests pass")).toEqual({
+      kind: "goal",
+      rest: "make tests pass",
+    });
+  });
+
   it("reports unknown slash commands by name", () => {
     expect(parseSlashCommand("/bogus")).toEqual({ kind: "unknown", name: "bogus" });
   });

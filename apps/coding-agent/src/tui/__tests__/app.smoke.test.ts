@@ -595,6 +595,66 @@ describe("TUI app smoke (headless, dual-track via fake terminal)", () => {
     expect(out).toContain("ctx 456/200k"); // ctx-gauge 用历史最后一条 assistant 的 input 初始化
   });
 
+  it("/goal: session finalSummary reason=aborted → loop breaks after 1 round, shows interrupted", async () => {
+    const abortedSummary: RunSummary = {
+      turns: 1,
+      continuations: 0,
+      reason: "aborted",
+      usage: { ...ZERO },
+    };
+    // Session that immediately resolves with reason="aborted"
+    const session: TuiSession = {
+      on: NOOP_ON,
+      runStreaming: () => {
+        const gen = (async function* (): AsyncGenerator<SessionEvent> {
+          yield { type: "session-end", summary: abortedSummary };
+        })();
+        return Object.assign(gen, { finalSummary: Promise.resolve(abortedSummary) });
+      },
+    };
+    const app = createTuiApp({
+      agent: { model: { id: "qwen-turbo" }, session },
+      terminal: new FakeTerminal(),
+    });
+    await app.submit("/goal make tests pass --max-turns 5");
+    const out = strip(app.tui.render(80).join("\n"));
+    // B1: abort must break the loop — output shows interrupted, not "耗尽"（5 rounds exhausted）
+    expect(out).toMatch(/abort|interrupt|中断/i);
+    expect(out).not.toMatch(/5 轮耗尽/);
+    expect(app.isRunning()).toBe(false);
+  });
+
+  it("/goal: budget pre-check exceeded → stops before running, shows budget message", async () => {
+    let runStreamingCalled = false;
+    const doneSummary: RunSummary = {
+      turns: 0,
+      continuations: 0,
+      reason: "done",
+      usage: { ...ZERO },
+    };
+    const session: TuiSession = {
+      on: NOOP_ON,
+      runStreaming: () => {
+        runStreamingCalled = true;
+        const gen = (async function* (): AsyncGenerator<SessionEvent> {
+          yield { type: "session-end", summary: doneSummary };
+        })();
+        return Object.assign(gen, { finalSummary: Promise.resolve(doneSummary) });
+      },
+    };
+    const agent: TuiAgentLike = {
+      model: { id: "qwen-turbo" },
+      session,
+      getCostStats: () => ({ inputTokens: 90, outputTokens: 20 }), // 110 > 100 budget
+    };
+    const app = createTuiApp({ agent, terminal: new FakeTerminal() });
+    await app.submit("/goal some task --max-turns 5 --budget 100");
+    const out = strip(app.tui.render(80).join("\n"));
+    expect(out).toMatch(/budget|预算/i);
+    expect(runStreamingCalled).toBe(false); // pre-check breaks before calling runStreaming
+    expect(app.isRunning()).toBe(false);
+  });
+
   it("/exit quits the TUI", async () => {
     const app = makeApp(scriptedSession([{ coarse: { type: "session-end", summary } }], summary));
     const done = app.run();

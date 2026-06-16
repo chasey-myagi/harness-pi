@@ -519,7 +519,10 @@ export function createTuiApp(opts: TuiAppOptions): TuiApp {
             for (const a of coarseEventToActions(ev, { suppressAssistant: true })) applyAction(a);
             tui.requestRender();
           }
-          await stream.finalSummary.catch(() => undefined);
+          const summary = await stream.finalSummary.catch(() => undefined);
+          if (ac.signal.aborted || summary?.reason === "aborted") {
+            aborted = true;
+          }
         } catch (err) {
           if (ac.signal.aborted) {
             aborted = true;
@@ -529,6 +532,7 @@ export function createTuiApp(opts: TuiAppOptions): TuiApp {
               phase: "goal",
               message: err instanceof Error ? err.message : String(err),
             });
+            break;
           }
         } finally {
           for (const unsub of unsubs) unsub();

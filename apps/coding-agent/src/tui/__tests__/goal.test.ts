@@ -144,6 +144,17 @@ describe("parseGoalVerdict", () => {
   it("returns unknown for empty text", () => {
     expect(parseGoalVerdict("")).toBe("unknown");
   });
+
+  it("multiple GOAL_STATUS markers: takes the last one", () => {
+    expect(
+      parseGoalVerdict(
+        "Thinking...\nGOAL_STATUS: NOT_REACHED\nMore thinking.\nGOAL_STATUS: REACHED",
+      ),
+    ).toBe("reached");
+    expect(
+      parseGoalVerdict("GOAL_STATUS: REACHED\nOn second thought:\nGOAL_STATUS: NOT_REACHED"),
+    ).toBe("not_reached");
+  });
 });
 
 describe("formatGoalRoundBanner", () => {
