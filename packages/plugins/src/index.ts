@@ -142,9 +142,3 @@ export type { ToolSearchOptions } from "./tool-search.js";
 
 export { skills } from "./skills.js";
 export type { SkillSpec, SkillsOptions } from "./skills.js";
-
-export { progressVerifier } from "./progress-verifier.js";
-export type {
-  ProgressVerifierOptions,
-  ProgressJudgement,
-} from "./progress-verifier.js";

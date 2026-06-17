@@ -67,7 +67,6 @@ v0.1 之前必须满足：
 
 - [x] `permissionGate` plugin：声明式 tool permission rules。见 [05-plugins §5.20](05-plugins.md#520-permission-gate)。
 - [x] `subAgent` tool factory：tool 触发隔离 context 的子 agent。见 [06-controllers §6.6](06-controllers.md#66-子代理体系subagenttool--routedsubagenttool--subagentregistry)（含 `routedSubAgentTool` + `SubAgentRegistry` 续聊）。
-- [ ] `progressVerifier` plugin：检测 N turn 无真实进展。（`repeatedCallGuard` + `turnEndGuard` 已覆盖一部分语义；通用 progress verifier 仍未做。）
 - [ ] `sideQuestion` controller：cache-safe forked subtask。仍是唯一未落地的 controller，见 [06-controllers §7.1](06-controllers.md#71-sidequestionclaude-code-btw-模式)。
 
 触发条件：第二个真实 agent 或 `bidding-agent` spike 证明需要；否则留在 application 侧。

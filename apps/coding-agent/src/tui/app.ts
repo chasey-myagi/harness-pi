@@ -32,6 +32,7 @@ import {
   classifyGoalOutcome,
   formatGoalFinalStatus,
   formatGoalRoundBanner,
+  formatGoalStartBanner,
   goalKernelMaxTurns,
   goalTextFromMessage,
   parseGoalCommand,
@@ -455,9 +456,7 @@ export function createTuiApp(opts: TuiAppOptions): TuiApp {
 
     append(
       new Text(
-        color.cyan(
-          `⟳ /goal start · max ${goalOpts.maxTurns} rounds${goalOpts.budgetTokens ? ` · budget ${goalOpts.budgetTokens.toLocaleString()} tokens` : ""}`,
-        ),
+        color.cyan(formatGoalStartBanner(goalOpts)),
         0,
         0,
       ),
@@ -535,12 +534,14 @@ export function createTuiApp(opts: TuiAppOptions): TuiApp {
     }
 
     // 终态提示
-    const outcome = classifyGoalOutcome(finalSummary, lastAssistantText);
+    const outcome = classifyGoalOutcome(finalSummary, lastAssistantText, ac.signal.aborted);
     const finalText = formatGoalFinalStatus(
       outcome.verdict,
       finalSummary?.turns ?? round,
       outcome.aborted,
       outcome.budgetExhausted,
+      outcome.abortReason,
+      outcome.goalReason,
     );
     append(
       new Text(

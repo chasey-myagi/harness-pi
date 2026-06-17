@@ -6,6 +6,9 @@ import {
   checkGoalContinuation,
   parseGoalReason,
   parseGoalVerdict,
+  goalKernelMaxTurns,
+  goalTextFromMessage,
+  formatGoalStartBanner,
   formatGoalRoundBanner,
   formatGoalFinalStatus,
 } from "../goal.js";
@@ -77,6 +80,15 @@ describe("parseGoalCommand", () => {
 
   it("ignores an invalid --max-turns value without leaving flag text in the goal", () => {
     expect(parseGoalCommand("fix flaky tests --max-turns abc")).toEqual({
+      goal: "fix flaky tests",
+      maxTurns: 5,
+      budgetTokens: undefined,
+      successHint: undefined,
+    });
+  });
+
+  it("ignores decimal --max-turns values without leaving numeric residue in the goal", () => {
+    expect(parseGoalCommand("fix flaky tests --max-turns 3.5")).toEqual({
       goal: "fix flaky tests",
       maxTurns: 5,
       budgetTokens: undefined,
@@ -171,6 +183,23 @@ describe("parseGoalVerdict", () => {
       parseGoalVerdict("GOAL_STATUS: REACHED\nOn second thought:\nGOAL_STATUS: NOT_REACHED"),
     ).toBe("not_reached");
   });
+
+  it("uses the first status in the final delimiter block instead of echoed option text", () => {
+    expect(
+      parseGoalVerdict(
+        [
+          "Implemented the fix.",
+          "---",
+          "GOAL_STATUS: REACHED",
+          "",
+          "For reference, the valid values are:",
+          "GOAL_STATUS: REACHED",
+          "GOAL_STATUS: NOT_REACHED",
+          "GOAL_STATUS: BLOCKED",
+        ].join("\n"),
+      ),
+    ).toBe("reached");
+  });
 });
 
 describe("parseGoalReason", () => {
@@ -186,6 +215,18 @@ describe("parseGoalReason", () => {
 });
 
 describe("goal hook adapters", () => {
+  it("goalTextFromMessage ignores thinking and toolCall blocks before verdict parsing", () => {
+    const text = goalTextFromMessage({
+      content: [
+        { type: "thinking", thinking: "GOAL_STATUS: BLOCKED" },
+        { type: "toolCall" },
+        { type: "text", text: "done\n---\nGOAL_STATUS: REACHED" },
+      ],
+    });
+
+    expect(parseGoalVerdict(text)).toBe("reached");
+  });
+
   it("turnEndGuard check lets REACHED and BLOCKED stop", () => {
     expect(checkGoalContinuation("GOAL_STATUS: REACHED")).toEqual({ ok: true });
     expect(checkGoalContinuation("GOAL_STATUS: BLOCKED\nGOAL_REASON: no access")).toEqual({
@@ -209,13 +250,48 @@ describe("goal hook adapters", () => {
     });
   });
 
+  it("turnEndGuard check uses the default NOT_REACHED message when GOAL_REASON is absent", () => {
+    expect(checkGoalContinuation("GOAL_STATUS: NOT_REACHED")).toEqual({
+      ok: false,
+      message: "Goal is not reached yet. Continue working and end with a GOAL_STATUS block.",
+    });
+  });
+});
+
+describe("goalKernelMaxTurns", () => {
+  it("allocates twenty kernel turns per visible goal round", () => {
+    expect(goalKernelMaxTurns({ goal: "fix tests", maxTurns: 3 })).toBe(60);
+  });
+
+  it("clamps zero maxTurns to at least one visible goal round", () => {
+    expect(goalKernelMaxTurns({ goal: "fix tests", maxTurns: 0 })).toBeGreaterThanOrEqual(20);
+  });
+});
+
+describe("formatGoalStartBanner", () => {
+  it("uses the same kernel-turn unit as per-turn banners", () => {
+    const text = formatGoalStartBanner({ goal: "fix tests", maxTurns: 3 });
+
+    expect(text).toContain("max 60 kernel turns");
+    expect(text).toContain("3 goal rounds");
+  });
+
+  it("includes budget when provided", () => {
+    const text = formatGoalStartBanner({
+      goal: "fix tests",
+      maxTurns: 2,
+      budgetTokens: 10000,
+    });
+
+    expect(text).toMatch(/10[,_.]?000/);
+    expect(text).toContain("tokens");
+  });
 });
 
 describe("formatGoalRoundBanner", () => {
-  it("shows round/max without budget when no budget", () => {
-    const text = formatGoalRoundBanner({ round: 2, maxTurns: 5 });
-    expect(text).toContain("2");
-    expect(text).toContain("5");
+  it("shows kernel turn/max without budget when no budget", () => {
+    const text = formatGoalRoundBanner({ round: 2, maxTurns: 60 });
+    expect(text).toContain("kernel turn 2 / 60");
     expect(text).not.toContain("budget");
   });
 
@@ -244,17 +320,22 @@ describe("classifyGoalOutcome", () => {
           lastMessage: { role: "assistant", content: [{ type: "text", text: "GOAL_STATUS: REACHED" }] },
         } as any,
       ),
-    ).toEqual({ verdict: "reached", aborted: false, budgetExhausted: false });
+    ).toMatchObject({ verdict: "reached", aborted: false, budgetExhausted: false });
   });
 
   it("classifies done + NOT_REACHED as unfinished without interruption", () => {
     expect(
       classifyGoalOutcome(undefined, "GOAL_STATUS: NOT_REACHED\nGOAL_REASON: still failing"),
-    ).toEqual({ verdict: "not_reached", aborted: false, budgetExhausted: false });
+    ).toMatchObject({
+      verdict: "not_reached",
+      aborted: false,
+      budgetExhausted: false,
+      goalReason: "still failing",
+    });
   });
 
   it("classifies done + BLOCKED as blocked without interruption", () => {
-    expect(classifyGoalOutcome(undefined, "GOAL_STATUS: BLOCKED")).toEqual({
+    expect(classifyGoalOutcome(undefined, "GOAL_STATUS: BLOCKED")).toMatchObject({
       verdict: "blocked",
       aborted: false,
       budgetExhausted: false,
@@ -272,10 +353,15 @@ describe("classifyGoalOutcome", () => {
         } as any,
         "GOAL_STATUS: NOT_REACHED",
       ),
-    ).toEqual({ verdict: "not_reached", aborted: false, budgetExhausted: true });
+    ).toMatchObject({
+      verdict: "not_reached",
+      aborted: false,
+      budgetExhausted: true,
+      abortReason: "token budget exhausted: 120/100",
+    });
   });
 
-  it("classifies user aborts as interrupted", () => {
+  it("classifies explicit user aborts as interrupted", () => {
     expect(
       classifyGoalOutcome(
         {
@@ -285,8 +371,9 @@ describe("classifyGoalOutcome", () => {
           abortReason: "caller signal aborted",
         } as any,
         "GOAL_STATUS: NOT_REACHED",
+        true,
       ),
-    ).toEqual({ verdict: "not_reached", aborted: true, budgetExhausted: false });
+    ).toMatchObject({ verdict: "not_reached", aborted: true, budgetExhausted: false });
   });
 
   it("treats REACHED as success even if an abort reason mentions budget", () => {
@@ -300,21 +387,51 @@ describe("classifyGoalOutcome", () => {
         } as any,
         "GOAL_STATUS: REACHED",
       ),
-    ).toEqual({ verdict: "reached", aborted: false, budgetExhausted: false });
+    ).toMatchObject({ verdict: "reached", aborted: false, budgetExhausted: false });
   });
 
-  it("does not special-case legacy progressVerifier abort reason strings", () => {
+  it.each([
+    "token budget exhausted: 120/100",
+    "diminishing returns: last continuations added <500 tokens each",
+    "repeated-call-guard: read repeated 4 times",
+    "empty-run-guard: 3 consecutive empty turns (no tool calls)",
+    "caller signal aborted",
+  ])("surfaces guard abort reason instead of treating it as user interruption: %s", (abortReason) => {
+    const outcome = classifyGoalOutcome(
+      {
+        turns: 2,
+        continuations: 0,
+        reason: "aborted",
+        abortReason,
+      } as any,
+      "GOAL_STATUS: NOT_REACHED",
+      false,
+    );
+
+    expect(outcome).toMatchObject({
+      verdict: "not_reached",
+      aborted: false,
+      abortReason,
+    });
+  });
+
+  it("does not let unrelated abort reason text override a done verdict", () => {
     expect(
       classifyGoalOutcome(
         {
           turns: 2,
           continuations: 0,
           reason: "aborted",
-          abortReason: "progressVerifier: no progress",
+          abortReason: "unrelated verifier: no progress",
         } as any,
         "GOAL_STATUS: NOT_REACHED",
       ),
-    ).toEqual({ verdict: "not_reached", aborted: true, budgetExhausted: false });
+    ).toMatchObject({
+      verdict: "not_reached",
+      aborted: false,
+      budgetExhausted: false,
+      abortReason: "unrelated verifier: no progress",
+    });
   });
 });
 
@@ -341,7 +458,26 @@ describe("formatGoalFinalStatus", () => {
   });
 
   it("shows budget exhausted when budget=true", () => {
-    const text = formatGoalFinalStatus("not_reached", 3, false, true);
-    expect(text).toMatch(/budget|预算/i);
+    const text = formatGoalFinalStatus(
+      "not_reached",
+      3,
+      false,
+      true,
+      "token budget exhausted: 120/100",
+    );
+    expect(text).toContain("token budget exhausted: 120/100");
+  });
+
+  it("shows guard abort reason without calling it interrupted", () => {
+    const text = formatGoalFinalStatus(
+      "not_reached",
+      3,
+      false,
+      false,
+      "repeated-call-guard: read repeated 4 times",
+    );
+
+    expect(text).toContain("repeated-call-guard: read repeated 4 times");
+    expect(text).not.toMatch(/interrupt|中断/i);
   });
 });
