@@ -199,15 +199,18 @@ describe("goal hook adapters", () => {
     });
   });
 
-  it("progressVerifier judge treats BLOCKED and missing marker as no progress", () => {
+  it("progressVerifier judge treats BLOCKED as no progress", () => {
     expect(judgeGoalProgress("GOAL_STATUS: BLOCKED\nGOAL_REASON: missing env")).toEqual({
       reached: false,
       hasProgress: false,
       message: "missing env",
     });
+  });
+
+  it("progressVerifier judge treats missing marker as in-flight progress", () => {
     expect(judgeGoalProgress("no marker")).toMatchObject({
       reached: false,
-      hasProgress: false,
+      hasProgress: true,
       message: expect.stringContaining("GOAL_STATUS"),
     });
   });

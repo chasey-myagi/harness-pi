@@ -207,7 +207,7 @@ export function judgeGoalProgress(text: string): GoalProgressJudgement {
   }
   return {
     reached: false,
-    hasProgress: false,
+    hasProgress: true,
     message: "missing GOAL_STATUS block",
   };
 }

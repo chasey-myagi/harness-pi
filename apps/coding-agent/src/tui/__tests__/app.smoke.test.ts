@@ -652,6 +652,48 @@ describe("TUI app smoke (headless, dual-track via fake terminal)", () => {
     expect(app.isRunning()).toBe(false);
   });
 
+  it("/goal: shows user-visible rounds from continuations, not internal tool turns", async () => {
+    const goalMessage = assistant([{ type: "text", text: "done\n---\nGOAL_STATUS: REACHED" }]);
+    const goalSummary: RunSummary = {
+      turns: 4,
+      continuations: 0,
+      reason: "aborted",
+      abortReason: "progressVerifier: goal reached",
+      usage: { ...ZERO },
+      lastMessage: goalMessage,
+      stopReason: goalMessage.stopReason,
+    };
+    const goalSession: TuiSession = {
+      on: NOOP_ON,
+      runStreaming: () => {
+        const gen = (async function* (): AsyncGenerator<SessionEvent> {
+          yield { type: "turn-start", turnIdx: 0 };
+          yield { type: "turn-start", turnIdx: 1 };
+          yield { type: "turn-start", turnIdx: 2 };
+          yield { type: "turn-start", turnIdx: 3 };
+          yield { type: "llm-end", msg: goalMessage, durationMs: 1 };
+          yield { type: "session-end", summary: goalSummary };
+        })();
+        return Object.assign(gen, { finalSummary: Promise.resolve(goalSummary) });
+      },
+    };
+    const app = createTuiApp({
+      agent: {
+        model: { id: "qwen-turbo" },
+        session: idleSession,
+        createGoalSession: () => goalSession,
+      },
+      terminal: new FakeTerminal(),
+    });
+
+    await app.submit("/goal inspect then finish --max-turns 3");
+
+    const out = strip(app.tui.render(80).join("\n"));
+    expect(out).toContain("第 1 轮完成");
+    expect(out).not.toContain("第 4 轮完成");
+    expect(out).not.toContain("第 2 轮 / 3");
+  });
+
   it("Esc during /goal aborts the dedicated goal session", async () => {
     let capturedSignal: AbortSignal | undefined;
     let release!: () => void;

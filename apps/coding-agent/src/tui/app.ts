@@ -469,6 +469,7 @@ export function createTuiApp(opts: TuiAppOptions): TuiApp {
     tui.requestRender();
 
     let round = 0;
+    let nextVisibleRound = 1;
     let usedTokens = 0;
     let lastAssistantText = "";
     let finalSummary: RunSummary | undefined;
@@ -488,23 +489,28 @@ export function createTuiApp(opts: TuiAppOptions): TuiApp {
         const stream = goalSession.runStreaming(buildGoalPrompt(goalOpts), { signal: ac.signal });
         for await (const ev of stream) {
           if (ev.type === "turn-start") {
-            round = ev.turnIdx + 1;
-            append(
-              new Text(
-                color.dim(
-                  formatGoalRoundBanner({
-                    round,
-                    maxTurns: goalOpts.maxTurns,
-                    ...(goalOpts.budgetTokens !== undefined
-                      ? { budgetTokens: goalOpts.budgetTokens, usedTokens }
-                      : {}),
-                  }),
+            if (round < nextVisibleRound) {
+              round = nextVisibleRound;
+              append(
+                new Text(
+                  color.dim(
+                    formatGoalRoundBanner({
+                      round,
+                      maxTurns: goalOpts.maxTurns,
+                      ...(goalOpts.budgetTokens !== undefined
+                        ? { budgetTokens: goalOpts.budgetTokens, usedTokens }
+                        : {}),
+                    }),
+                  ),
+                  0,
+                  0,
                 ),
-                0,
-                0,
-              ),
-            );
-            status.setMessage(`/goal 第 ${round} 轮…`);
+              );
+              status.setMessage(`/goal 第 ${round} 轮…`);
+            }
+          }
+          if (ev.type === "continuation-check") {
+            nextVisibleRound = ev.continuations + 2;
           }
           if (ev.type === "llm-end") {
             lastInputTokens = ev.msg.usage?.input ?? lastInputTokens;
@@ -535,9 +541,10 @@ export function createTuiApp(opts: TuiAppOptions): TuiApp {
 
     // 终态提示
     const outcome = classifyGoalOutcome(finalSummary, lastAssistantText);
+    const finalRounds = finalSummary ? finalSummary.continuations + 1 : Math.max(round, 1);
     const finalText = formatGoalFinalStatus(
       outcome.verdict,
-      finalSummary?.turns ?? round,
+      finalRounds,
       outcome.aborted,
       outcome.budgetExhausted,
     );

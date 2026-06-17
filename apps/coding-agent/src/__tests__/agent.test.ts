@@ -263,6 +263,27 @@ describe("coding-agent dogfood app", () => {
     fake.teardown();
   });
 
+  it("createGoalSession keeps tool-call turns alive until the final GOAL_STATUS", async () => {
+    const cwd = await tempRepo();
+    const goal: GoalOptions = { goal: "inspect then finish", maxTurns: 3 };
+    const fake = createFakeModel([
+      { content: [{ type: "toolCall", name: "ls", arguments: { path: "." } }] },
+      { content: [{ type: "toolCall", name: "ls", arguments: { path: "." } }] },
+      { content: [{ type: "toolCall", name: "ls", arguments: { path: "." } }] },
+      { content: [{ type: "text", text: "finished\n---\nGOAL_STATUS: REACHED" }] },
+    ]);
+    const agent = createCodingAgent({ cwd, model: fake, log: false });
+
+    const summary = await agent.createGoalSession(goal).run(buildGoalPrompt(goal));
+
+    expect(summary.reason).toBe("aborted");
+    expect(summary.abortReason).toContain("goal reached");
+    expect(summary.turns).toBe(4);
+    expect(fake.getCalls()).toHaveLength(4);
+    await agent.close();
+    fake.teardown();
+  });
+
   it("createGoalSession forces continuation via turnEndGuard until GOAL_STATUS reaches REACHED", async () => {
     const cwd = await tempRepo();
     const goal: GoalOptions = { goal: "finish issue", maxTurns: 3 };
