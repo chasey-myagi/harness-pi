@@ -115,6 +115,14 @@ export interface CreateCodingAgentOptions {
    */
   compaction?: { maxMessages?: number; keepRecent?: number };
   /**
+   * 启用 trimHistory（把 N 条之前的 toolResult 内容换成短占位符喂给 LLM）。
+   * **默认不挂（opt-in）**：trimHistory 每轮改写靠前的旧历史，会破坏 prompt-cache 前缀——在会缓存的
+   * provider（DeepSeek / Anthropic / …）上实测**净亏**（cache 命中 93%→74%、cost 反而更高，见 #106）。
+   * 上下文溢出本就由 `autoCompaction`/`compactSummarize` 兜底。仅在**非缓存 provider / 极长会话 /
+   * 上下文窗口紧**时显式开。
+   */
+  trimHistory?: { keepRecent: number };
+  /**
    * true ⇒ 跳过项目指令（CLAUDE.md / AGENTS.md）自动加载。默认 false（自动向上查找并注入）。
    */
   noProjectInstructions?: boolean;
@@ -370,7 +378,8 @@ function buildAgentContext(opts: CreateCodingAgentOptions): AgentContext {
     // compactSummarize 须排在 trimHistory 前：先把早期消息总结成 summary，再让 trimHistory 裁中段
     // toolResult（docs/09 §3.6「先 summarize 早期、再 trim 中段」的组合顺序）。未启用 compaction 时不挂。
     ...(compactionOpts ? [compactSummarize(compactionOpts)] : []),
-    trimHistory({ keepRecent: 12 }),
+    // trimHistory 默认不挂（opt-in）：每轮改写旧历史会破坏 prompt-cache 前缀、在缓存 provider 上净亏（#106）。
+    ...(opts.trimHistory ? [trimHistory({ keepRecent: opts.trimHistory.keepRecent })] : []),
     emptyRunGuard({ maxEmptyTurns: 3 }),
     repeatedCallGuard({
       threshold: 4,

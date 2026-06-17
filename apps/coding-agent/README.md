@@ -124,6 +124,7 @@ hpi --resume <id>
 | `--tui` / `--repl` | Force the TUI / use a plain readline REPL. |
 | `--cwd <path>` | Workspace directory. Defaults to the current directory. |
 | `--read-only` | Restrict tools to `read`/`grep`/`find`/`ls` (no edits, no bash). |
+| `--trim-history <N>` | Opt in to history trimming (keep N recent tool results). **Off by default** — trimming breaks the prompt cache and is usually a net loss on caching providers; use only on non-caching providers or very long sessions. |
 | `--resume <id>` | Resume a saved TUI session. |
 | `--yolo` | (TUI) skip tool-approval prompts. |
 | `--compact` | (TUI) auto-summarize early messages when the conversation grows long. |
