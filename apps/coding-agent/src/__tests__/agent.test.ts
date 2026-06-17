@@ -242,7 +242,7 @@ describe("coding-agent dogfood app", () => {
     fake.teardown();
   });
 
-  it("createGoalSession stops on REACHED through progressVerifier", async () => {
+  it("createGoalSession stops naturally when the final GOAL_STATUS is REACHED", async () => {
     const cwd = await tempRepo();
     const goal: GoalOptions = { goal: "make tests pass", maxTurns: 3 };
     const fake = createFakeModel([
@@ -255,9 +255,8 @@ describe("coding-agent dogfood app", () => {
 
     const summary = await agent.createGoalSession(goal).run(buildGoalPrompt(goal));
 
-    expect(summary.reason).toBe("aborted");
-    expect(summary.abortReason).toContain("progressVerifier");
-    expect(summary.abortReason).toContain("goal reached");
+    expect(summary.reason).toBe("done");
+    expect(summary.abortReason).toBeUndefined();
     expect(summary.turns).toBe(1);
     await agent.close();
     fake.teardown();
@@ -283,11 +282,37 @@ describe("coding-agent dogfood app", () => {
 
     const summary = await agent.createGoalSession(goal).run(buildGoalPrompt(goal));
 
-    expect(summary.reason).toBe("aborted");
-    expect(summary.abortReason).toContain("goal reached");
+    expect(summary.reason).toBe("done");
+    expect(summary.abortReason).toBeUndefined();
     expect(summary.continuations).toBe(1);
     expect(fake.getCalls()).toHaveLength(2);
     expect(JSON.stringify(fake.getCalls()[1]?.messages)).toContain("Goal is not reached yet");
+    await agent.close();
+    fake.teardown();
+  });
+
+  it("createGoalSession allows multiple tool-call turns before the final GOAL_STATUS: REACHED", async () => {
+    const cwd = await tempRepo();
+    const goal: GoalOptions = { goal: "inspect repo and finish", maxTurns: 2 };
+    const fake = createFakeModel([
+      {
+        content: [{ type: "toolCall", name: "read", arguments: { path: "README.md" } }],
+      },
+      {
+        content: [{ type: "toolCall", name: "read", arguments: { path: "package.json" } }],
+      },
+      {
+        content: [{ type: "text", text: "inspected\n---\nGOAL_STATUS: REACHED" }],
+      },
+    ]);
+    const agent = createCodingAgent({ cwd, model: fake, log: false });
+
+    const summary = await agent.createGoalSession(goal).run(buildGoalPrompt(goal));
+
+    expect(summary.reason).toBe("done");
+    expect(summary.abortReason).toBeUndefined();
+    expect(summary.turns).toBe(3);
+    expect(fake.getCalls()).toHaveLength(3);
     await agent.close();
     fake.teardown();
   });

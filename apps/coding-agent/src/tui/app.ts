@@ -32,6 +32,7 @@ import {
   classifyGoalOutcome,
   formatGoalFinalStatus,
   formatGoalRoundBanner,
+  goalKernelMaxTurns,
   goalTextFromMessage,
   parseGoalCommand,
   type GoalOptions,
@@ -422,8 +423,8 @@ export function createTuiApp(opts: TuiAppOptions): TuiApp {
   }
 
   /**
-   * `/goal <desc>` —— 目标 + verifier + 预算 loop-engineering 循环。
-   * TUI 只启动一次专用 goal session；续跑/verifier/预算由 session 上的 hook 组合负责。
+   * `/goal <desc>` —— 目标 + would-be-done guard + 预算 loop-engineering 循环。
+   * TUI 只启动一次专用 goal session；续跑和预算由 session 上的 hook 组合负责。
    */
   async function runGoal(rest: string): Promise<void> {
     if (running) {
@@ -494,7 +495,7 @@ export function createTuiApp(opts: TuiAppOptions): TuiApp {
                 color.dim(
                   formatGoalRoundBanner({
                     round,
-                    maxTurns: goalOpts.maxTurns,
+                    maxTurns: goalKernelMaxTurns(goalOpts),
                     ...(goalOpts.budgetTokens !== undefined
                       ? { budgetTokens: goalOpts.budgetTokens, usedTokens }
                       : {}),

@@ -1,8 +1,8 @@
 /**
- * /goal 命令 —— 目标 + verifier + 预算的 loop-engineering 循环（纯逻辑，可测）。
+ * /goal 命令 —— 目标 + would-be-done guard + 预算的 loop-engineering 循环（纯逻辑，可测）。
  *
- * 与浅 /loop 的区别：每轮结束后解析模型自报的 GOAL_STATUS 结构化标记（verifier），
- * 而不是单纯重复执行 prompt N 次。配合 maxTurns / budgetTokens 两道硬上限。
+ * 与浅 /loop 的区别：session 想自然停止时解析模型自报的 GOAL_STATUS 结构化标记；
+ * 未达成则由 turnEndGuard 回灌原因并续跑。配合内核 turn 上限与 token budget 两道硬上限。
  */
 
 import type { RunSummary } from "@harness-pi/core";
@@ -10,12 +10,20 @@ import type { RunSummary } from "@harness-pi/core";
 export interface GoalOptions {
   /** 目标描述（主体文本）。 */
   goal: string;
-  /** 最大 act→verify 轮数（默认 5，最小 1）。 */
+  /** 最大 would-be-done 续跑次数（默认 5，最小 1）。 */
   maxTurns: number;
   /** Token 预算硬上限（undefined = 不限）。 */
   budgetTokens?: number;
   /** 额外成功判据提示，注入进 prompt。 */
   successHint?: string;
+}
+
+/** 每个 goal 续跑轮给内层工具调用预留的 turn 数，避免回落到内核默认 200。 */
+const TURNS_PER_GOAL_ROUND = 20;
+
+/** /goal session 的内核 turn 硬上限：用于约束 tool-call turns，不等同于续跑轮数。 */
+export function goalKernelMaxTurns(opts: GoalOptions): number {
+  return Math.max(1, opts.maxTurns) * TURNS_PER_GOAL_ROUND;
 }
 
 /**
@@ -30,9 +38,9 @@ export function parseGoalCommand(rest: string): GoalOptions | null {
   let budgetTokens: number | undefined = undefined;
   let successHint: string | undefined = undefined;
 
-  // --max-turns <N>
-  text = text.replace(/--max-turns\s+(\d+)/i, (_, n: string) => {
-    maxTurns = Math.max(1, parseInt(n, 10));
+  // --max-turns <N>；非法值忽略并清掉 flag，避免污染 goal 文本。
+  text = text.replace(/--max-turns(?:\s+([+-]?\d+)|\s+(?!-)\S+)?/i, (_, n: string | undefined) => {
+    if (n !== undefined) maxTurns = Math.max(1, parseInt(n, 10));
     return "";
   });
 
@@ -43,24 +51,14 @@ export function parseGoalCommand(rest: string): GoalOptions | null {
     return "";
   });
 
-  // --success "quoted" or --success until next flag or end
-  text = text.replace(/--success\s+"([^"]+)"/i, (_, hint: string) => {
-    successHint = hint.trim();
-    return "";
-  });
-  if (successHint === undefined) {
-    text = text.replace(/--success\s+(.+?)(?=\s+--|$)/i, (_, hint: string) => {
-      successHint = hint.trim();
+  // --success "quoted" or --success until next flag / stray -- / end.
+  text = text.replace(
+    /--success\s+(?:"([^"]+)"|(.+?))(?=\s+--|$)/i,
+    (_match: string, quoted: string | undefined, unquoted: string | undefined) => {
+      successHint = (quoted ?? unquoted ?? "").trim();
       return "";
-    });
-    // Handle --success at end without another flag following
-    if (successHint === undefined) {
-      text = text.replace(/--success\s+(.+)/i, (_, hint: string) => {
-        successHint = hint.trim();
-        return "";
-      });
-    }
-  }
+    },
+  );
 
   const goal = text.replace(/\s+/g, " ").trim();
   if (goal.length === 0) return null;
@@ -71,7 +69,7 @@ export function parseGoalCommand(rest: string): GoalOptions | null {
   return opts;
 }
 
-/** 构建第一轮 prompt：包含目标 + verifier 格式要求。 */
+/** 构建第一轮 prompt：包含目标 + GOAL_STATUS 格式要求。 */
 export function buildGoalPrompt(opts: GoalOptions): string {
   const lines: string[] = [
     "## Goal",
@@ -110,32 +108,8 @@ export function buildGoalPrompt(opts: GoalOptions): string {
   return lines.join("\n");
 }
 
-/** 构建第 round 轮（>1）的 continuation prompt。 */
-export function buildContinuationPrompt(round: number, opts: GoalOptions): string {
-  return [
-    `## Goal (round ${round})`,
-    opts.goal,
-    "",
-    `You have completed round ${round - 1}. Continue working towards the goal.`,
-    "Resume where you left off and keep making progress.",
-    "",
-    "When done (or blocked), end with the GOAL_STATUS block:",
-    "",
-    "---",
-    "GOAL_STATUS: REACHED",
-    "",
-    "or NOT_REACHED / BLOCKED with GOAL_REASON.",
-  ].join("\n");
-}
-
 /** Model-reported goal status extracted from response text. */
 export type GoalVerdict = "reached" | "not_reached" | "blocked" | "unknown";
-
-export interface GoalProgressJudgement {
-  reached: boolean;
-  hasProgress?: boolean;
-  message?: string;
-}
 
 export interface GoalContinuationCheck {
   ok: boolean;
@@ -184,34 +158,6 @@ export function goalTextFromMessage(message: GoalTextMessage | undefined): strin
     .join("\n");
 }
 
-/** progressVerifier.judge 的纯逻辑：只负责判定达标/停滞，不负责续跑。 */
-export function judgeGoalProgress(text: string): GoalProgressJudgement {
-  const verdict = parseGoalVerdict(text);
-  const reason = parseGoalReason(text);
-  if (verdict === "reached") {
-    return { reached: true, ...(reason ? { message: reason } : {}) };
-  }
-  if (verdict === "not_reached") {
-    return {
-      reached: false,
-      hasProgress: true,
-      ...(reason ? { message: reason } : {}),
-    };
-  }
-  if (verdict === "blocked") {
-    return {
-      reached: false,
-      hasProgress: false,
-      message: reason ?? "GOAL_STATUS: BLOCKED",
-    };
-  }
-  return {
-    reached: false,
-    hasProgress: false,
-    message: "missing GOAL_STATUS block",
-  };
-}
-
 /** turnEndGuard.check 的纯逻辑：模型想停时，未达标则回灌阻断消息并强制续跑。 */
 export function checkGoalContinuation(text: string): GoalContinuationCheck {
   const verdict = parseGoalVerdict(text);
@@ -245,12 +191,13 @@ export function classifyGoalOutcome(
   const verdict = parseGoalVerdict(text);
   const abortReason = summary?.abortReason ?? "";
   const budgetExhausted =
-    verdict !== "reached" && /token budget exhausted/i.test(abortReason);
+    verdict !== "reached" &&
+    summary?.reason === "aborted" &&
+    /token budget exhausted/i.test(abortReason);
   const aborted =
     summary?.reason === "aborted" &&
     verdict !== "reached" &&
-    !budgetExhausted &&
-    !/^progressVerifier:/i.test(abortReason);
+    !budgetExhausted;
   return { verdict, aborted, budgetExhausted };
 }
 
