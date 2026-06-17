@@ -3,6 +3,8 @@ import {
   parseGoalCommand,
   buildGoalPrompt,
   buildContinuationPrompt,
+  checkGoalContinuation,
+  judgeGoalProgress,
   parseGoalVerdict,
   formatGoalRoundBanner,
   formatGoalFinalStatus,
@@ -154,6 +156,60 @@ describe("parseGoalVerdict", () => {
     expect(
       parseGoalVerdict("GOAL_STATUS: REACHED\nOn second thought:\nGOAL_STATUS: NOT_REACHED"),
     ).toBe("not_reached");
+  });
+});
+
+describe("goal hook adapters", () => {
+  it("turnEndGuard check lets REACHED and BLOCKED stop", () => {
+    expect(checkGoalContinuation("GOAL_STATUS: REACHED")).toEqual({ ok: true });
+    expect(checkGoalContinuation("GOAL_STATUS: BLOCKED\nGOAL_REASON: no access")).toEqual({
+      ok: true,
+    });
+  });
+
+  it("turnEndGuard check forces continuation for NOT_REACHED and carries GOAL_REASON", () => {
+    expect(
+      checkGoalContinuation("GOAL_STATUS: NOT_REACHED\nGOAL_REASON: tests still fail"),
+    ).toEqual({
+      ok: false,
+      message: "Goal is not reached yet: tests still fail",
+    });
+  });
+
+  it("turnEndGuard check forces continuation when GOAL_STATUS is missing", () => {
+    expect(checkGoalContinuation("I changed files but forgot the marker")).toMatchObject({
+      ok: false,
+      message: expect.stringContaining("GOAL_STATUS"),
+    });
+  });
+
+  it("progressVerifier judge maps REACHED to reached=true", () => {
+    expect(judgeGoalProgress("all good\nGOAL_STATUS: REACHED")).toMatchObject({
+      reached: true,
+    });
+  });
+
+  it("progressVerifier judge treats NOT_REACHED as progress so turnEndGuard can continue", () => {
+    expect(
+      judgeGoalProgress("GOAL_STATUS: NOT_REACHED\nGOAL_REASON: one assertion remains"),
+    ).toEqual({
+      reached: false,
+      hasProgress: true,
+      message: "one assertion remains",
+    });
+  });
+
+  it("progressVerifier judge treats BLOCKED and missing marker as no progress", () => {
+    expect(judgeGoalProgress("GOAL_STATUS: BLOCKED\nGOAL_REASON: missing env")).toEqual({
+      reached: false,
+      hasProgress: false,
+      message: "missing env",
+    });
+    expect(judgeGoalProgress("no marker")).toMatchObject({
+      reached: false,
+      hasProgress: false,
+      message: expect.stringContaining("GOAL_STATUS"),
+    });
   });
 });
 

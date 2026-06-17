@@ -47,7 +47,7 @@ export const SLASH_COMMANDS: ReadonlyArray<{
   {
     name: "goal",
     description:
-      "run a goal+verifier+budget loop until the goal is reached or limits are hit",
+      "run a hook-composed goal loop (turnEndGuard + progressVerifier + tokenBudget)",
     argumentHint: "<goal> [--max-turns N] [--budget N] [--success <criteria>]",
   },
   {

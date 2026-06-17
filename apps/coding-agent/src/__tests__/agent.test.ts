@@ -15,6 +15,7 @@ import {
 } from "../agent.js";
 import { parseArgs } from "../cli.js";
 import { renderRunReport } from "../output.js";
+import { buildGoalPrompt, type GoalOptions } from "../tui/goal.js";
 import {
   estimateDashScopeCostCny,
   getDashScopeModelMetadata,
@@ -237,6 +238,80 @@ describe("coding-agent dogfood app", () => {
     expect(second.costStats?.inputTokens).toBe(30);
     expect(second.costStats?.outputTokens).toBe(12);
     expect(renderRunReport(second)).toContain("LLM Stats (session cumulative)");
+    await agent.close();
+    fake.teardown();
+  });
+
+  it("createGoalSession stops on REACHED through progressVerifier", async () => {
+    const cwd = await tempRepo();
+    const goal: GoalOptions = { goal: "make tests pass", maxTurns: 3 };
+    const fake = createFakeModel([
+      {
+        content: [{ type: "text", text: "done\n---\nGOAL_STATUS: REACHED" }],
+        usage: { input: 10, output: 5 },
+      },
+    ]);
+    const agent = createCodingAgent({ cwd, model: fake, log: false });
+
+    const summary = await agent.createGoalSession(goal).run(buildGoalPrompt(goal));
+
+    expect(summary.reason).toBe("aborted");
+    expect(summary.abortReason).toContain("progressVerifier");
+    expect(summary.abortReason).toContain("goal reached");
+    expect(summary.turns).toBe(1);
+    await agent.close();
+    fake.teardown();
+  });
+
+  it("createGoalSession forces continuation via turnEndGuard until GOAL_STATUS reaches REACHED", async () => {
+    const cwd = await tempRepo();
+    const goal: GoalOptions = { goal: "finish issue", maxTurns: 3 };
+    const fake = createFakeModel([
+      {
+        content: [
+          {
+            type: "text",
+            text: "partial\n---\nGOAL_STATUS: NOT_REACHED\nGOAL_REASON: one test still fails",
+          },
+        ],
+      },
+      {
+        content: [{ type: "text", text: "fixed\n---\nGOAL_STATUS: REACHED" }],
+      },
+    ]);
+    const agent = createCodingAgent({ cwd, model: fake, log: false });
+
+    const summary = await agent.createGoalSession(goal).run(buildGoalPrompt(goal));
+
+    expect(summary.reason).toBe("aborted");
+    expect(summary.abortReason).toContain("goal reached");
+    expect(summary.continuations).toBe(1);
+    expect(fake.getCalls()).toHaveLength(2);
+    expect(JSON.stringify(fake.getCalls()[1]?.messages)).toContain("Goal is not reached yet");
+    await agent.close();
+    fake.teardown();
+  });
+
+  it("createGoalSession stops through tokenBudget when usage exceeds budget", async () => {
+    const cwd = await tempRepo();
+    const goal: GoalOptions = { goal: "spend less", maxTurns: 3, budgetTokens: 100 };
+    const fake = createFakeModel([
+      {
+        content: [
+          {
+            type: "text",
+            text: "not done\n---\nGOAL_STATUS: NOT_REACHED\nGOAL_REASON: needs more work",
+          },
+        ],
+        usage: { input: 80, output: 30 },
+      },
+    ]);
+    const agent = createCodingAgent({ cwd, model: fake, log: false });
+
+    const summary = await agent.createGoalSession(goal).run(buildGoalPrompt(goal));
+
+    expect(summary.reason).toBe("aborted");
+    expect(summary.abortReason).toContain("token budget exhausted");
     await agent.close();
     fake.teardown();
   });

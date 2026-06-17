@@ -78,7 +78,7 @@ Works in any modern terminal (iTerm2, WezTerm, Kitty, Ghostty, VS Code, Windows 
 | Command | What it does |
 |---|---|
 | `/compact` | Turn on compaction for this session — summarize earlier messages for the model (full history is kept). |
-| `/goal <goal> [--max-turns N] [--budget N] [--success <criteria>]` | Run a **goal + verifier + budget loop**: the agent acts until it self-reports `GOAL_STATUS: REACHED`, or until `--max-turns` / `--budget` (tokens) is exhausted. Rounds and budget remaining are shown per turn. Esc interrupts. |
+| `/goal <goal> [--max-turns N] [--budget N] [--success <criteria>]` | Run a hook-composed goal loop: `turnEndGuard` keeps going while `GOAL_STATUS` is not reached, `progressVerifier` stops on reached/stall, and `tokenBudget` enforces the token cap. Rounds and budget remaining are shown per turn. Esc interrupts. |
 | `/multi <question> @file @file …` | Analyze several files **in parallel** with read-only sub-agents (cannot edit), then aggregate the findings. |
 | `/help` | List commands. |
 | `/exit` | Quit the TUI. |

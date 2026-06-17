@@ -5,6 +5,7 @@ import {
   type HarnessTool,
   type Hook,
   type LlmOptions,
+  type Message,
   type Model,
   type RunSummary,
   type SessionEvent,
@@ -19,10 +20,13 @@ import {
   metrics,
   NdjsonFileSink,
   permissionGate,
+  progressVerifier,
   repeatedCallGuard,
   sessionLog,
   toolStats,
+  tokenBudget,
   trimHistory,
+  turnEndGuard,
   type CompactSummarizeOptions,
   type CostStats,
   type CostTrackerOptions,
@@ -55,6 +59,12 @@ import {
   resolveDashScopeModel,
   type DashScopeCostEstimate,
 } from "./providers/dashscope.js";
+import {
+  checkGoalContinuation,
+  goalTextFromMessage,
+  judgeGoalProgress,
+  type GoalOptions,
+} from "./tui/goal.js";
 
 export interface CreateCodingAgentOptions {
   cwd: string;
@@ -141,6 +151,8 @@ export interface CodingAgent {
   getCompactionState(): { enabled: boolean; maxMessages: number; keepRecent: number } | undefined;
   /** 注册"压缩发生"回调（每次实际跑 summarize 时以被压缩的早期消息条数调用）；用于 TUI 反馈。 */
   setCompactionListener(listener: (coveredCount: number) => void): void;
+  /** 为 /goal 创建一次性专用 session：不污染主交互 session，hook 组合负责续跑/verifier/预算。 */
+  createGoalSession(goal: GoalOptions): AgentSession;
 }
 
 export interface RunAgentPromptOptions {
@@ -463,9 +475,36 @@ function buildAgentContext(opts: CreateCodingAgentOptions): AgentContext {
         setCompactionListener(listener) {
           compactionListener = listener;
         },
+        createGoalSession(goal) {
+          const goalHooks: Hook[] = [
+            turnEndGuard({
+              check: (ctx) => checkGoalContinuation(latestAssistantText(ctx.messages)),
+              maxRetries: goal.maxTurns,
+            }),
+            progressVerifier({
+              judge: (_ctx, input) =>
+                judgeGoalProgress(goalTextFromMessage(input.assistantMessage)),
+              noProgressThreshold: goal.maxTurns,
+            }),
+            tokenBudget({ budget: goal.budgetTokens ?? null }),
+          ];
+          return new AgentSession({
+            ...deps,
+            hooks: [...(deps.hooks ?? []), ...goalHooks],
+            maxContinuations: goal.maxTurns,
+          });
+        },
       };
     },
   };
+}
+
+function latestAssistantText(messages: ReadonlyArray<Message>): string {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const message = messages[i];
+    if (message?.role === "assistant") return goalTextFromMessage(message);
+  }
+  return "";
 }
 
 /**

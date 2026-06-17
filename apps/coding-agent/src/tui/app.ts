@@ -28,14 +28,13 @@ import { routeSubmit } from "./submit-router.js";
 import { parseSlashCommand, SLASH_COMMANDS, SLASH_HELP, type SlashCommand } from "./slash.js";
 import { formatMultiSummary, orchestrateMulti, parseMultiCommand, subTaskFor } from "./multi.js";
 import {
-  buildContinuationPrompt,
   buildGoalPrompt,
+  classifyGoalOutcome,
   formatGoalFinalStatus,
   formatGoalRoundBanner,
+  goalTextFromMessage,
   parseGoalCommand,
-  parseGoalVerdict,
   type GoalOptions,
-  type GoalVerdict,
 } from "./goal.js";
 import { createAutocompleteProvider } from "./autocomplete.js";
 import { color, editorTheme, markdownTheme } from "./theme.js";
@@ -81,6 +80,8 @@ export interface TuiAgentLike {
   getCompactionState?(): { enabled: boolean } | undefined;
   /** 注册"压缩发生"回调（实际跑 summarize 时以被压缩条数调用）→ TUI 渲染一行反馈。 */
   setCompactionListener?(listener: (coveredCount: number) => void): void;
+  /** /goal 专用 session 工厂：把 hook 组合挂在隔离 session 上，避免污染主会话。 */
+  createGoalSession?(goal: GoalOptions): TuiSession;
 }
 
 export interface TuiAppOptions {
@@ -422,10 +423,7 @@ export function createTuiApp(opts: TuiAppOptions): TuiApp {
 
   /**
    * `/goal <desc>` —— 目标 + verifier + 预算 loop-engineering 循环。
-   *
-   * 每轮调 session.runStreaming（首轮用 buildGoalPrompt，后续用 buildContinuationPrompt）；
-   * 每轮结束后解析模型自报的 GOAL_STATUS 标记（verifier）；
-   * 达标 / 预算耗尽 / maxTurns 到限 / Esc 中断时给出明确终态提示。
+   * TUI 只启动一次专用 goal session；续跑/verifier/预算由 session 上的 hook 组合负责。
    */
   async function runGoal(rest: string): Promise<void> {
     if (running) {
@@ -447,6 +445,12 @@ export function createTuiApp(opts: TuiAppOptions): TuiApp {
       tui.requestRender();
       return;
     }
+    const goalSession = opts.agent.createGoalSession?.(goalOpts);
+    if (!goalSession) {
+      append(new Text(color.dim("/goal not available here"), 0, 0));
+      tui.requestRender();
+      return;
+    }
 
     append(
       new Text(
@@ -465,96 +469,62 @@ export function createTuiApp(opts: TuiAppOptions): TuiApp {
     tui.requestRender();
 
     let round = 0;
-    let verdict: GoalVerdict = "unknown";
-    let aborted = false;
-    let budgetExhausted = false;
+    let usedTokens = 0;
+    let lastAssistantText = "";
+    let finalSummary: RunSummary | undefined;
 
     try {
-      while (round < goalOpts.maxTurns && !aborted) {
-        round++;
-
-        // 每轮开始前：预算前置检查 + 状态行
-        const usedTokens = readUsedTokens();
-        if (goalOpts.budgetTokens !== undefined && usedTokens >= goalOpts.budgetTokens) {
-          budgetExhausted = true;
-          round--; // 本轮未实际执行
-          break;
+      const acc = new LiveStreamAccumulator();
+      const onLive = (event: LiveEvent): void => {
+        for (const op of acc.onEvent(event)) {
+          applyStreamOp(op);
+          if (op.kind === "end") lastAssistantText = op.text;
         }
-        append(
-          new Text(
-            color.dim(
-              formatGoalRoundBanner({
-                round,
-                maxTurns: goalOpts.maxTurns,
-                ...(goalOpts.budgetTokens !== undefined
-                  ? { budgetTokens: goalOpts.budgetTokens, usedTokens }
-                  : {}),
-              }),
-            ),
-            0,
-            0,
-          ),
-        );
-
-        status.setMessage(`/goal 第 ${round} 轮…`);
         tui.requestRender();
+      };
+      const unsubs = LIVE_TYPES.map((type) => goalSession.on(type, onLive));
 
-        const prompt =
-          round === 1 ? buildGoalPrompt(goalOpts) : buildContinuationPrompt(round, goalOpts);
-
-        // 每轮独立订阅 fine 轨（先订阅再 runStreaming，同普通 submit）
-        const acc = new LiveStreamAccumulator();
-        let lastAssistantText = "";
-        const onLive = (event: LiveEvent): void => {
-          for (const op of acc.onEvent(event)) {
-            applyStreamOp(op);
-            if (op.kind === "end") lastAssistantText = op.text;
+      try {
+        const stream = goalSession.runStreaming(buildGoalPrompt(goalOpts), { signal: ac.signal });
+        for await (const ev of stream) {
+          if (ev.type === "turn-start") {
+            round = ev.turnIdx + 1;
+            append(
+              new Text(
+                color.dim(
+                  formatGoalRoundBanner({
+                    round,
+                    maxTurns: goalOpts.maxTurns,
+                    ...(goalOpts.budgetTokens !== undefined
+                      ? { budgetTokens: goalOpts.budgetTokens, usedTokens }
+                      : {}),
+                  }),
+                ),
+                0,
+                0,
+              ),
+            );
+            status.setMessage(`/goal 第 ${round} 轮…`);
           }
+          if (ev.type === "llm-end") {
+            lastInputTokens = ev.msg.usage?.input ?? lastInputTokens;
+            usedTokens += (ev.msg.usage?.input ?? 0) + (ev.msg.usage?.output ?? 0);
+            lastAssistantText = goalTextFromMessage(ev.msg);
+          }
+          for (const a of coarseEventToActions(ev, { suppressAssistant: true })) applyAction(a);
           tui.requestRender();
-        };
-        const unsubs = LIVE_TYPES.map((type) => opts.agent.session.on(type, onLive));
-
-        try {
-          const stream = opts.agent.session.runStreaming(prompt, { signal: ac.signal });
-          for await (const ev of stream) {
-            if (ev.type === "llm-end") lastInputTokens = ev.msg.usage?.input ?? lastInputTokens;
-            for (const a of coarseEventToActions(ev, { suppressAssistant: true })) applyAction(a);
-            tui.requestRender();
-          }
-          const summary = await stream.finalSummary.catch(() => undefined);
-          if (ac.signal.aborted || summary?.reason === "aborted") {
-            aborted = true;
-          }
-        } catch (err) {
-          if (ac.signal.aborted) {
-            aborted = true;
-          } else {
-            applyAction({
-              kind: "error",
-              phase: "goal",
-              message: err instanceof Error ? err.message : String(err),
-            });
-            break;
-          }
-        } finally {
-          for (const unsub of unsubs) unsub();
-          current = {};
         }
-
-        if (aborted) break;
-
-        // verifier：解析模型自报的 GOAL_STATUS 标记
-        verdict = parseGoalVerdict(lastAssistantText);
-        if (verdict === "reached") break;
-
-        // 预算后置检查（本轮消耗后）
-        if (goalOpts.budgetTokens !== undefined) {
-          if (readUsedTokens() >= goalOpts.budgetTokens) {
-            budgetExhausted = true;
-            break;
-          }
-        }
+        finalSummary = await stream.finalSummary.catch(() => undefined);
+      } finally {
+        for (const unsub of unsubs) unsub();
+        current = {};
       }
+    } catch (err) {
+      applyAction({
+        kind: "error",
+        phase: "goal",
+        message: err instanceof Error ? err.message : String(err),
+      });
     } finally {
       goalAbort = undefined;
       running = false;
@@ -564,12 +534,18 @@ export function createTuiApp(opts: TuiAppOptions): TuiApp {
     }
 
     // 终态提示
-    const finalText = formatGoalFinalStatus(verdict, round, aborted, budgetExhausted);
+    const outcome = classifyGoalOutcome(finalSummary, lastAssistantText);
+    const finalText = formatGoalFinalStatus(
+      outcome.verdict,
+      finalSummary?.turns ?? round,
+      outcome.aborted,
+      outcome.budgetExhausted,
+    );
     append(
       new Text(
-        verdict === "reached"
+        outcome.verdict === "reached"
           ? color.green(finalText)
-          : aborted
+          : outcome.aborted
             ? color.dim(finalText)
             : color.red(finalText),
         0,
@@ -577,13 +553,6 @@ export function createTuiApp(opts: TuiAppOptions): TuiApp {
       ),
     );
     tui.requestRender();
-  }
-
-  /** 读取当前累计 token（cost-tracker 统计；不可用时返回 0）。 */
-  function readUsedTokens(): number {
-    const stats = opts.agent.getCostStats?.();
-    if (!stats) return 0;
-    return stats.inputTokens + stats.outputTokens;
   }
 
   /** 处理斜杠命令（/compact、/help、/multi、/goal…）。本地动作，不发起普通 LLM turn。 */

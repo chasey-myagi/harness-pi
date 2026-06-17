@@ -5,6 +5,8 @@
  * 而不是单纯重复执行 prompt N 次。配合 maxTurns / budgetTokens 两道硬上限。
  */
 
+import type { RunSummary } from "@harness-pi/core";
+
 export interface GoalOptions {
   /** 目标描述（主体文本）。 */
   goal: string;
@@ -129,6 +131,27 @@ export function buildContinuationPrompt(round: number, opts: GoalOptions): strin
 /** Model-reported goal status extracted from response text. */
 export type GoalVerdict = "reached" | "not_reached" | "blocked" | "unknown";
 
+export interface GoalProgressJudgement {
+  reached: boolean;
+  hasProgress?: boolean;
+  message?: string;
+}
+
+export interface GoalContinuationCheck {
+  ok: boolean;
+  message?: string;
+}
+
+export interface GoalTextMessage {
+  content:
+    | string
+    | Array<{
+        type: string;
+        text?: string;
+        thinking?: string;
+      }>;
+}
+
 /**
  * 从 session 最终文本中提取 GOAL_STATUS 标记。
  * 查找文本中最后一个 `GOAL_STATUS:` 行（容许前后空白）。
@@ -143,6 +166,92 @@ export function parseGoalVerdict(text: string): GoalVerdict {
   if (value === "not_reached") return "not_reached";
   if (value === "blocked") return "blocked";
   return "unknown";
+}
+
+/** 提取最后一个 GOAL_REASON 行，供续跑阻断消息和终态说明使用。 */
+export function parseGoalReason(text: string): string | undefined {
+  const matches = [...text.matchAll(/GOAL_REASON:\s*(.+)$/gim)];
+  const last = matches.at(-1)?.[1]?.trim();
+  return last && last.length > 0 ? last : undefined;
+}
+
+/** 从 assistant message 中提取文本块；toolCall / thinking 不参与 GOAL_STATUS 判定。 */
+export function goalTextFromMessage(message: GoalTextMessage | undefined): string {
+  if (!message) return "";
+  if (typeof message.content === "string") return message.content;
+  return message.content
+    .map((block) => (block.type === "text" && typeof block.text === "string" ? block.text : ""))
+    .join("\n");
+}
+
+/** progressVerifier.judge 的纯逻辑：只负责判定达标/停滞，不负责续跑。 */
+export function judgeGoalProgress(text: string): GoalProgressJudgement {
+  const verdict = parseGoalVerdict(text);
+  const reason = parseGoalReason(text);
+  if (verdict === "reached") {
+    return { reached: true, ...(reason ? { message: reason } : {}) };
+  }
+  if (verdict === "not_reached") {
+    return {
+      reached: false,
+      hasProgress: true,
+      ...(reason ? { message: reason } : {}),
+    };
+  }
+  if (verdict === "blocked") {
+    return {
+      reached: false,
+      hasProgress: false,
+      message: reason ?? "GOAL_STATUS: BLOCKED",
+    };
+  }
+  return {
+    reached: false,
+    hasProgress: false,
+    message: "missing GOAL_STATUS block",
+  };
+}
+
+/** turnEndGuard.check 的纯逻辑：模型想停时，未达标则回灌阻断消息并强制续跑。 */
+export function checkGoalContinuation(text: string): GoalContinuationCheck {
+  const verdict = parseGoalVerdict(text);
+  if (verdict === "reached" || verdict === "blocked") return { ok: true };
+  if (verdict === "not_reached") {
+    const reason = parseGoalReason(text);
+    return {
+      ok: false,
+      message: reason
+        ? `Goal is not reached yet: ${reason}`
+        : "Goal is not reached yet. Continue working and end with a GOAL_STATUS block.",
+    };
+  }
+  return {
+    ok: false,
+    message:
+      "Missing GOAL_STATUS block. Continue working, then end with GOAL_STATUS: REACHED, NOT_REACHED, or BLOCKED.",
+  };
+}
+
+/** 把 hook 驱动的 session 终态映射回 TUI 展示所需的最终状态。 */
+export function classifyGoalOutcome(
+  summary: RunSummary | undefined,
+  fallbackAssistantText = "",
+): {
+  verdict: GoalVerdict;
+  aborted: boolean;
+  budgetExhausted: boolean;
+} {
+  const text = fallbackAssistantText || goalTextFromMessage(summary?.lastMessage);
+  const verdict = parseGoalVerdict(text);
+  const abortReason = summary?.abortReason ?? "";
+  const budgetExhausted =
+    verdict !== "reached" && /token budget exhausted/i.test(abortReason);
+  const aborted =
+    summary?.reason === "aborted" &&
+    verdict !== "reached" &&
+    !budgetExhausted &&
+    !/^progressVerifier:/i.test(abortReason);
+  return { verdict, aborted, budgetExhausted };
 }
 
 /** 格式化每轮开始时 TUI 显示的进度行。 */
