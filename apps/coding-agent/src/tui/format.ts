@@ -142,8 +142,8 @@ function formatBashPreview(command: string): string {
 
 /** 简单行级 diff：共同前缀/后缀保留为上下文（dim " "），中间差异段用 -/+ 标记。 */
 export function buildLineDiff(oldText: string, newText: string): string[] {
-  const oldLines = oldText.split("\n");
-  const newLines = newText.split("\n");
+  const oldLines = oldText.length === 0 ? [] : oldText.split("\n");
+  const newLines = newText.length === 0 ? [] : newText.split("\n");
 
   let prefixLen = 0;
   while (prefixLen < oldLines.length && prefixLen < newLines.length && oldLines[prefixLen] === newLines[prefixLen]) {

@@ -1,12 +1,34 @@
-import { existsSync, readFileSync } from "node:fs";
+import { closeSync, existsSync, openSync, readSync } from "node:fs";
 import { dirname, join } from "node:path";
 
 /** 候选文件名，按优先级排列：CLAUDE.md 优先，其次 AGENTS.md。 */
 const CANDIDATE_NAMES = ["CLAUDE.md", "AGENTS.md"] as const;
+export const PROJECT_INSTRUCTIONS_MAX_BYTES = 64 * 1024;
 
 export interface ProjectInstructions {
   content: string;
   sourcePath: string;
+}
+
+function readInstructionFile(path: string): string {
+  const fd = openSync(path, "r");
+  try {
+    const buffer = Buffer.alloc(PROJECT_INSTRUCTIONS_MAX_BYTES + 1);
+    const bytesRead = readSync(fd, buffer, 0, buffer.length, 0);
+    const truncated = bytesRead > PROJECT_INSTRUCTIONS_MAX_BYTES;
+    const content = buffer
+      .subarray(0, Math.min(bytesRead, PROJECT_INSTRUCTIONS_MAX_BYTES))
+      .toString("utf8");
+    if (!truncated) return content;
+    return [
+      content,
+      "",
+      `[Project instructions truncated to ${PROJECT_INSTRUCTIONS_MAX_BYTES} bytes.]`,
+      "",
+    ].join("\n");
+  } finally {
+    closeSync(fd);
+  }
 }
 
 /**
@@ -22,7 +44,7 @@ export function loadProjectInstructions(startDir: string): ProjectInstructions |
     for (const name of CANDIDATE_NAMES) {
       const candidate = join(dir, name);
       try {
-        const content = readFileSync(candidate, "utf8");
+        const content = readInstructionFile(candidate);
         if (content.trim().length === 0) continue;
         return { content, sourcePath: candidate };
       } catch {

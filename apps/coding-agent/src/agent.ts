@@ -60,6 +60,7 @@ import {
 } from "./providers/dashscope.js";
 import {
   checkGoalContinuation,
+  clampGoalMaxTurns,
   goalKernelMaxTurns,
   goalTextFromMessage,
   type GoalOptions,
@@ -475,14 +476,15 @@ function buildAgentContext(opts: CreateCodingAgentOptions): AgentContext {
           compactionListener = listener;
         },
         createGoalSession(goal) {
-          const kernelMaxTurns = goalKernelMaxTurns(goal);
+          const goalMaxTurns = clampGoalMaxTurns(goal.maxTurns);
+          const kernelMaxTurns = goalKernelMaxTurns({ ...goal, maxTurns: goalMaxTurns });
           // /goal 的循环由 turnEndGuard 在 would-be-done 时续跑：
           // onContinuationCheck 只会在内核准备自然停止后触发，不会限制中间 tool-call turns。
           // 因此 maxRetries/maxContinuations 约束续跑次数，内核 maxTurns 单独约束工具调用轮数。
           const goalHooks: Hook[] = [
             turnEndGuard({
               check: (ctx) => checkGoalContinuation(latestAssistantText(ctx.messages)),
-              maxRetries: goal.maxTurns,
+              maxRetries: goalMaxTurns,
             }),
             tokenBudget({ budget: goal.budgetTokens ?? null }),
           ];
@@ -490,7 +492,7 @@ function buildAgentContext(opts: CreateCodingAgentOptions): AgentContext {
             ...deps,
             hooks: [...(deps.hooks ?? []), ...goalHooks],
             maxTurns: kernelMaxTurns,
-            maxContinuations: goal.maxTurns,
+            maxContinuations: goalMaxTurns,
           });
         },
       };

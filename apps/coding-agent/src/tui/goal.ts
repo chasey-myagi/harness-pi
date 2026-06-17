@@ -20,10 +20,16 @@ export interface GoalOptions {
 
 /** 每个 goal 续跑轮给内层工具调用预留的 turn 数，避免回落到内核默认 200。 */
 const TURNS_PER_GOAL_ROUND = 20;
+const MAX_GOAL_ROUNDS = Math.floor(Number.MAX_SAFE_INTEGER / TURNS_PER_GOAL_ROUND);
+
+export function clampGoalMaxTurns(maxTurns: number): number {
+  const finite = Number.isFinite(maxTurns) ? Math.trunc(maxTurns) : 1;
+  return Math.min(MAX_GOAL_ROUNDS, Math.max(1, finite));
+}
 
 /** /goal session 的内核 turn 硬上限：用于约束 tool-call turns，不等同于续跑轮数。 */
 export function goalKernelMaxTurns(opts: GoalOptions): number {
-  return Math.max(1, opts.maxTurns) * TURNS_PER_GOAL_ROUND;
+  return clampGoalMaxTurns(opts.maxTurns) * TURNS_PER_GOAL_ROUND;
 }
 
 /**
@@ -44,10 +50,12 @@ export function parseGoalCommand(rest: string): GoalOptions | null {
     return "";
   });
 
-  // --budget <N>
-  text = text.replace(/--budget\s+(\d+)/i, (_, n: string) => {
-    const v = parseInt(n, 10);
-    if (v > 0) budgetTokens = v;
+  // --budget <N>；非法值也消费掉完整 token，避免把 flag 原样发给 LLM。
+  text = text.replace(/--budget(?:\s+((?!--)\S+))?/i, (_, n: string | undefined) => {
+    if (n !== undefined && /^[+-]?\d+$/.test(n)) {
+      const v = parseInt(n, 10);
+      if (v > 0) budgetTokens = v;
+    }
     return "";
   });
 
@@ -133,7 +141,16 @@ function finalGoalStatusBlock(text: string): { block: string; hasDelimiter: bool
 }
 
 function verdictFromValue(value: string): GoalVerdict {
-  const normalized = value.trim().toLowerCase();
+  let normalized = value.trim();
+  for (const marker of ["**", "__", "`"] as const) {
+    while (normalized.startsWith(marker) && normalized.endsWith(marker)) {
+      normalized = normalized.slice(marker.length, -marker.length).trim();
+    }
+  }
+  normalized = normalized
+    .replace(/^[\s`*_~"'([{<,:;.!?]+/, "")
+    .replace(/[\s`*_~"')\]}>,:;.!?]+$/, "")
+    .toLowerCase();
   if (normalized === "reached") return "reached";
   if (normalized === "not_reached") return "not_reached";
   if (normalized === "blocked") return "blocked";

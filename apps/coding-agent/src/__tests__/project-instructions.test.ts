@@ -3,7 +3,7 @@ import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createFakeModel } from "@harness-pi/core/testing";
-import { loadProjectInstructions } from "../project-instructions.js";
+import { PROJECT_INSTRUCTIONS_MAX_BYTES, loadProjectInstructions } from "../project-instructions.js";
 import { createCodingAgent } from "../agent.js";
 import { emitProjectInstructionsNotice, parseArgs } from "../cli.js";
 
@@ -99,12 +99,30 @@ describe("loadProjectInstructions", () => {
   });
 
   it("整棵目录树都没有指令文件 → 不抛错", async () => {
-    const cwd = await tmp();
-    const deep = join(cwd, "a", "b", "c");
+    const home = await tmp();
+    vi.stubEnv("HOME", home);
+    const deep = join(home, "a", "b", "c");
     await mkdir(deep, { recursive: true });
 
-    // 无法保证系统 tmp 父目录也没有文件，因此只断言不抛
-    expect(() => loadProjectInstructions(deep)).not.toThrow();
+    expect(loadProjectInstructions(deep)).toBeNull();
+  });
+
+  it("超大指令文件会被截断，不把整文件注入 prompt", async () => {
+    const cwd = await tmp();
+    const tailMarker = "TAIL_MARKER_SHOULD_NOT_APPEAR";
+    await writeFile(
+      join(cwd, "CLAUDE.md"),
+      `${"A".repeat(PROJECT_INSTRUCTIONS_MAX_BYTES + 1000)}${tailMarker}\n`,
+    );
+
+    const result = loadProjectInstructions(cwd);
+
+    expect(result).not.toBeNull();
+    expect(Buffer.byteLength(result!.content, "utf8")).toBeLessThan(
+      PROJECT_INSTRUCTIONS_MAX_BYTES + 256,
+    );
+    expect(result!.content).toContain("truncated");
+    expect(result!.content).not.toContain(tailMarker);
   });
 
   it("AGENTS.md 是 CLAUDE.md 的符号链接 → 也能正确加载", async () => {

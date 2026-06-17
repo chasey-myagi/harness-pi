@@ -150,7 +150,7 @@ describe("buildLineDiff", () => {
   it("handles new file (empty oldText)", () => {
     const diff = buildLineDiff("", "hello\nworld");
     const stripped = diff.map(strip);
-    expect(stripped).toContain("-");
+    expect(stripped).not.toContain("-");
     expect(stripped).toContain("+hello");
     expect(stripped).toContain("+world");
   });
@@ -160,7 +160,7 @@ describe("buildLineDiff", () => {
     const stripped = diff.map(strip);
     expect(stripped).toContain("-hello");
     expect(stripped).toContain("-world");
-    expect(stripped).toContain("+");
+    expect(stripped).not.toContain("+");
   });
 });
 
