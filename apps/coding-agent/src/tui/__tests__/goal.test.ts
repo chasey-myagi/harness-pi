@@ -2,9 +2,9 @@ import { describe, expect, it } from "vitest";
 import {
   parseGoalCommand,
   buildGoalPrompt,
-  buildContinuationPrompt,
+  classifyGoalOutcome,
   checkGoalContinuation,
-  judgeGoalProgress,
+  parseGoalReason,
   parseGoalVerdict,
   formatGoalRoundBanner,
   formatGoalFinalStatus,
@@ -74,6 +74,33 @@ describe("parseGoalCommand", () => {
     const r = parseGoalCommand("some goal --budget -100");
     expect(r?.budgetTokens).toBeUndefined();
   });
+
+  it("ignores an invalid --max-turns value without leaving flag text in the goal", () => {
+    expect(parseGoalCommand("fix flaky tests --max-turns abc")).toEqual({
+      goal: "fix flaky tests",
+      maxTurns: 5,
+      budgetTokens: undefined,
+      successHint: undefined,
+    });
+  });
+
+  it("stops unquoted --success at a stray -- marker", () => {
+    expect(parseGoalCommand("ship release --success all tests pass -- keep note")).toEqual({
+      goal: "ship release -- keep note",
+      maxTurns: 5,
+      budgetTokens: undefined,
+      successHint: "all tests pass",
+    });
+  });
+
+  it("uses the first --success flag and leaves later repeated flags as goal text", () => {
+    expect(parseGoalCommand("ship --success first pass --success second pass")).toEqual({
+      goal: "ship --success second pass",
+      maxTurns: 5,
+      budgetTokens: undefined,
+      successHint: "first pass",
+    });
+  });
 });
 
 describe("buildGoalPrompt", () => {
@@ -97,19 +124,6 @@ describe("buildGoalPrompt", () => {
   it("does not include successHint section when not provided", () => {
     const p = buildGoalPrompt({ goal: "fix lint", maxTurns: 5 });
     expect(p).not.toContain("Success Criteria");
-  });
-});
-
-describe("buildContinuationPrompt", () => {
-  it("includes the round number and goal", () => {
-    const p = buildContinuationPrompt(3, { goal: "make tests pass", maxTurns: 5 });
-    expect(p).toContain("make tests pass");
-    expect(p).toContain("3");
-  });
-
-  it("still includes GOAL_STATUS instructions", () => {
-    const p = buildContinuationPrompt(2, { goal: "refactor", maxTurns: 5 });
-    expect(p).toContain("GOAL_STATUS:");
   });
 });
 
@@ -159,6 +173,18 @@ describe("parseGoalVerdict", () => {
   });
 });
 
+describe("parseGoalReason", () => {
+  it("returns the last GOAL_REASON when multiple markers are present", () => {
+    expect(
+      parseGoalReason("GOAL_REASON: first\nwork log\nGOAL_REASON: final answer"),
+    ).toBe("final answer");
+  });
+
+  it("returns undefined for empty or whitespace-only reasons", () => {
+    expect(parseGoalReason("GOAL_REASON:   ")).toBeUndefined();
+  });
+});
+
 describe("goal hook adapters", () => {
   it("turnEndGuard check lets REACHED and BLOCKED stop", () => {
     expect(checkGoalContinuation("GOAL_STATUS: REACHED")).toEqual({ ok: true });
@@ -183,34 +209,6 @@ describe("goal hook adapters", () => {
     });
   });
 
-  it("progressVerifier judge maps REACHED to reached=true", () => {
-    expect(judgeGoalProgress("all good\nGOAL_STATUS: REACHED")).toMatchObject({
-      reached: true,
-    });
-  });
-
-  it("progressVerifier judge treats NOT_REACHED as progress so turnEndGuard can continue", () => {
-    expect(
-      judgeGoalProgress("GOAL_STATUS: NOT_REACHED\nGOAL_REASON: one assertion remains"),
-    ).toEqual({
-      reached: false,
-      hasProgress: true,
-      message: "one assertion remains",
-    });
-  });
-
-  it("progressVerifier judge treats BLOCKED and missing marker as no progress", () => {
-    expect(judgeGoalProgress("GOAL_STATUS: BLOCKED\nGOAL_REASON: missing env")).toEqual({
-      reached: false,
-      hasProgress: false,
-      message: "missing env",
-    });
-    expect(judgeGoalProgress("no marker")).toMatchObject({
-      reached: false,
-      hasProgress: false,
-      message: expect.stringContaining("GOAL_STATUS"),
-    });
-  });
 });
 
 describe("formatGoalRoundBanner", () => {
@@ -231,6 +229,92 @@ describe("formatGoalRoundBanner", () => {
     // toLocaleString() formats with locale separators; check partial match
     expect(text).toMatch(/2[,_.]?500/);
     expect(text).toMatch(/10[,_.]?000/);
+    expect(text).toContain("25%");
+  });
+});
+
+describe("classifyGoalOutcome", () => {
+  it("classifies done + REACHED as success", () => {
+    expect(
+      classifyGoalOutcome(
+        {
+          turns: 1,
+          continuations: 0,
+          reason: "done",
+          lastMessage: { role: "assistant", content: [{ type: "text", text: "GOAL_STATUS: REACHED" }] },
+        } as any,
+      ),
+    ).toEqual({ verdict: "reached", aborted: false, budgetExhausted: false });
+  });
+
+  it("classifies done + NOT_REACHED as unfinished without interruption", () => {
+    expect(
+      classifyGoalOutcome(undefined, "GOAL_STATUS: NOT_REACHED\nGOAL_REASON: still failing"),
+    ).toEqual({ verdict: "not_reached", aborted: false, budgetExhausted: false });
+  });
+
+  it("classifies done + BLOCKED as blocked without interruption", () => {
+    expect(classifyGoalOutcome(undefined, "GOAL_STATUS: BLOCKED")).toEqual({
+      verdict: "blocked",
+      aborted: false,
+      budgetExhausted: false,
+    });
+  });
+
+  it("classifies token budget aborts as budget exhaustion", () => {
+    expect(
+      classifyGoalOutcome(
+        {
+          turns: 2,
+          continuations: 1,
+          reason: "aborted",
+          abortReason: "token budget exhausted: 120/100",
+        } as any,
+        "GOAL_STATUS: NOT_REACHED",
+      ),
+    ).toEqual({ verdict: "not_reached", aborted: false, budgetExhausted: true });
+  });
+
+  it("classifies user aborts as interrupted", () => {
+    expect(
+      classifyGoalOutcome(
+        {
+          turns: 2,
+          continuations: 1,
+          reason: "aborted",
+          abortReason: "caller signal aborted",
+        } as any,
+        "GOAL_STATUS: NOT_REACHED",
+      ),
+    ).toEqual({ verdict: "not_reached", aborted: true, budgetExhausted: false });
+  });
+
+  it("treats REACHED as success even if an abort reason mentions budget", () => {
+    expect(
+      classifyGoalOutcome(
+        {
+          turns: 1,
+          continuations: 0,
+          reason: "aborted",
+          abortReason: "token budget exhausted: 120/100",
+        } as any,
+        "GOAL_STATUS: REACHED",
+      ),
+    ).toEqual({ verdict: "reached", aborted: false, budgetExhausted: false });
+  });
+
+  it("does not special-case legacy progressVerifier abort reason strings", () => {
+    expect(
+      classifyGoalOutcome(
+        {
+          turns: 2,
+          continuations: 0,
+          reason: "aborted",
+          abortReason: "progressVerifier: no progress",
+        } as any,
+        "GOAL_STATUS: NOT_REACHED",
+      ),
+    ).toEqual({ verdict: "not_reached", aborted: true, budgetExhausted: false });
   });
 });
 

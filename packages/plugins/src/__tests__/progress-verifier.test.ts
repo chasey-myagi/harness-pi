@@ -253,6 +253,29 @@ describe("progressVerifier", () => {
     expect(summary.abortReason).toContain("custom escalation reason");
   });
 
+  it("falls back to the default no-progress stop reason when onStall throws", async () => {
+    const model = createFakeModel([]);
+
+    const session = new AgentSession({
+      model,
+      tools: [],
+      hooks: [
+        progressVerifier({
+          judge: () => ({ reached: false, hasProgress: false }),
+          noProgressThreshold: 1,
+          onStall: () => {
+            throw new Error("notification backend unavailable");
+          },
+        }),
+      ],
+      maxTurns: 20,
+    });
+    const summary = await session.run("go");
+
+    expect(summary.reason).toBe("aborted");
+    expect(summary.abortReason).toBe("progressVerifier: no progress");
+  });
+
   it("hasProgress omitted defaults to true (optimistic), stall counter does not accumulate", async () => {
     // judge 每次只返回 { reached: false }（不含 hasProgress），视为有进展。
     // session 跑完自然结束（3 turns），不因无进展被停止。

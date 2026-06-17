@@ -161,7 +161,14 @@ export function progressVerifier(opts: ProgressVerifierOptions): Hook {
       if (count >= threshold) {
         // 触发 onStall 回调（如有）。
         if (opts.onStall) {
-          await opts.onStall(ctx, { consecutiveNoProgress: count });
+          try {
+            await opts.onStall(ctx, { consecutiveNoProgress: count });
+          } catch (err) {
+            ctx.log.warn("progressVerifier: onStall threw, using default stop reason", {
+              hook: "progress-verifier",
+              error: err instanceof Error ? err.message : String(err),
+            });
+          }
         }
         // onStall 若未 abort，插件用默认原因停止。
         if (!ctx.signal.aborted) {

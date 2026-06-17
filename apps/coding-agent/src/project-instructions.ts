@@ -1,4 +1,4 @@
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 
 /** 候选文件名，按优先级排列：CLAUDE.md 优先，其次 AGENTS.md。 */
@@ -14,17 +14,22 @@ export interface ProjectInstructions {
  * 找不到返回 null（静默回落，不报错）。
  */
 export function loadProjectInstructions(startDir: string): ProjectInstructions | null {
+  const homeDir = process.env.HOME;
   let dir = startDir;
   while (true) {
+    if (homeDir && dir === homeDir) break;
+
     for (const name of CANDIDATE_NAMES) {
       const candidate = join(dir, name);
       try {
         const content = readFileSync(candidate, "utf8");
+        if (content.trim().length === 0) continue;
         return { content, sourcePath: candidate };
       } catch {
         // 文件不存在或不可读，继续尝试
       }
     }
+    if (existsSync(join(dir, ".git"))) break;
     const parent = dirname(dir);
     if (parent === dir) break; // 已到文件系统根
     dir = parent;

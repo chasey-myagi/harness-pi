@@ -20,7 +20,6 @@ import {
   metrics,
   NdjsonFileSink,
   permissionGate,
-  progressVerifier,
   repeatedCallGuard,
   sessionLog,
   toolStats,
@@ -61,8 +60,8 @@ import {
 } from "./providers/dashscope.js";
 import {
   checkGoalContinuation,
+  goalKernelMaxTurns,
   goalTextFromMessage,
-  judgeGoalProgress,
   type GoalOptions,
 } from "./tui/goal.js";
 
@@ -151,7 +150,7 @@ export interface CodingAgent {
   getCompactionState(): { enabled: boolean; maxMessages: number; keepRecent: number } | undefined;
   /** 注册"压缩发生"回调（每次实际跑 summarize 时以被压缩的早期消息条数调用）；用于 TUI 反馈。 */
   setCompactionListener(listener: (coveredCount: number) => void): void;
-  /** 为 /goal 创建一次性专用 session：不污染主交互 session，hook 组合负责续跑/verifier/预算。 */
+  /** 为 /goal 创建一次性专用 session：不污染主交互 session，hook 组合负责续跑与预算。 */
   createGoalSession(goal: GoalOptions): AgentSession;
 }
 
@@ -476,21 +475,21 @@ function buildAgentContext(opts: CreateCodingAgentOptions): AgentContext {
           compactionListener = listener;
         },
         createGoalSession(goal) {
+          const kernelMaxTurns = goalKernelMaxTurns(goal);
+          // /goal 的循环由 turnEndGuard 在 would-be-done 时续跑：
+          // onContinuationCheck 只会在内核准备自然停止后触发，不会限制中间 tool-call turns。
+          // 因此 maxRetries/maxContinuations 约束续跑次数，内核 maxTurns 单独约束工具调用轮数。
           const goalHooks: Hook[] = [
             turnEndGuard({
               check: (ctx) => checkGoalContinuation(latestAssistantText(ctx.messages)),
               maxRetries: goal.maxTurns,
-            }),
-            progressVerifier({
-              judge: (_ctx, input) =>
-                judgeGoalProgress(goalTextFromMessage(input.assistantMessage)),
-              noProgressThreshold: goal.maxTurns,
             }),
             tokenBudget({ budget: goal.budgetTokens ?? null }),
           ];
           return new AgentSession({
             ...deps,
             hooks: [...(deps.hooks ?? []), ...goalHooks],
+            maxTurns: kernelMaxTurns,
             maxContinuations: goal.maxTurns,
           });
         },

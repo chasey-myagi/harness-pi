@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -9,6 +9,7 @@ import { emitProjectInstructionsNotice, parseArgs } from "../cli.js";
 
 const dirs: string[] = [];
 afterEach(async () => {
+  vi.unstubAllEnvs();
   while (dirs.length) {
     const d = dirs.pop();
     if (d) await rm(d, { recursive: true, force: true });
@@ -63,6 +64,38 @@ describe("loadProjectInstructions", () => {
     expect(result).not.toBeNull();
     expect(result!.sourcePath).toBe(join(parent, "CLAUDE.md"));
     expect(result!.content).toContain("parent instructions");
+  });
+
+  it("遇到 .git 仓库边界就停止，不读取仓库外层指令", async () => {
+    const outer = await tmp();
+    await writeFile(join(outer, "CLAUDE.md"), "outer instructions\n");
+    const repo = join(outer, "repo");
+    const child = join(repo, "packages", "app");
+    await mkdir(join(repo, ".git"), { recursive: true });
+    await mkdir(child, { recursive: true });
+
+    expect(loadProjectInstructions(child)).toBeNull();
+  });
+
+  it("到 HOME 边界就停止，不读取 HOME 下的指令文件", async () => {
+    const home = await tmp();
+    vi.stubEnv("HOME", home);
+    await writeFile(join(home, "CLAUDE.md"), "home instructions\n");
+    const cwd = join(home, "work", "project");
+    await mkdir(cwd, { recursive: true });
+
+    expect(loadProjectInstructions(cwd)).toBeNull();
+  });
+
+  it("空指令文件视为不存在，继续尝试同目录下一个候选文件", async () => {
+    const cwd = await tmp();
+    await writeFile(join(cwd, "CLAUDE.md"), "");
+    await writeFile(join(cwd, "AGENTS.md"), "agent instructions\n");
+
+    const result = loadProjectInstructions(cwd);
+    expect(result).not.toBeNull();
+    expect(result!.sourcePath).toBe(join(cwd, "AGENTS.md"));
+    expect(result!.content).toBe("agent instructions\n");
   });
 
   it("整棵目录树都没有指令文件 → 不抛错", async () => {

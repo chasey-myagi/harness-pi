@@ -1827,12 +1827,12 @@ export function skills(specs: SkillSpec[], opts?: { toolName?: string }): { hook
 
 #### 目的
 
-loop-engineering（`/goal` 循环）的 **turn 级进展/目标 verifier hook**。在每个 turn 结束后，用调用方注入的 `judge` 函数判定：
+服务端 agent 可复用的 **turn 级进展/目标 verifier hook**。在每个 turn 结束后，用调用方注入的 `judge` 函数判定：
 
 1. **目标达成**（`reached: true`）→ 立即停止 session。
 2. **连续 N turn 无真实进展**（`hasProgress: false`）→ 停止 session 或触发用户的 `onStall` 升级回调。
 
-是 roadmap「Controller / plugin 候选」`progressVerifier` 的实现。作为 `/goal` 命令的**前置依赖**——有了它，loop 不需要在业务层写 if/else 来判断「啥时候停」，而是把停止条件声明为 hook。
+是 roadmap「Controller / plugin 候选」`progressVerifier` 的实现。它适合需要逐 turn 主动停止的服务端 agent；`apps/coding-agent` 的 `/goal` 命令不再挂载本插件，而是用 `turnEndGuard + tokenBudget`：前者只在 would-be-done 时校验 `GOAL_STATUS` 并强制续跑，后者负责预算硬停。
 
 #### Hook 形态
 
@@ -1862,7 +1862,7 @@ export interface ProgressJudgement {
 - **`hasProgress: false`**：累计 `noProgressCount`；达 `noProgressThreshold` 时调 `onStall`（如有），再以 `{ continue: false }` 停止（若 `onStall` 已 `ctx.abort()`，不二次停止）。
 - **`hasProgress` 省略**（默认 `true`）：重置计数，session 继续——调用方只需在明确发现无进展时才设 `false`。
 - **judge 抛错**：中性处理（跳过本 turn 计数，不计无进展、不计进展），session 继续——避免瞬时错误误停。
-- **`onStall`**：通知回调（日志/报警/降级），可自行 `ctx.abort(customReason)`；若不 abort，插件用默认原因停止并**不** reset 计数（session 就此停止，计数留原值）。
+- **`onStall`**：通知回调（日志/报警/降级），可自行 `ctx.abort(customReason)`；若不 abort，插件用默认原因停止并**不** reset 计数（session 就此停止，计数留原值）。若 `onStall` 抛错，插件记录 warning，并继续用默认 no-progress 原因停止。
 
 **timeout 默认 30s**：`onTurnEnd` 是 event 类、dispatcher 默认仅 100ms；`judge` 通常需调 LLM，必然超时 → 判断静默失效。故本插件自设宽默认，可经 `timeoutMs` 覆盖（对齐 `turnEndGuard` / `onAfterFlush` 同款约定）。
 

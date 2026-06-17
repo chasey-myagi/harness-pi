@@ -604,8 +604,7 @@ describe("TUI app smoke (headless, dual-track via fake terminal)", () => {
     const goalSummary: RunSummary = {
       turns: 1,
       continuations: 0,
-      reason: "aborted",
-      abortReason: "progressVerifier: goal reached",
+      reason: "done",
       usage: { ...ZERO },
       lastMessage: goalMessage,
       stopReason: goalMessage.stopReason,
