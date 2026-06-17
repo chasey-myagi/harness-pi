@@ -15,7 +15,7 @@ import {
 } from "../agent.js";
 import { parseArgs } from "../cli.js";
 import { renderRunReport } from "../output.js";
-import { buildGoalPrompt, type GoalOptions } from "../tui/goal.js";
+import { buildGoalPrompt, classifyGoalOutcome, type GoalOptions } from "../tui/goal.js";
 import {
   estimateDashScopeCostCny,
   getDashScopeModelMetadata,
@@ -337,6 +337,53 @@ describe("coding-agent dogfood app", () => {
 
     expect(summary.reason).toBe("aborted");
     expect(summary.abortReason).toContain("token budget exhausted");
+    await agent.close();
+    fake.teardown();
+  });
+
+  it("createGoalSession caps an unproductive NOT_REACHED loop", async () => {
+    const cwd = await tempRepo();
+    const goal: GoalOptions = { goal: "finish safely", maxTurns: 3 };
+    const fake = createFakeModel(
+      Array.from({ length: 10 }, (_, i) => ({
+        content: [
+          {
+            type: "text" as const,
+            text: `still not done ${i}\n---\nGOAL_STATUS: NOT_REACHED\nGOAL_REASON: needs another pass`,
+          },
+        ],
+      })),
+    );
+    const agent = createCodingAgent({ cwd, model: fake, log: false });
+
+    const summary = await agent.createGoalSession(goal).run(buildGoalPrompt(goal));
+
+    expect(["aborted", "max_continuations"]).toContain(summary.reason);
+    expect(summary.continuations).toBeLessThanOrEqual(goal.maxTurns);
+    expect(fake.getCalls().length).toBeLessThanOrEqual(goal.maxTurns + 1);
+    expect(classifyGoalOutcome(summary)).toMatchObject({
+      verdict: "not_reached",
+      aborted: false,
+      budgetExhausted: false,
+    });
+    await agent.close();
+    fake.teardown();
+  });
+
+  it("createGoalSession clamps public maxTurns input before wiring guards", async () => {
+    const cwd = await tempRepo();
+    const goal: GoalOptions = { goal: "finish once", maxTurns: 0 };
+    const fake = createFakeModel([
+      {
+        content: [{ type: "text", text: "done\n---\nGOAL_STATUS: REACHED" }],
+      },
+    ]);
+    const agent = createCodingAgent({ cwd, model: fake, log: false });
+
+    const summary = await agent.createGoalSession(goal).run(buildGoalPrompt(goal));
+
+    expect(summary.reason).toBe("done");
+    expect(fake.getCalls()).toHaveLength(1);
     await agent.close();
     fake.teardown();
   });

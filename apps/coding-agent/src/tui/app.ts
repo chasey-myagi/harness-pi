@@ -70,8 +70,6 @@ export interface TuiAgentLike {
   /** contextWindow（若已知）用于状态栏的上下文占用读数 `ctx N/W`。 */
   model: { id: string; contextWindow?: number };
   getCostEstimate?(): { amount: number; currency: string } | undefined;
-  /** 累计 cost 统计（costTracker 提供）；用于 /goal 预算跟踪。 */
-  getCostStats?(): { inputTokens: number; outputTokens: number } | undefined;
   /** 最近一次 run 的工具统计；用于状态栏 `🔧 calls/errors`。 */
   getToolStats?(): { totalCalls: number; error: number } | undefined;
   /** 注入 tool 审批"问人"实现（permissionGate.onAsk 委托到它）。 */
@@ -489,6 +487,7 @@ export function createTuiApp(opts: TuiAppOptions): TuiApp {
         for await (const ev of stream) {
           if (ev.type === "turn-start") {
             round = ev.turnIdx + 1;
+            // 当前轮 usage 只有 llm-end 后才可得；turn-start 横幅显示上一轮累计用量。
             append(
               new Text(
                 color.dim(

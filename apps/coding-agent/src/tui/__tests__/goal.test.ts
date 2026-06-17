@@ -76,6 +76,16 @@ describe("parseGoalCommand", () => {
   it("ignores negative budget (treats as no limit)", () => {
     const r = parseGoalCommand("some goal --budget -100");
     expect(r?.budgetTokens).toBeUndefined();
+    expect(r?.goal).toBe("some goal");
+  });
+
+  it("ignores invalid --budget values without leaving flag text in the goal", () => {
+    expect(parseGoalCommand("some goal --budget nope")).toEqual({
+      goal: "some goal",
+      maxTurns: 5,
+      budgetTokens: undefined,
+      successHint: undefined,
+    });
   });
 
   it("ignores an invalid --max-turns value without leaving flag text in the goal", () => {
@@ -167,6 +177,15 @@ describe("parseGoalVerdict", () => {
 
   it("handles extra whitespace around the value", () => {
     expect(parseGoalVerdict("GOAL_STATUS:  REACHED  ")).toBe("reached");
+  });
+
+  it.each([
+    ["GOAL_STATUS: **REACHED**", "reached"],
+    ["GOAL_STATUS: `BLOCKED`", "blocked"],
+    ["GOAL_STATUS: NOT_REACHED.", "not_reached"],
+    ["GOAL_STATUS: __not_reached__", "not_reached"],
+  ] as const)("tolerates markdown or punctuation around status values: %s", (text, expected) => {
+    expect(parseGoalVerdict(text)).toBe(expected);
   });
 
   it("returns unknown for empty text", () => {
@@ -265,6 +284,14 @@ describe("goalKernelMaxTurns", () => {
 
   it("clamps zero maxTurns to at least one visible goal round", () => {
     expect(goalKernelMaxTurns({ goal: "fix tests", maxTurns: 0 })).toBeGreaterThanOrEqual(20);
+  });
+
+  it("keeps very large maxTurns inside the safe integer range", () => {
+    const turns = goalKernelMaxTurns({ goal: "fix tests", maxTurns: Number.MAX_SAFE_INTEGER });
+
+    expect(Number.isSafeInteger(turns)).toBe(true);
+    expect(turns).toBeGreaterThan(0);
+    expect(turns).toBeLessThanOrEqual(Number.MAX_SAFE_INTEGER);
   });
 });
 

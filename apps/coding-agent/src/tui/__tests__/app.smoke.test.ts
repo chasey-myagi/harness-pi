@@ -651,6 +651,52 @@ describe("TUI app smoke (headless, dual-track via fake terminal)", () => {
     expect(app.isRunning()).toBe(false);
   });
 
+  it("/goal: renders NOT_REACHED budget exhaustion from the TUI path", async () => {
+    const goalMessage = assistant([
+      {
+        type: "text",
+        text: "still failing\n---\nGOAL_STATUS: NOT_REACHED\nGOAL_REASON: tests still fail",
+      },
+    ]);
+    const goalSummary: RunSummary = {
+      turns: 2,
+      continuations: 1,
+      reason: "aborted",
+      abortReason: "token budget exhausted: 120/100",
+      usage: { ...ZERO },
+      lastMessage: goalMessage,
+      stopReason: goalMessage.stopReason,
+    };
+    const goalSession: TuiSession = {
+      on: NOOP_ON,
+      runStreaming: () => {
+        const gen = (async function* (): AsyncGenerator<SessionEvent> {
+          yield { type: "turn-start", turnIdx: 0 };
+          yield { type: "llm-end", msg: goalMessage, durationMs: 1 };
+          yield { type: "session-end", summary: goalSummary };
+        })();
+        return Object.assign(gen, { finalSummary: Promise.resolve(goalSummary) });
+      },
+    };
+    const app = createTuiApp({
+      agent: {
+        model: { id: "qwen-turbo" },
+        session: idleSession,
+        createGoalSession: () => goalSession,
+      },
+      terminal: new FakeTerminal(),
+    });
+
+    await app.submit("/goal make tests pass --max-turns 1");
+
+    const out = strip(app.tui.render(80).join("\n"));
+    expect(out).toContain("/goal stopped");
+    expect(out).toContain("token budget exhausted: 120/100");
+    expect(out).toContain("not_reached");
+    expect(out).not.toMatch(/interrupt|中断/i);
+    expect(app.isRunning()).toBe(false);
+  });
+
   it("Esc during /goal aborts the dedicated goal session", async () => {
     let capturedSignal: AbortSignal | undefined;
     let release!: () => void;
