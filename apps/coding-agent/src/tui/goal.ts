@@ -45,13 +45,13 @@ export function parseGoalCommand(rest: string): GoalOptions | null {
   let successHint: string | undefined = undefined;
 
   // --max-turns <N>；非法值忽略并清掉完整 token，避免污染 goal 文本（如 3.5 残留 .5）。
-  text = text.replace(/--max-turns(?:\s+((?!--)\S+))?/i, (_, n: string | undefined) => {
+  text = text.replace(/--max-turns(?=\s|$)(?:\s+((?!--)\S+))?/i, (_, n: string | undefined) => {
     if (n !== undefined && /^[+-]?\d+$/.test(n)) maxTurns = Math.max(1, parseInt(n, 10));
     return "";
   });
 
   // --budget <N>；非法值也消费掉完整 token，避免把 flag 原样发给 LLM。
-  text = text.replace(/--budget(?:\s+((?!--)\S+))?/i, (_, n: string | undefined) => {
+  text = text.replace(/--budget(?=\s|$)(?:\s+((?!--)\S+))?/i, (_, n: string | undefined) => {
     if (n !== undefined && /^[+-]?\d+$/.test(n)) {
       const v = parseInt(n, 10);
       if (v > 0) budgetTokens = v;
