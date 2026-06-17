@@ -48,6 +48,7 @@ interface CliArgs {
   version: boolean;
   help: boolean;
   noProjectInstructions: boolean;
+  trimHistory?: { keepRecent: number } | undefined;
 }
 
 /** TUI 会话落盘文件路径:.harness-pi/sessions/<id>.jsonl（相对 cwd）。 */
@@ -211,6 +212,7 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
     disabledTools: args.disabledTools,
   };
   if (args.noProjectInstructions) createOptions.noProjectInstructions = true;
+  if (args.trimHistory) createOptions.trimHistory = args.trimHistory;
   if (runtime.llmOptions !== undefined) {
     createOptions.llmOptions = runtime.llmOptions;
   }
@@ -367,6 +369,17 @@ export function parseArgs(argv: string[]): CliArgs {
     }
     if (arg === "--read-only") {
       out.readOnly = true;
+      continue;
+    }
+    if (arg === "--trim-history") {
+      const raw = requireValue(argv, ++i, "--trim-history");
+      const n = Number(raw);
+      if (!Number.isInteger(n) || n < 0) {
+        throw new Error(
+          `--trim-history expects a non-negative integer (keepRecent), got "${raw}"`,
+        );
+      }
+      out.trimHistory = { keepRecent: n };
       continue;
     }
     if (arg === "--tui") {
@@ -564,6 +577,10 @@ Options:
   --repl                   Plain readline REPL instead of the TUI.
   --cwd <path>             Workspace directory. Defaults to the current directory.
   --read-only              Restrict tools to read/grep/find/ls (no edits, no bash).
+  --trim-history <N>       Opt in to history trimming (keep N recent tool results; older ones
+                           become placeholders). OFF by default — trimming breaks the prompt
+                           cache and is usually a net loss on caching providers. Use only on
+                           non-caching providers or very long sessions.
   --resume <id>            Resume a saved TUI session (.harness-pi/sessions/<id>.jsonl).
   --yolo                   (TUI) skip tool-approval prompts — allow bash/write/edit unattended.
   --compact                (TUI) auto-summarize early messages when the conversation grows long.

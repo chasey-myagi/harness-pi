@@ -49,6 +49,21 @@ describe("parseArgs — v0.1.0 flags", () => {
     expect(parseArgs(["--no-log"]).noLog).toBe(true);
   });
 
+  it("trimHistory is opt-in: undefined by default (no trimming, preserves prompt cache)", () => {
+    expect(parseArgs([]).trimHistory).toBeUndefined();
+  });
+
+  it("--trim-history <N> opts in with keepRecent", () => {
+    expect(parseArgs(["--trim-history", "8"]).trimHistory).toEqual({ keepRecent: 8 });
+    expect(parseArgs(["--trim-history", "0"]).trimHistory).toEqual({ keepRecent: 0 });
+  });
+
+  it("--trim-history rejects non-integer / negative values", () => {
+    expect(() => parseArgs(["--trim-history", "abc"])).toThrow(/non-negative integer/);
+    expect(() => parseArgs(["--trim-history", "-1"])).toThrow(/non-negative integer/);
+    expect(() => parseArgs(["--trim-history"])).toThrow(/requires a value/);
+  });
+
   it("--log-args parses redacted | full | none", () => {
     expect(parseArgs(["--log-args", "redacted"]).logArgs).toBe("redacted");
     expect(parseArgs(["--log-args", "full"]).logArgs).toBe("full");

@@ -242,6 +242,42 @@ describe("coding-agent dogfood app", () => {
     fake.teardown();
   });
 
+  // #106: trimHistory 默认关（opt-in）——每轮改写旧 toolResult 会破坏 prompt-cache 前缀、在缓存
+  // provider 上净亏。下面两条钉死「默认不裁」与「显式开了才裁」。
+  const threeBashThenDone = () =>
+    createFakeModel([
+      { content: [{ type: "toolCall", name: "bash", arguments: { command: "echo MARKER_0" } }] },
+      { content: [{ type: "toolCall", name: "bash", arguments: { command: "echo MARKER_1" } }] },
+      { content: [{ type: "toolCall", name: "bash", arguments: { command: "echo MARKER_2" } }] },
+      { content: [{ type: "text", text: "done" }] },
+    ]);
+
+  it("does NOT trim tool-result history by default (preserves prompt-cache prefix, #106)", async () => {
+    const cwd = await tempRepo();
+    const fake = threeBashThenDone();
+    const agent = createCodingAgent({ cwd, model: fake, log: false });
+    await runAgentPrompt(agent, "run three echo commands");
+    const lastMsgs = JSON.stringify(fake.getCalls().at(-1)?.messages);
+    expect(lastMsgs).toContain("MARKER_0"); // 最旧的 toolResult 仍完整
+    expect(lastMsgs).toContain("MARKER_2");
+    expect(lastMsgs).not.toContain("trimmed tool result"); // 没有任何裁剪占位符
+    await agent.close();
+    fake.teardown();
+  });
+
+  it("trims older tool results only when trimHistory is opted in", async () => {
+    const cwd = await tempRepo();
+    const fake = threeBashThenDone();
+    const agent = createCodingAgent({ cwd, model: fake, log: false, trimHistory: { keepRecent: 1 } });
+    await runAgentPrompt(agent, "run three echo commands");
+    const lastMsgs = JSON.stringify(fake.getCalls().at(-1)?.messages);
+    // 3 个 toolResult，keepRecent:1 → 最旧的 2 个 toolResult 内容被换成占位符（最近 1 条保留）。
+    // 注：占位符只替换 toolResult 内容；assistant 的 toolCall 参数(echo MARKER_N)不动，故不按 MARKER 断言。
+    expect((lastMsgs?.match(/trimmed tool result/g) ?? []).length).toBe(2);
+    await agent.close();
+    fake.teardown();
+  });
+
   it("createGoalSession stops naturally when the final GOAL_STATUS is REACHED", async () => {
     const cwd = await tempRepo();
     const goal: GoalOptions = { goal: "make tests pass", maxTurns: 3 };
