@@ -38,9 +38,9 @@ export function parseGoalCommand(rest: string): GoalOptions | null {
   let budgetTokens: number | undefined = undefined;
   let successHint: string | undefined = undefined;
 
-  // --max-turns <N>；非法值忽略并清掉 flag，避免污染 goal 文本。
-  text = text.replace(/--max-turns(?:\s+([+-]?\d+)|\s+(?!-)\S+)?/i, (_, n: string | undefined) => {
-    if (n !== undefined) maxTurns = Math.max(1, parseInt(n, 10));
+  // --max-turns <N>；非法值忽略并清掉完整 token，避免污染 goal 文本（如 3.5 残留 .5）。
+  text = text.replace(/--max-turns(?:\s+((?!--)\S+))?/i, (_, n: string | undefined) => {
+    if (n !== undefined && /^[+-]?\d+$/.test(n)) maxTurns = Math.max(1, parseInt(n, 10));
     return "";
   });
 
@@ -126,25 +126,38 @@ export interface GoalTextMessage {
       }>;
 }
 
+function finalGoalStatusBlock(text: string): { block: string; hasDelimiter: boolean } {
+  const parts = text.split(/^---\s*$/m);
+  if (parts.length <= 1) return { block: text, hasDelimiter: false };
+  return { block: parts.at(-1) ?? "", hasDelimiter: true };
+}
+
+function verdictFromValue(value: string): GoalVerdict {
+  const normalized = value.trim().toLowerCase();
+  if (normalized === "reached") return "reached";
+  if (normalized === "not_reached") return "not_reached";
+  if (normalized === "blocked") return "blocked";
+  return "unknown";
+}
+
 /**
  * 从 session 最终文本中提取 GOAL_STATUS 标记。
- * 查找文本中最后一个 `GOAL_STATUS:` 行（容许前后空白）。
+ * 有 `---` 分隔块时，只读取最后一个分隔块里的首个状态行，避免模型尾部回显选项说明误判。
  */
 export function parseGoalVerdict(text: string): GoalVerdict {
-  const match = text.match(/GOAL_STATUS:\s*(\S+)/gi);
-  if (!match || match.length === 0) return "unknown";
-  // 取最后一个匹配（模型可能在思考中也写了，取最终结论）
-  const last = match[match.length - 1]!;
-  const value = last.replace(/GOAL_STATUS:\s*/i, "").trim().toLowerCase();
-  if (value === "reached") return "reached";
-  if (value === "not_reached") return "not_reached";
-  if (value === "blocked") return "blocked";
-  return "unknown";
+  const { block, hasDelimiter } = finalGoalStatusBlock(text);
+  const matches = [...block.matchAll(/GOAL_STATUS:\s*(\S+)/gi)];
+  if (matches.length === 0) return "unknown";
+  const selected = hasDelimiter ? matches[0] : matches.at(-1);
+  const value = selected?.[1];
+  if (!value) return "unknown";
+  return verdictFromValue(value);
 }
 
 /** 提取最后一个 GOAL_REASON 行，供续跑阻断消息和终态说明使用。 */
 export function parseGoalReason(text: string): string | undefined {
-  const matches = [...text.matchAll(/GOAL_REASON:\s*(.+)$/gim)];
+  const { block } = finalGoalStatusBlock(text);
+  const matches = [...block.matchAll(/GOAL_REASON:\s*(.+)$/gim)];
   const last = matches.at(-1)?.[1]?.trim();
   return last && last.length > 0 ? last : undefined;
 }
@@ -161,6 +174,7 @@ export function goalTextFromMessage(message: GoalTextMessage | undefined): strin
 /** turnEndGuard.check 的纯逻辑：模型想停时，未达标则回灌阻断消息并强制续跑。 */
 export function checkGoalContinuation(text: string): GoalContinuationCheck {
   const verdict = parseGoalVerdict(text);
+  // BLOCKED 允许自然停止；GOAL_REASON 会在最终 classify 阶段保留用于展示。
   if (verdict === "reached" || verdict === "blocked") return { ok: true };
   if (verdict === "not_reached") {
     const reason = parseGoalReason(text);
@@ -178,27 +192,48 @@ export function checkGoalContinuation(text: string): GoalContinuationCheck {
   };
 }
 
+export interface GoalOutcome {
+  verdict: GoalVerdict;
+  /** true 只表示调用方 AbortSignal 触发的用户中断。 */
+  aborted: boolean;
+  budgetExhausted: boolean;
+  /** hook / guard 自我中止时保留内核给出的真实原因。 */
+  abortReason?: string;
+  goalReason?: string;
+}
+
 /** 把 hook 驱动的 session 终态映射回 TUI 展示所需的最终状态。 */
 export function classifyGoalOutcome(
   summary: RunSummary | undefined,
   fallbackAssistantText = "",
-): {
-  verdict: GoalVerdict;
-  aborted: boolean;
-  budgetExhausted: boolean;
-} {
+  userAborted = false,
+): GoalOutcome {
   const text = fallbackAssistantText || goalTextFromMessage(summary?.lastMessage);
   const verdict = parseGoalVerdict(text);
-  const abortReason = summary?.abortReason ?? "";
+  const goalReason = parseGoalReason(text);
+  const rawAbortReason = summary?.abortReason?.trim();
+  const runAborted = summary?.reason === "aborted" || userAborted;
+  const success = verdict === "reached";
+  const aborted = runAborted && userAborted && !success;
+  const guardAborted = runAborted && !userAborted && !success;
   const budgetExhausted =
-    verdict !== "reached" &&
-    summary?.reason === "aborted" &&
-    /token budget exhausted/i.test(abortReason);
-  const aborted =
-    summary?.reason === "aborted" &&
-    verdict !== "reached" &&
-    !budgetExhausted;
-  return { verdict, aborted, budgetExhausted };
+    guardAborted && rawAbortReason !== undefined && /token budget exhausted/i.test(rawAbortReason);
+
+  const outcome: GoalOutcome = { verdict, aborted, budgetExhausted };
+  if (guardAborted && rawAbortReason) outcome.abortReason = rawAbortReason;
+  if (goalReason) outcome.goalReason = goalReason;
+  return outcome;
+}
+
+/** 格式化 /goal 开始横幅；使用内核 turn 口径，与逐 turn banner 保持一致。 */
+export function formatGoalStartBanner(opts: GoalOptions): string {
+  const kernelTurns = goalKernelMaxTurns(opts);
+  const goalRounds = Math.max(1, opts.maxTurns);
+  const roundWord = goalRounds === 1 ? "round" : "rounds";
+  const budgetPart = opts.budgetTokens
+    ? ` · budget ${opts.budgetTokens.toLocaleString()} tokens`
+    : "";
+  return `⟳ /goal start · max ${kernelTurns} kernel turns (${goalRounds} goal ${roundWord})${budgetPart}`;
 }
 
 /** 格式化每轮开始时 TUI 显示的进度行。 */
@@ -208,7 +243,7 @@ export function formatGoalRoundBanner(opts: {
   budgetTokens?: number;
   usedTokens?: number;
 }): string {
-  const roundPart = `第 ${opts.round} 轮 / ${opts.maxTurns}`;
+  const roundPart = `kernel turn ${opts.round} / ${opts.maxTurns}`;
   if (opts.budgetTokens && opts.usedTokens !== undefined) {
     const pct = Math.round((opts.usedTokens / opts.budgetTokens) * 100);
     return `⟳ /goal ${roundPart}  ·  预算 ${opts.usedTokens.toLocaleString()} / ${opts.budgetTokens.toLocaleString()} (${pct}%)`;
@@ -225,10 +260,21 @@ export function formatGoalFinalStatus(
   rounds: number,
   aborted = false,
   budgetExhausted = false,
+  abortReason?: string,
+  goalReason?: string,
 ): string {
   if (aborted) return `⊘ /goal interrupted after round ${rounds}`;
-  if (budgetExhausted) return `⊘ /goal budget exhausted after round ${rounds} (not_reached)`;
+  if (budgetExhausted) {
+    return `⊘ /goal stopped after round ${rounds}: ${abortReason ?? "token budget exhausted"} (${verdict})`;
+  }
+  if (abortReason) return `⊘ /goal stopped after round ${rounds}: ${abortReason} (${verdict})`;
   if (verdict === "reached") return `✓ /goal 目标达成（第 ${rounds} 轮完成）`;
-  if (verdict === "blocked") return `✗ /goal blocked after round ${rounds}`;
-  return `✗ /goal 未达成（${rounds} 轮耗尽）`;
+  if (verdict === "blocked") {
+    return goalReason
+      ? `✗ /goal blocked after round ${rounds}: ${goalReason}`
+      : `✗ /goal blocked after round ${rounds}`;
+  }
+  return goalReason
+    ? `✗ /goal 未达成（${rounds} 轮耗尽）: ${goalReason}`
+    : `✗ /goal 未达成（${rounds} 轮耗尽）`;
 }
