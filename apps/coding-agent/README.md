@@ -68,7 +68,7 @@ Running `hpi` in a terminal launches the TUI (`--tui` to force it; `--repl` for 
 - **Stream** — the assistant's answer types out live; thinking shows above the answer.
 - **Tool approval** — `bash`/`edit`/`write` show an Allow-once / Deny prompt. Read tools (`read`/`grep`/`find`/`ls`) run without asking. `--yolo` skips all prompts.
 - **Steering** — type while a run is in flight to inject a message into the next turn.
-- **Esc** — cancel the in-flight run (or a `/multi` batch). **Ctrl-C** (or **Ctrl-D** on empty input, or **/exit**) quits.
+- **Esc** — cancel the in-flight run (or a `/multi` / `/goal` loop). **Ctrl-C** (or **Ctrl-D** on empty input, or **/exit**) quits.
 - **Status bar** — model · session tokens · context-usage gauge · cost · tool stats.
 
 Works in any modern terminal (iTerm2, WezTerm, Kitty, Ghostty, VS Code, Windows Terminal) — no special setup.
@@ -78,6 +78,7 @@ Works in any modern terminal (iTerm2, WezTerm, Kitty, Ghostty, VS Code, Windows 
 | Command | What it does |
 |---|---|
 | `/compact` | Turn on compaction for this session — summarize earlier messages for the model (full history is kept). |
+| `/goal <goal> [--max-turns N] [--budget N] [--success <criteria>]` | Run a hook-composed goal loop: `turnEndGuard` keeps going while `GOAL_STATUS` is not reached, `progressVerifier` stops on reached/stall, and `tokenBudget` enforces the token cap. Rounds and budget remaining are shown per turn. Esc interrupts. |
 | `/multi <question> @file @file …` | Analyze several files **in parallel** with read-only sub-agents (cannot edit), then aggregate the findings. |
 | `/help` | List commands. |
 | `/exit` | Quit the TUI. |

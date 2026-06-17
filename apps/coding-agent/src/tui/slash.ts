@@ -7,6 +7,7 @@ export type SlashCommand =
   | { kind: "compact" }
   | { kind: "help" }
   | { kind: "multi"; rest: string }
+  | { kind: "goal"; rest: string }
   | { kind: "exit" }
   | { kind: "unknown"; name: string };
 
@@ -23,6 +24,8 @@ export function parseSlashCommand(text: string): SlashCommand | null {
     case "multi":
       // 余下的整串（指令 + @文件）交给 parseMultiCommand 进一步解析。
       return { kind: "multi", rest: trimmed.slice(1 + name.length).trim() };
+    case "goal":
+      return { kind: "goal", rest: trimmed.slice(1 + name.length).trim() };
     case "exit":
     case "quit":
       return { kind: "exit" };
@@ -41,6 +44,12 @@ export const SLASH_COMMANDS: ReadonlyArray<{
   argumentHint?: string;
 }> = [
   { name: "compact", description: "turn on compaction for this session (summarize earlier messages; history kept)" },
+  {
+    name: "goal",
+    description:
+      "run a hook-composed goal loop (turnEndGuard + progressVerifier + tokenBudget)",
+    argumentHint: "<goal> [--max-turns N] [--budget N] [--success <criteria>]",
+  },
   {
     name: "multi",
     description: "analyze several @files in parallel — read-only sub-agents, cannot edit",
