@@ -307,9 +307,9 @@ describe("[GREEN] autoCompaction: boundary 后 prefix 稳定（切片1 回归门
     fake.teardown();
   });
 
-  it("autoCompaction + store: resume() 重建的首条消息与 live 投影 messages[0] 深度相等（两套合一）", async () => {
+  it("autoCompaction 纯 view-only（Method A）：不向 store 写 compaction_boundary", async () => {
     const store = new MemorySessionStore();
-    const sessionId = "boundary-resume-parity";
+    const sessionId = "no-boundary-in-store";
 
     const fake = createFakeModel([
       { content: [{ type: "toolCall" as const, name: "echo", arguments: { msg: "1" } }], stopReason: "toolUse" as const },
@@ -328,31 +328,51 @@ describe("[GREEN] autoCompaction: boundary 后 prefix 稳定（切片1 回归门
         keepRecent: 2,
         resummarizeEvery: 100,
         tokenCounter: { estimate: () => 999 },
-        summarize: async () => "boundary-summary-text",
+        summarize: async () => "should-not-be-in-store",
       })],
     });
     await session.run("go");
 
-    // live session 最后几次 LLM call 的 messages[0] = summaryMsg
-    const allCalls = fake.getCalls();
-    const liveFirstMsg = allCalls.at(-1)!.messages[0];
-    expect(liveFirstMsg).toBeDefined();
-
-    // resume from store
-    const fake2 = createFakeModel([]); // 不再需要新的 LLM call
-    const resumed = await AgentSession.resume(store, sessionId, {
-      model: fake2,
-      tools: [echoTool],
-    });
-
-    // resume 重建的 messages[0] 应与 live 投影 messages[0] 深度相等
-    expect(resumed.messages[0]).toEqual(liveFirstMsg);
-    // 且内容含 boundary-summary-text
-    const content = resumed.messages[0]?.content;
-    const text = typeof content === "string" ? content : JSON.stringify(content);
-    expect(text).toContain("boundary-summary-text");
+    // autoCompaction 是纯 view-only：不落 compaction_boundary store 条目。
+    const path = await store.getPathToLeaf(sessionId);
+    const hasBoundary = path.some((e) => e.entry.kind === "compaction_boundary");
+    expect(hasBoundary).toBe(false);
 
     fake.teardown();
-    fake2.teardown();
+  });
+
+  it("resummarizeEvery 在多 boundary 后仍精准触发（B2：_messages 坐标一致性）", async () => {
+    let summarizeCalls = 0;
+
+    const fake = createFakeModel([
+      { content: [{ type: "toolCall" as const, name: "echo", arguments: { msg: "1" } }], stopReason: "toolUse" as const },
+      { content: [{ type: "toolCall" as const, name: "echo", arguments: { msg: "2" } }], stopReason: "toolUse" as const },
+      { content: [{ type: "toolCall" as const, name: "echo", arguments: { msg: "3" } }], stopReason: "toolUse" as const },
+      { content: [{ type: "toolCall" as const, name: "echo", arguments: { msg: "4" } }], stopReason: "toolUse" as const },
+      { content: [{ type: "text" as const, text: "done" }], stopReason: "stop" as const },
+    ]);
+
+    const session = new AgentSession({
+      model: fake,
+      tools: [echoTool],
+      hooks: [autoCompaction({
+        maxContextTokens: 1,
+        triggerRatio: 1,
+        keepRecent: 2,
+        resummarizeEvery: 2,
+        tokenCounter: { estimate: () => 999 },
+        summarize: async () => { summarizeCalls++; return `S${summarizeCalls}`; },
+      })],
+    });
+    await session.run("go");
+
+    // _messages 坐标：每新增 2 条 raw message 触发一次重算。
+    // 5 次 LLM call，_messages 增长：1→3→5→7→9；transformMessagesBeforeLlm 在 call 前触发：
+    //   turn1(M=3): cache===null → 第1次; turn2(M=5): rawGrowth=2>=2 → 第2次;
+    //   turn3(M=7): rawGrowth=2>=2 → 第3次; turn4(M=9): rawGrowth=2>=2 → 第4次.
+    // view 坐标（B2 bug）：第3次延迟到 turn4(M=9) 才触发，结果只有3次。
+    expect(summarizeCalls).toBe(4);
+
+    fake.teardown();
   });
 });

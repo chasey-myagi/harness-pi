@@ -292,10 +292,9 @@ export function autoCompaction(opts: AutoCompactionOptions): Hook {
 
   // 闭包缓存：session 级（每 session 一个 hook 实例）。
   // summaryMsg 缓存 Message 对象本身（不只是文本），同一对象跨 turn 复用 → bytes 不变 → provider 缓存命中。
-  // coveredCount 保留投影视图项（与 resummarizeEvery 检查对齐）。
-  let cache: { coveredCount: number; summaryMsg: Message } | null = null;
-  // 上次写入 store 的 summaryMsg 引用；引用相同 → 本 turn 跳过 onAfterFlush 写入，防止重复落 boundary。
-  let lastStoredSummaryMsg: Message | null = null;
+  // coveredCount：投影视图坐标，仅供 messages.slice 切尾用。
+  // rawCoveredCount：_messages 坐标，用于跨 boundary 正确计算 resummarizeEvery 增量。
+  let cache: { coveredCount: number; summaryMsg: Message; rawCoveredCount: number } | null = null;
 
   return {
     name: "autoCompaction",
@@ -333,13 +332,23 @@ export function autoCompaction(opts: AutoCompactionOptions): Hook {
 
       const targetCover = messages.length - keepRecent; // 想把前 targetCover 条总结掉
 
-      if (cache === null || targetCover - cache.coveredCount >= resummarizeEvery) {
+      // resummarizeEvery 判据双坐标：
+      //   ctx.messages.length > 0（真实会话）→ _messages 坐标，跨 boundary 后增量仍正确；
+      //   ctx.messages.length === 0（直接测试场景）→ 降级回投影视图坐标，向后兼容。
+      const rawCoveredCount_new = Math.max(0, ctx.messages.length - keepRecent);
+      const needsResummarize =
+        cache === null ||
+        (ctx.messages.length > 0
+          ? rawCoveredCount_new - cache.rawCoveredCount >= resummarizeEvery
+          : targetCover - cache.coveredCount >= resummarizeEvery);
+
+      if (needsResummarize) {
         // summarize 抛错让其冒泡：内核 pipe 对 transform 是 fail-open（记一笔后退化为不压缩）。
         // 赋值在 await 之后，抛错时 cache 不被脏写。
         const text = await opts.summarize(messages.slice(0, targetCover), ctx);
         // 缓存 Message 对象（不只是文本）→ 同一对象跨 turn 复用 → timestamp 不变 → bytes 稳定 → 缓存命中。
         const summaryMsg = createUserMessage(wrap(text, targetCover));
-        cache = { coveredCount: targetCover, summaryMsg };
+        cache = { coveredCount: targetCover, summaryMsg, rawCoveredCount: rawCoveredCount_new };
         // 仅在**本 turn 真跑了一次新总结**时标记，供 postCompactFileReread 下一 turn 重读关键文件
         // （opt-in，缺该插件无副作用）。**不可**放在分支外：messages 是 append-only 原始 _messages，
         // 一旦越阈值就永久在阈值之上，分支外 set 会让每个越界 turn 都重置标记 → 重读每 turn 重复注入。
@@ -347,8 +356,7 @@ export function autoCompaction(opts: AutoCompactionOptions): Hook {
         // 把 boundary 写进 ctx.state → 内核在 turn 结束时读取并更新 _activeBoundary。
         // 下一 turn 的 _phaseLlmCall 投影 [summary, _messages[K..]] → 前缀 bytes 固定 → 缓存命中。
         // coveredCount 用 _messages 索引（ctx.messages = 内核 _messages），供内核切片。
-        const coveredCount_messages = Math.max(0, ctx.messages.length - keepRecent);
-        ctx.state.set(ACTIVE_BOUNDARY_KEY, { summary: cache.summaryMsg, coveredCount: coveredCount_messages });
+        ctx.state.set(ACTIVE_BOUNDARY_KEY, { summary: cache.summaryMsg, coveredCount: rawCoveredCount_new });
         return [cache.summaryMsg, ...messages.slice(cache.coveredCount)];
       }
 
@@ -364,17 +372,6 @@ export function autoCompaction(opts: AutoCompactionOptions): Hook {
       ctx.abort(
         `compaction: context overflow at turn ${input.turnIdx} (stopReason=${input.stopReason})`,
       );
-    },
-
-    onAfterFlush(_input, ctx) {
-      // collect-return seam（C1）：把当前 boundary 的 summary 交给内核落 store（compaction_boundary entry）。
-      // resume() 重建时会跳过 boundary 前的 messages、以 summary 接续 → 两套路径合一。
-      // lastStoredSummaryMsg 引用判等：同一对象 = 本 turn 无新 boundary，跳过写入防止重复落盘。
-      const boundary = ctx.state.get(ACTIVE_BOUNDARY_KEY);
-      if (boundary !== undefined && boundary.summary !== lastStoredSummaryMsg) {
-        lastStoredSummaryMsg = boundary.summary;
-        return { compactionBoundary: boundary.summary };
-      }
     },
   };
 }
