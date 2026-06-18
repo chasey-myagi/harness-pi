@@ -47,6 +47,8 @@ interface CliArgs {
   listModels?: string | undefined;
   version: boolean;
   help: boolean;
+  noProjectInstructions: boolean;
+  trimHistory?: { keepRecent: number } | undefined;
 }
 
 /** TUI 会话落盘文件路径:.harness-pi/sessions/<id>.jsonl（相对 cwd）。 */
@@ -63,6 +65,18 @@ export function emitStartupWarnings(
   write: (s: string) => void,
 ): void {
   if (agent.harnessPiWarning) write(`⚠️  ${agent.harnessPiWarning}\n`);
+}
+
+/**
+ * 启动期把项目指令加载来源打到 stderr，让用户知道读了哪个文件。
+ */
+export function emitProjectInstructionsNotice(
+  agent: Pick<CodingAgent, "projectInstructionsPath">,
+  write: (s: string) => void,
+): void {
+  if (agent.projectInstructionsPath) {
+    write(`[project instructions: ${agent.projectInstructionsPath}]\n`);
+  }
 }
 
 /**
@@ -197,6 +211,8 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
     readOnly: args.readOnly,
     disabledTools: args.disabledTools,
   };
+  if (args.noProjectInstructions) createOptions.noProjectInstructions = true;
+  if (args.trimHistory) createOptions.trimHistory = args.trimHistory;
   if (runtime.llmOptions !== undefined) {
     createOptions.llmOptions = runtime.llmOptions;
   }
@@ -249,6 +265,7 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
   // 不渲染 run report 也能看到）。读 agent 的**结构化标志** harnessPiWarning（agent 已算好「是否落盘」
   // 门控），不按文案字符串匹配 warnings 数组。one-shot 的 run report 也会再列一次，刻意冗余。
   emitStartupWarnings(agent, (s) => process.stderr.write(s));
+  emitProjectInstructionsNotice(agent, (s) => process.stderr.write(s));
 
   try {
     if (!args.readOnly) {
@@ -307,6 +324,7 @@ export function parseArgs(argv: string[]): CliArgs {
     listProviders: false,
     version: false,
     help: false,
+    noProjectInstructions: false,
   };
   const task: string[] = [];
 
@@ -353,6 +371,17 @@ export function parseArgs(argv: string[]): CliArgs {
       out.readOnly = true;
       continue;
     }
+    if (arg === "--trim-history") {
+      const raw = requireValue(argv, ++i, "--trim-history");
+      const n = Number(raw);
+      if (!Number.isInteger(n) || n < 0) {
+        throw new Error(
+          `--trim-history expects a non-negative integer (keepRecent), got "${raw}"`,
+        );
+      }
+      out.trimHistory = { keepRecent: n };
+      continue;
+    }
     if (arg === "--tui") {
       out.tui = true;
       continue;
@@ -389,6 +418,10 @@ export function parseArgs(argv: string[]): CliArgs {
     }
     if (arg === "--metrics-file") {
       out.metricsFile = requireValue(argv, ++i, "--metrics-file");
+      continue;
+    }
+    if (arg === "--no-project-instructions") {
+      out.noProjectInstructions = true;
       continue;
     }
     if (arg?.startsWith("--")) {
@@ -544,6 +577,10 @@ Options:
   --repl                   Plain readline REPL instead of the TUI.
   --cwd <path>             Workspace directory. Defaults to the current directory.
   --read-only              Restrict tools to read/grep/find/ls (no edits, no bash).
+  --trim-history <N>       Opt in to history trimming (keep N recent tool results; older ones
+                           become placeholders). OFF by default — trimming breaks the prompt
+                           cache and is usually a net loss on caching providers. Use only on
+                           non-caching providers or very long sessions.
   --resume <id>            Resume a saved TUI session (.harness-pi/sessions/<id>.jsonl).
   --yolo                   (TUI) skip tool-approval prompts — allow bash/write/edit unattended.
   --compact                (TUI) auto-summarize early messages when the conversation grows long.
@@ -553,6 +590,7 @@ Options:
   --no-log                 Disable the session log entirely.
   --log-args <mode>        Tool-arg logging: redacted (default) | full | none.
   --metrics-file <path>    Write run metrics as NDJSON.
+  --no-project-instructions  Skip auto-loading CLAUDE.md / AGENTS.md into the system prompt.
   --list-providers         List supported providers and their API-key env vars.
   --list-models <provider> List model ids for a provider.
   --version                Print the version.

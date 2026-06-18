@@ -10,3 +10,4 @@ dist/
 
 # 研究产物(放 ~/Dev/coding/reports 或本地;不入源码库,避免 git add -A 误扫)
 reports/
+.firecrawl/

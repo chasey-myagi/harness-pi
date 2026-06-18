@@ -5,6 +5,7 @@ import {
   type HarnessTool,
   type Hook,
   type LlmOptions,
+  type Message,
   type Model,
   type RunSummary,
   type SessionEvent,
@@ -22,7 +23,9 @@ import {
   repeatedCallGuard,
   sessionLog,
   toolStats,
+  tokenBudget,
   trimHistory,
+  turnEndGuard,
   type CompactSummarizeOptions,
   type CostStats,
   type CostTrackerOptions,
@@ -33,6 +36,7 @@ import {
 import { createModelSummarizer } from "./compaction.js";
 import { redactCodingToolArgs } from "./log-redaction.js";
 import { harnessPiGitignoreWarning } from "./workspace-safety.js";
+import { loadProjectInstructions } from "./project-instructions.js";
 import { defaultPermissionRules } from "./tui/permissions.js";
 import {
   createAllTools,
@@ -54,6 +58,13 @@ import {
   resolveDashScopeModel,
   type DashScopeCostEstimate,
 } from "./providers/dashscope.js";
+import {
+  checkGoalContinuation,
+  clampGoalMaxTurns,
+  goalKernelMaxTurns,
+  goalTextFromMessage,
+  type GoalOptions,
+} from "./tui/goal.js";
 
 export interface CreateCodingAgentOptions {
   cwd: string;
@@ -103,6 +114,18 @@ export interface CreateCodingAgentOptions {
    * `requestCompaction()`（TUI 的 `/compact`）临时降阈强制压缩。one-shot 模式不传本项即完全不挂。
    */
   compaction?: { maxMessages?: number; keepRecent?: number };
+  /**
+   * 启用 trimHistory（把 N 条之前的 toolResult 内容换成短占位符喂给 LLM）。
+   * **默认不挂（opt-in）**：trimHistory 每轮改写靠前的旧历史，会破坏 prompt-cache 前缀——在会缓存的
+   * provider（DeepSeek / Anthropic / …）上实测**净亏**（cache 命中 93%→74%、cost 反而更高，见 #106）。
+   * 上下文溢出本就由 `autoCompaction`/`compactSummarize` 兜底。仅在**非缓存 provider / 极长会话 /
+   * 上下文窗口紧**时显式开。
+   */
+  trimHistory?: { keepRecent: number };
+  /**
+   * true ⇒ 跳过项目指令（CLAUDE.md / AGENTS.md）自动加载。默认 false（自动向上查找并注入）。
+   */
+  noProjectInstructions?: boolean;
 }
 
 export interface CodingAgent {
@@ -118,6 +141,8 @@ export interface CodingAgent {
    * `warnings` 数组（那是脆弱的隐式契约）。同一条文案也会进 `warnings`（供 run report 呈现）。
    */
   harnessPiWarning?: string | undefined;
+  /** 自动加载的项目指令文件路径；未加载时为 undefined。 */
+  projectInstructionsPath?: string | undefined;
   readOnly: boolean;
   logPath: string;
   metricsPath?: string | undefined;
@@ -134,6 +159,8 @@ export interface CodingAgent {
   getCompactionState(): { enabled: boolean; maxMessages: number; keepRecent: number } | undefined;
   /** 注册"压缩发生"回调（每次实际跑 summarize 时以被压缩的早期消息条数调用）；用于 TUI 反馈。 */
   setCompactionListener(listener: (coveredCount: number) => void): void;
+  /** 为 /goal 创建一次性专用 session：不污染主交互 session，hook 组合负责续跑与预算。 */
+  createGoalSession(goal: GoalOptions): AgentSession;
 }
 
 export interface RunAgentPromptOptions {
@@ -351,7 +378,8 @@ function buildAgentContext(opts: CreateCodingAgentOptions): AgentContext {
     // compactSummarize 须排在 trimHistory 前：先把早期消息总结成 summary，再让 trimHistory 裁中段
     // toolResult（docs/09 §3.6「先 summarize 早期、再 trim 中段」的组合顺序）。未启用 compaction 时不挂。
     ...(compactionOpts ? [compactSummarize(compactionOpts)] : []),
-    trimHistory({ keepRecent: 12 }),
+    // trimHistory 默认不挂（opt-in）：每轮改写旧历史会破坏 prompt-cache 前缀、在缓存 provider 上净亏（#106）。
+    ...(opts.trimHistory ? [trimHistory({ keepRecent: opts.trimHistory.keepRecent })] : []),
     emptyRunGuard({ maxEmptyTurns: 3 }),
     repeatedCallGuard({
       threshold: 4,
@@ -383,11 +411,18 @@ function buildAgentContext(opts: CreateCodingAgentOptions): AgentContext {
       : []),
   ];
 
+  const projectInstructions =
+    !opts.noProjectInstructions ? loadProjectInstructions(cwd) : null;
+  const baseSystemPrompt = opts.systemPrompt ?? DEFAULT_SYSTEM_PROMPT;
+  const systemPrompt = projectInstructions
+    ? `${baseSystemPrompt}\n\n${projectInstructions.content}`
+    : baseSystemPrompt;
+
   const deps: AgentContext["deps"] = {
     model: opts.model,
     tools,
     hooks,
-    systemPrompt: opts.systemPrompt ?? DEFAULT_SYSTEM_PROMPT,
+    systemPrompt,
   };
   if (opts.maxTurns !== undefined) deps.maxTurns = opts.maxTurns;
   if (opts.llmOptions !== undefined) deps.llmOptions = opts.llmOptions;
@@ -406,6 +441,7 @@ function buildAgentContext(opts: CreateCodingAgentOptions): AgentContext {
         costKnown,
         warnings,
         harnessPiWarning,
+        projectInstructionsPath: projectInstructions?.sourcePath,
         readOnly,
         logPath: join(logDir, `${session.id}.ndjson`),
         metricsPath: opts.metricsFile,
@@ -448,9 +484,37 @@ function buildAgentContext(opts: CreateCodingAgentOptions): AgentContext {
         setCompactionListener(listener) {
           compactionListener = listener;
         },
+        createGoalSession(goal) {
+          const goalMaxTurns = clampGoalMaxTurns(goal.maxTurns);
+          const kernelMaxTurns = goalKernelMaxTurns({ ...goal, maxTurns: goalMaxTurns });
+          // /goal 的循环由 turnEndGuard 在 would-be-done 时续跑：
+          // onContinuationCheck 只会在内核准备自然停止后触发，不会限制中间 tool-call turns。
+          // 因此 maxRetries/maxContinuations 约束续跑次数，内核 maxTurns 单独约束工具调用轮数。
+          const goalHooks: Hook[] = [
+            turnEndGuard({
+              check: (ctx) => checkGoalContinuation(latestAssistantText(ctx.messages)),
+              maxRetries: goalMaxTurns,
+            }),
+            tokenBudget({ budget: goal.budgetTokens ?? null }),
+          ];
+          return new AgentSession({
+            ...deps,
+            hooks: [...(deps.hooks ?? []), ...goalHooks],
+            maxTurns: kernelMaxTurns,
+            maxContinuations: goalMaxTurns,
+          });
+        },
       };
     },
   };
+}
+
+function latestAssistantText(messages: ReadonlyArray<Message>): string {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const message = messages[i];
+    if (message?.role === "assistant") return goalTextFromMessage(message);
+  }
+  return "";
 }
 
 /**

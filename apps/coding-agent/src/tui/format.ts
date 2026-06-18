@@ -86,6 +86,111 @@ export function formatStatusBar(p: {
   return seg.join(color.dim(" · "));
 }
 
+/**
+ * 审批预览：根据工具类型生成给用户看的 diff / 内容预览。
+ * edit → unified diff（着色 + 截断），write → 路径 + 内容预览，bash → 完整命令。
+ */
+export function formatApprovalPreview(call: Pick<ToolCall, "name" | "arguments">): string {
+  const args = call.arguments ?? {};
+  switch (call.name) {
+    case "edit":
+      return formatEditPreview(String(args.path ?? ""), String(args.oldText ?? ""), String(args.newText ?? ""));
+    case "write":
+      return formatWritePreview(String(args.path ?? ""), String(args.content ?? ""));
+    case "bash":
+      return formatBashPreview(String(args.command ?? ""));
+    default:
+      return "";
+  }
+}
+
+const PREVIEW_MAX_LINES = 20;
+const PREVIEW_MAX_CHARS = 3000;
+
+function formatEditPreview(path: string, oldText: string, newText: string): string {
+  const header = color.bold(`── ${path} ──`);
+  const diffLines = buildLineDiff(oldText, newText);
+  const truncated = truncateLines(diffLines, PREVIEW_MAX_LINES);
+  const body = truncated
+    .map((l) => {
+      if (l.startsWith("-")) return color.red(l);
+      if (l.startsWith("+")) return color.green(l);
+      return color.dim(l);
+    })
+    .join("\n");
+  return `${header}\n${body}`;
+}
+
+function formatWritePreview(path: string, content: string): string {
+  const lines = content.split("\n");
+  const totalLines = lines.length;
+  const header = color.bold(`── ${path} ──`) + color.dim(` (${totalLines} lines)`);
+  const preview = lines.slice(0, PREVIEW_MAX_LINES);
+  let body = preview.join("\n");
+  if (body.length > PREVIEW_MAX_CHARS) body = body.slice(0, PREVIEW_MAX_CHARS);
+  if (totalLines > PREVIEW_MAX_LINES) body += `\n${color.dim(`… (+${totalLines - PREVIEW_MAX_LINES} more lines)`)}`;
+  return `${header}\n${color.dim(body)}`;
+}
+
+function formatBashPreview(command: string): string {
+  const header = color.bold("── bash ──");
+  const body = command.length > PREVIEW_MAX_CHARS
+    ? command.slice(0, PREVIEW_MAX_CHARS) + `… (+${command.length - PREVIEW_MAX_CHARS} chars)`
+    : command;
+  return `${header}\n${color.yellow(body)}`;
+}
+
+/** 简单行级 diff：共同前缀/后缀保留为上下文（dim " "），中间差异段用 -/+ 标记。 */
+export function buildLineDiff(oldText: string, newText: string): string[] {
+  const oldLines = oldText.length === 0 ? [] : oldText.split("\n");
+  const newLines = newText.length === 0 ? [] : newText.split("\n");
+
+  let prefixLen = 0;
+  while (prefixLen < oldLines.length && prefixLen < newLines.length && oldLines[prefixLen] === newLines[prefixLen]) {
+    prefixLen++;
+  }
+
+  let suffixLen = 0;
+  while (
+    suffixLen < oldLines.length - prefixLen &&
+    suffixLen < newLines.length - prefixLen &&
+    oldLines[oldLines.length - 1 - suffixLen] === newLines[newLines.length - 1 - suffixLen]
+  ) {
+    suffixLen++;
+  }
+
+  const contextBefore = Math.min(prefixLen, 3);
+  const contextAfter = Math.min(suffixLen, 3);
+
+  const result: string[] = [];
+
+  if (prefixLen > contextBefore) result.push(color.dim(`  … ${prefixLen - contextBefore} unchanged lines …`));
+
+  for (let i = prefixLen - contextBefore; i < prefixLen; i++) {
+    result.push(` ${oldLines[i]}`);
+  }
+
+  for (let i = prefixLen; i < oldLines.length - suffixLen; i++) {
+    result.push(`-${oldLines[i]}`);
+  }
+  for (let i = prefixLen; i < newLines.length - suffixLen; i++) {
+    result.push(`+${newLines[i]}`);
+  }
+
+  for (let i = newLines.length - suffixLen; i < newLines.length - suffixLen + contextAfter; i++) {
+    result.push(` ${newLines[i]}`);
+  }
+
+  if (suffixLen > contextAfter) result.push(color.dim(`  … ${suffixLen - contextAfter} unchanged lines …`));
+
+  return result;
+}
+
+function truncateLines(lines: string[], max: number): string[] {
+  if (lines.length <= max) return lines;
+  return [...lines.slice(0, max), color.dim(`… (+${lines.length - max} more lines)`)];
+}
+
 function indent(text: string, prefix = "  "): string {
   return text
     .split("\n")

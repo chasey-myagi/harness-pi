@@ -7,6 +7,8 @@ import {
   formatStatusBar,
   formatTokenCount,
   formatContextGauge,
+  formatApprovalPreview,
+  buildLineDiff,
 } from "../format.js";
 
 // 剥 ANSI 颜色，断言结构而非具体转义码。
@@ -111,5 +113,117 @@ describe("format helpers", () => {
   it("formatStatusBar omits the gauge when window is unknown or zero", () => {
     expect(strip(formatStatusBar({ model: "m", contextTokens: 50_000 }))).toBe("m");
     expect(strip(formatStatusBar({ model: "m", contextTokens: 50_000, contextWindow: 0 }))).toBe("m");
+  });
+});
+
+describe("buildLineDiff", () => {
+  it("shows removed and added lines for a simple replacement", () => {
+    const diff = buildLineDiff("foo", "bar");
+    const stripped = diff.map(strip);
+    expect(stripped).toContain("-foo");
+    expect(stripped).toContain("+bar");
+  });
+
+  it("preserves common prefix/suffix as context lines", () => {
+    const old = "a\nb\nc\nd";
+    const neu = "a\nb\nX\nd";
+    const diff = buildLineDiff(old, neu);
+    const stripped = diff.map(strip);
+    expect(stripped).toContain(" a");
+    expect(stripped).toContain(" b");
+    expect(stripped).toContain("-c");
+    expect(stripped).toContain("+X");
+    expect(stripped).toContain(" d");
+  });
+
+  it("shows ellipsis for long common prefix beyond 3 context lines", () => {
+    const prefix = Array.from({ length: 10 }, (_, i) => `line${i}`).join("\n");
+    const old = `${prefix}\nOLD`;
+    const neu = `${prefix}\nNEW`;
+    const diff = buildLineDiff(old, neu);
+    const stripped = diff.map(strip);
+    expect(stripped.some((l) => l.includes("unchanged lines"))).toBe(true);
+    expect(stripped).toContain("-OLD");
+    expect(stripped).toContain("+NEW");
+  });
+
+  it("handles new file (empty oldText)", () => {
+    const diff = buildLineDiff("", "hello\nworld");
+    const stripped = diff.map(strip);
+    expect(stripped).not.toContain("-");
+    expect(stripped).toContain("+hello");
+    expect(stripped).toContain("+world");
+  });
+
+  it("handles deletion (empty newText)", () => {
+    const diff = buildLineDiff("hello\nworld", "");
+    const stripped = diff.map(strip);
+    expect(stripped).toContain("-hello");
+    expect(stripped).toContain("-world");
+    expect(stripped).not.toContain("+");
+  });
+});
+
+describe("formatApprovalPreview", () => {
+  it("edit: shows path header and colored diff", () => {
+    const out = strip(
+      formatApprovalPreview({
+        name: "edit",
+        arguments: { path: "src/index.ts", oldText: "const a = 1;", newText: "const a = 2;" },
+      }),
+    );
+    expect(out).toContain("src/index.ts");
+    expect(out).toContain("-const a = 1;");
+    expect(out).toContain("+const a = 2;");
+  });
+
+  it("edit: truncates long diffs", () => {
+    const oldText = Array.from({ length: 50 }, (_, i) => `old-${i}`).join("\n");
+    const newText = Array.from({ length: 50 }, (_, i) => `new-${i}`).join("\n");
+    const out = formatApprovalPreview({
+      name: "edit",
+      arguments: { path: "big.ts", oldText, newText },
+    });
+    expect(strip(out)).toContain("more lines");
+  });
+
+  it("write: shows path, line count, and content preview", () => {
+    const content = Array.from({ length: 50 }, (_, i) => `line ${i}`).join("\n");
+    const out = strip(
+      formatApprovalPreview({ name: "write", arguments: { path: "out.ts", content } }),
+    );
+    expect(out).toContain("out.ts");
+    expect(out).toContain("50 lines");
+    expect(out).toContain("line 0");
+    expect(out).toContain("more lines");
+  });
+
+  it("write: short content shows fully without truncation hint", () => {
+    const out = strip(
+      formatApprovalPreview({ name: "write", arguments: { path: "a.ts", content: "hello" } }),
+    );
+    expect(out).toContain("a.ts");
+    expect(out).toContain("1 lines");
+    expect(out).toContain("hello");
+    expect(out).not.toContain("more lines");
+  });
+
+  it("bash: shows full command", () => {
+    const out = strip(
+      formatApprovalPreview({ name: "bash", arguments: { command: "rm -rf /tmp/junk" } }),
+    );
+    expect(out).toContain("bash");
+    expect(out).toContain("rm -rf /tmp/junk");
+  });
+
+  it("bash: shows multiline command fully", () => {
+    const cmd = "echo hello\necho world";
+    const out = strip(formatApprovalPreview({ name: "bash", arguments: { command: cmd } }));
+    expect(out).toContain("echo hello");
+    expect(out).toContain("echo world");
+  });
+
+  it("returns empty for unknown tools", () => {
+    expect(formatApprovalPreview({ name: "read", arguments: { path: "a" } })).toBe("");
   });
 });

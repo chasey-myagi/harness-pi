@@ -15,6 +15,7 @@ import {
 } from "../agent.js";
 import { parseArgs } from "../cli.js";
 import { renderRunReport } from "../output.js";
+import { buildGoalPrompt, classifyGoalOutcome, type GoalOptions } from "../tui/goal.js";
 import {
   estimateDashScopeCostCny,
   getDashScopeModelMetadata,
@@ -237,6 +238,188 @@ describe("coding-agent dogfood app", () => {
     expect(second.costStats?.inputTokens).toBe(30);
     expect(second.costStats?.outputTokens).toBe(12);
     expect(renderRunReport(second)).toContain("LLM Stats (session cumulative)");
+    await agent.close();
+    fake.teardown();
+  });
+
+  // #106: trimHistory 默认关（opt-in）——每轮改写旧 toolResult 会破坏 prompt-cache 前缀、在缓存
+  // provider 上净亏。下面两条钉死「默认不裁」与「显式开了才裁」。
+  const threeBashThenDone = () =>
+    createFakeModel([
+      { content: [{ type: "toolCall", name: "bash", arguments: { command: "echo MARKER_0" } }] },
+      { content: [{ type: "toolCall", name: "bash", arguments: { command: "echo MARKER_1" } }] },
+      { content: [{ type: "toolCall", name: "bash", arguments: { command: "echo MARKER_2" } }] },
+      { content: [{ type: "text", text: "done" }] },
+    ]);
+
+  it("does NOT trim tool-result history by default (preserves prompt-cache prefix, #106)", async () => {
+    const cwd = await tempRepo();
+    const fake = threeBashThenDone();
+    const agent = createCodingAgent({ cwd, model: fake, log: false });
+    await runAgentPrompt(agent, "run three echo commands");
+    const lastMsgs = JSON.stringify(fake.getCalls().at(-1)?.messages);
+    expect(lastMsgs).toContain("MARKER_0"); // 最旧的 toolResult 仍完整
+    expect(lastMsgs).toContain("MARKER_2");
+    expect(lastMsgs).not.toContain("trimmed tool result"); // 没有任何裁剪占位符
+    await agent.close();
+    fake.teardown();
+  });
+
+  it("trims older tool results only when trimHistory is opted in", async () => {
+    const cwd = await tempRepo();
+    const fake = threeBashThenDone();
+    const agent = createCodingAgent({ cwd, model: fake, log: false, trimHistory: { keepRecent: 1 } });
+    await runAgentPrompt(agent, "run three echo commands");
+    const lastMsgs = JSON.stringify(fake.getCalls().at(-1)?.messages);
+    // 3 个 toolResult，keepRecent:1 → 最旧的 2 个 toolResult 内容被换成占位符（最近 1 条保留）。
+    // 注：占位符只替换 toolResult 内容；assistant 的 toolCall 参数(echo MARKER_N)不动，故不按 MARKER 断言。
+    expect((lastMsgs?.match(/trimmed tool result/g) ?? []).length).toBe(2);
+    await agent.close();
+    fake.teardown();
+  });
+
+  it("createGoalSession stops naturally when the final GOAL_STATUS is REACHED", async () => {
+    const cwd = await tempRepo();
+    const goal: GoalOptions = { goal: "make tests pass", maxTurns: 3 };
+    const fake = createFakeModel([
+      {
+        content: [{ type: "text", text: "done\n---\nGOAL_STATUS: REACHED" }],
+        usage: { input: 10, output: 5 },
+      },
+    ]);
+    const agent = createCodingAgent({ cwd, model: fake, log: false });
+
+    const summary = await agent.createGoalSession(goal).run(buildGoalPrompt(goal));
+
+    expect(summary.reason).toBe("done");
+    expect(summary.abortReason).toBeUndefined();
+    expect(summary.turns).toBe(1);
+    await agent.close();
+    fake.teardown();
+  });
+
+  it("createGoalSession forces continuation via turnEndGuard until GOAL_STATUS reaches REACHED", async () => {
+    const cwd = await tempRepo();
+    const goal: GoalOptions = { goal: "finish issue", maxTurns: 3 };
+    const fake = createFakeModel([
+      {
+        content: [
+          {
+            type: "text",
+            text: "partial\n---\nGOAL_STATUS: NOT_REACHED\nGOAL_REASON: one test still fails",
+          },
+        ],
+      },
+      {
+        content: [{ type: "text", text: "fixed\n---\nGOAL_STATUS: REACHED" }],
+      },
+    ]);
+    const agent = createCodingAgent({ cwd, model: fake, log: false });
+
+    const summary = await agent.createGoalSession(goal).run(buildGoalPrompt(goal));
+
+    expect(summary.reason).toBe("done");
+    expect(summary.abortReason).toBeUndefined();
+    expect(summary.continuations).toBe(1);
+    expect(fake.getCalls()).toHaveLength(2);
+    expect(JSON.stringify(fake.getCalls()[1]?.messages)).toContain("Goal is not reached yet");
+    await agent.close();
+    fake.teardown();
+  });
+
+  it("createGoalSession allows multiple tool-call turns before the final GOAL_STATUS: REACHED", async () => {
+    const cwd = await tempRepo();
+    const goal: GoalOptions = { goal: "inspect repo and finish", maxTurns: 2 };
+    const fake = createFakeModel([
+      {
+        content: [{ type: "toolCall", name: "read", arguments: { path: "README.md" } }],
+      },
+      {
+        content: [{ type: "toolCall", name: "read", arguments: { path: "package.json" } }],
+      },
+      {
+        content: [{ type: "text", text: "inspected\n---\nGOAL_STATUS: REACHED" }],
+      },
+    ]);
+    const agent = createCodingAgent({ cwd, model: fake, log: false });
+
+    const summary = await agent.createGoalSession(goal).run(buildGoalPrompt(goal));
+
+    expect(summary.reason).toBe("done");
+    expect(summary.abortReason).toBeUndefined();
+    expect(summary.turns).toBe(3);
+    expect(fake.getCalls()).toHaveLength(3);
+    await agent.close();
+    fake.teardown();
+  });
+
+  it("createGoalSession stops through tokenBudget when usage exceeds budget", async () => {
+    const cwd = await tempRepo();
+    const goal: GoalOptions = { goal: "spend less", maxTurns: 3, budgetTokens: 100 };
+    const fake = createFakeModel([
+      {
+        content: [
+          {
+            type: "text",
+            text: "not done\n---\nGOAL_STATUS: NOT_REACHED\nGOAL_REASON: needs more work",
+          },
+        ],
+        usage: { input: 80, output: 30 },
+      },
+    ]);
+    const agent = createCodingAgent({ cwd, model: fake, log: false });
+
+    const summary = await agent.createGoalSession(goal).run(buildGoalPrompt(goal));
+
+    expect(summary.reason).toBe("aborted");
+    expect(summary.abortReason).toContain("token budget exhausted");
+    await agent.close();
+    fake.teardown();
+  });
+
+  it("createGoalSession caps an unproductive NOT_REACHED loop", async () => {
+    const cwd = await tempRepo();
+    const goal: GoalOptions = { goal: "finish safely", maxTurns: 3 };
+    const fake = createFakeModel(
+      Array.from({ length: 10 }, (_, i) => ({
+        content: [
+          {
+            type: "text" as const,
+            text: `still not done ${i}\n---\nGOAL_STATUS: NOT_REACHED\nGOAL_REASON: needs another pass`,
+          },
+        ],
+      })),
+    );
+    const agent = createCodingAgent({ cwd, model: fake, log: false });
+
+    const summary = await agent.createGoalSession(goal).run(buildGoalPrompt(goal));
+
+    expect(["aborted", "max_continuations"]).toContain(summary.reason);
+    expect(summary.continuations).toBeLessThanOrEqual(goal.maxTurns);
+    expect(fake.getCalls().length).toBeLessThanOrEqual(goal.maxTurns + 1);
+    expect(classifyGoalOutcome(summary)).toMatchObject({
+      verdict: "not_reached",
+      aborted: false,
+      budgetExhausted: false,
+    });
+    await agent.close();
+    fake.teardown();
+  });
+
+  it("createGoalSession clamps public maxTurns input before wiring guards", async () => {
+    const cwd = await tempRepo();
+    const goal: GoalOptions = { goal: "finish once", maxTurns: 0 };
+    const fake = createFakeModel([
+      {
+        content: [{ type: "text", text: "done\n---\nGOAL_STATUS: REACHED" }],
+      },
+    ]);
+    const agent = createCodingAgent({ cwd, model: fake, log: false });
+
+    const summary = await agent.createGoalSession(goal).run(buildGoalPrompt(goal));
+
+    expect(summary.reason).toBe("done");
+    expect(fake.getCalls()).toHaveLength(1);
     await agent.close();
     fake.teardown();
   });
