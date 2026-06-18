@@ -15,7 +15,12 @@ import {
 } from "../agent.js";
 import { parseArgs } from "../cli.js";
 import { renderRunReport } from "../output.js";
-import { buildGoalPrompt, classifyGoalOutcome, type GoalOptions } from "../tui/goal.js";
+import {
+  buildGoalPrompt,
+  clampGoalMaxTurns,
+  classifyGoalOutcome,
+  type GoalOptions,
+} from "../tui/goal.js";
 import {
   estimateDashScopeCostCny,
   getDashScopeModelMetadata,
@@ -377,7 +382,7 @@ describe("coding-agent dogfood app", () => {
     fake.teardown();
   });
 
-  it("createGoalSession caps an unproductive NOT_REACHED loop", async () => {
+  it("createGoalSession aborts a pure-text NOT_REACHED loop via empty-run-guard", async () => {
     const cwd = await tempRepo();
     const goal: GoalOptions = { goal: "finish safely", maxTurns: 3 };
     const fake = createFakeModel(
@@ -397,6 +402,47 @@ describe("coding-agent dogfood app", () => {
     expect(["aborted", "max_continuations"]).toContain(summary.reason);
     expect(summary.continuations).toBeLessThanOrEqual(goal.maxTurns);
     expect(fake.getCalls().length).toBeLessThanOrEqual(goal.maxTurns + 1);
+    expect(classifyGoalOutcome(summary)).toMatchObject({
+      verdict: "not_reached",
+      aborted: false,
+      budgetExhausted: false,
+    });
+    await agent.close();
+    fake.teardown();
+  });
+
+  it("createGoalSession caps a tool-using NOT_REACHED loop via maxContinuations", async () => {
+    const cwd = await tempRepo();
+    const goal: GoalOptions = { goal: "finish safely", maxTurns: 3 };
+    const fake = createFakeModel(
+      Array.from({ length: 10 }).flatMap((_, i) => [
+        {
+          content: [
+            {
+              type: "toolCall" as const,
+              name: "read",
+              arguments: { path: i % 2 === 0 ? "README.md" : "package.json" },
+            },
+          ],
+        },
+        {
+          content: [
+            {
+              type: "text" as const,
+              text: `still not done ${i}\n---\nGOAL_STATUS: NOT_REACHED\nGOAL_REASON: needs another pass`,
+            },
+          ],
+        },
+      ]),
+    );
+    const agent = createCodingAgent({ cwd, model: fake, log: false });
+
+    const summary = await agent.createGoalSession(goal).run(buildGoalPrompt(goal));
+
+    expect(summary.reason).toBe("max_continuations");
+    expect(summary.abortReason).toBeUndefined();
+    expect(summary.continuations).toBe(clampGoalMaxTurns(goal.maxTurns));
+    expect(fake.getCalls().length).toBe((clampGoalMaxTurns(goal.maxTurns) + 1) * 2);
     expect(classifyGoalOutcome(summary)).toMatchObject({
       verdict: "not_reached",
       aborted: false,

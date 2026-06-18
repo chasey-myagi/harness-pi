@@ -106,6 +106,15 @@ describe("parseGoalCommand", () => {
     });
   });
 
+  it("does not treat words prefixed with goal flags as options", () => {
+    expect(parseGoalCommand("compare --budgetary plans and --max-turnsish wording")).toEqual({
+      goal: "compare --budgetary plans and --max-turnsish wording",
+      maxTurns: 5,
+      budgetTokens: undefined,
+      successHint: undefined,
+    });
+  });
+
   it("stops unquoted --success at a stray -- marker", () => {
     expect(parseGoalCommand("ship release --success all tests pass -- keep note")).toEqual({
       goal: "ship release -- keep note",
