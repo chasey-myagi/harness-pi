@@ -86,7 +86,7 @@ pnpm -r publish --access public --no-git-checks                    # 拓扑序,w
 
 ## 成熟度定位(别误读 / 别在文档里夸大)
 
-当前 **0.3.1 = hardened spike preview**。区分三层(`README.md`「当前状态」):
+当前 **0.4.0 = hardened spike preview**。区分三层(`README.md`「当前状态」):
 1. **机制已实现** ✅(代码 + 本地/CI 测试覆盖)。
 2. **provider 已验证**(真 LLM 跑 smoke):streaming/error/budget-bound continuation 已验证(`scripts/d0-smoke.ts` A/B/D,`pnpm --filter @harness-pi/coding-agent run smoke:provider`);reactive overflow 在容忍型 provider 测不了,由 `context-overflow.test.ts` 覆盖(#82 已知限制)。
 3. **bidding-migration 已验证**(真 `bidding-agent` spike)——**未做**。
