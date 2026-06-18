@@ -174,6 +174,25 @@ export interface OnAfterFlushResult {
   compactionBoundary?: Message;
 }
 
+/**
+ * Live 境界状態（カーネルが `_activeBoundary` として保持）。
+ * autoCompaction が `transformMessagesBeforeLlm` 内で `ctx.state` にセット、
+ * カーネルが各 turn 後に読み取り、次 turn の `baseMessages` 投影に使う。
+ *
+ * **summary を同一オブジェクトとして使い回す**ことで、prefix bytes が安定し、
+ * provider の prompt-cache 命中率を最大化する（`createUserMessage` の timestamp が
+ * 毎 turn 変わる問題を解消）。
+ */
+export interface ActiveBoundary {
+  /** LLM に送る projected messages の先頭に置く summary message。同一オブジェクト再利用 = bytes 安定。 */
+  summary: Message;
+  /**
+   * `_messages` の先頭から何条を summary に要約済みか（`_messages` インデックス基準）。
+   * カーネルは `[summary, ..._messages.slice(coveredCount), ...pendingAttachments]` と投影する。
+   */
+  coveredCount: number;
+}
+
 export interface PreToolUseInput {
   call: ToolCall;
   tool: HarnessTool;
@@ -293,8 +312,10 @@ export interface MergedHookResult {
  *
  * 未注册的 key 走 fallback：`get/set` 接受 `string` 并退回 `unknown`，跟当前调用点行为一致。
  */
-// eslint-disable-next-line @typescript-eslint/no-empty-interface
-export interface HookStateRegistry {}
+export interface HookStateRegistry {
+  /** カーネルが管理する live 境界。autoCompaction が書き込み、カーネルが投影に使う。 */
+  "harness-pi.activeBoundary": ActiveBoundary;
+}
 
 type RegistryKey = keyof HookStateRegistry & string;
 

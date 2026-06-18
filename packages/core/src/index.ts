@@ -28,6 +28,8 @@ export type {
   HookLogger,
   LogLevel,
   SessionConfigView,
+  // ─── Live boundary（autoCompaction → カーネル連携）───
+  ActiveBoundary,
 } from "./hook.js";
 
 // ─────────── Dispatcher (advanced; plugin authors usually don't need) ───────────
@@ -67,7 +69,7 @@ export type {
 } from "./session-store.js";
 
 // ─────────── Kernel ───────────
-export { AgentSession, findToolByName } from "./session.js";
+export { AgentSession, findToolByName, ACTIVE_BOUNDARY_KEY } from "./session.js";
 export type {
   AgentSessionOptions,
   RunSummary,

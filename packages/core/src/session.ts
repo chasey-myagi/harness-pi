@@ -112,7 +112,15 @@ import type {
   SessionConfigView,
   ToolExecResult,
   ContextOverflowInput,
+  ActiveBoundary,
 } from "./hook.js";
+
+/**
+ * autoCompaction が `ctx.state` に書き込む live 境界の well-known key。
+ * カーネルはこの key を各 turn 後に読み取り、`_activeBoundary` を更新する。
+ * Plugin は `@harness-pi/core` から import して使う。
+ */
+export const ACTIVE_BOUNDARY_KEY = "harness-pi.activeBoundary" as const;
 import { ToolExecutor, findToolByName } from "./tool-executor.js";
 import { createAttachmentMessage } from "./types.js";
 import type { HarnessTool } from "./types.js";
@@ -278,6 +286,13 @@ export class AgentSession {
   /** 可选会话存储 + 已 append 进 store 的 messages 数（避免重复落盘）。 */
   private readonly _store: SessionStore | undefined;
   private _persistedCount: number;
+  /**
+   * Live 境界（autoCompaction が ctx.state に書いたものをカーネルが保持）。
+   * null = 境界未設定（通常の全量 _messages を LLM に渡す）。
+   * 非 null = `[boundary.summary, ..._messages.slice(coveredCount), ...pending]` として投影する。
+   * summary は同一オブジェクトを使い回すことで prefix bytes が安定する（prompt-cache 命中率向上）。
+   */
+  private _activeBoundary: ActiveBoundary | null = null;
   /** strict 持久化模式：run 结束落盘不全则把返回的 RunSummary.reason 改 error（见选项注释）。 */
   private readonly _strictPersistence: boolean;
   /** 本 session 累积的持久化失败记录；两种模式下都如实挂上 RunSummary.persistenceErrors。 */
@@ -1164,6 +1179,15 @@ export class AgentSession {
         }
       }
 
+      // ctx.state から live boundary を読み取り _activeBoundary を更新する。
+      // store の有無に関わらず行う（live 投影の安定化が目的、永続化とは独立）。
+      // autoCompaction が transformMessagesBeforeLlm 内で ctx.state.set(ACTIVE_BOUNDARY_KEY, ...) した場合に
+      // 次 turn の _phaseLlmCall が同一 summary オブジェクトで投影できるようになる。
+      const newBoundary = this._ctx.state.get(ACTIVE_BOUNDARY_KEY);
+      if (newBoundary !== undefined) {
+        this._activeBoundary = newBoundary;
+      }
+
       if (outcome === "done") return { turnIdx, reason: "done" };
       if (outcome === "abort") return { turnIdx, reason: "aborted" };
       if (outcome === "error") return { turnIdx, reason: "error" };
@@ -1257,10 +1281,19 @@ export class AgentSession {
       this.systemPrompt,
       this._ctx,
     );
-    const baseMessages: Message[] = [
-      ...this._messages,
-      ...this._pendingAttachments,
-    ];
+    // live boundary 投影：_activeBoundary が設定済みなら [summary, _messages[K..], pending]、
+    // 未設定なら従来通り [_messages, pending]。summary オブジェクトを使い回すことで
+    // turn 間の prefix bytes が安定し、provider の prompt-cache 命中率を最大化する。
+    const baseMessages: Message[] = this._activeBoundary !== null
+      ? [
+          this._activeBoundary.summary,
+          ...this._messages.slice(this._activeBoundary.coveredCount),
+          ...this._pendingAttachments,
+        ]
+      : [
+          ...this._messages,
+          ...this._pendingAttachments,
+        ];
     const transformed = await this._dispatcher.firePipeMessages(
       baseMessages,
       this._ctx,

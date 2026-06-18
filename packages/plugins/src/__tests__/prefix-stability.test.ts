@@ -14,7 +14,7 @@
  */
 
 import { describe, it, expect } from "vitest";
-import { AgentSession, Type, type HarnessTool, type Hook, type HookContext } from "@harness-pi/core";
+import { AgentSession, MemorySessionStore, Type, type HarnessTool, type Hook, type HookContext } from "@harness-pi/core";
 import { createFakeModel } from "@harness-pi/core/testing";
 import type { Context } from "@earendil-works/pi-ai";
 import {
@@ -23,6 +23,7 @@ import {
   type PrefixChangeReason,
 } from "../prefix-shape.js";
 import { trimHistory } from "../trim-history.js";
+import { autoCompaction } from "../auto-compaction.js";
 
 const echoTool: HarnessTool = {
   name: "echo",
@@ -196,5 +197,162 @@ describe("[RED] 故意开 trimHistory：消息历史被改写（钉死已知 cac
     }
 
     fake.teardown();
+  });
+});
+
+/* ────────────── [GREEN] autoCompaction: boundary 稳定性 ────────────── */
+
+describe("[GREEN] autoCompaction: boundary 后 prefix 稳定（切片1 回归门）", () => {
+  /**
+   * 脚本设计：5 次 LLM call（4 次 toolUse + 1 次 text）。
+   * keepRecent=2, maxContextTokens=1（总是超阈值）, resummarizeEvery=100（测试范围内不重算）。
+   *
+   * turn 0: 仅 user_prompt（1条）→ 未达 keepRecent=2，不压缩。
+   * turn 1: [user, assistant0, toolResult0]（3条）→ 触发压缩，boundary turn（允许前缀跳变）。
+   * turn 2+: 内核投影 [summaryMsg, _messages[K..]] → 同一 summaryMsg 对象 → prefix 不变。
+   */
+  function fiveCallScript() {
+    return [
+      { content: [{ type: "toolCall" as const, name: "echo", arguments: { msg: "1" } }], stopReason: "toolUse" as const },
+      { content: [{ type: "toolCall" as const, name: "echo", arguments: { msg: "2" } }], stopReason: "toolUse" as const },
+      { content: [{ type: "toolCall" as const, name: "echo", arguments: { msg: "3" } }], stopReason: "toolUse" as const },
+      { content: [{ type: "toolCall" as const, name: "echo", arguments: { msg: "4" } }], stopReason: "toolUse" as const },
+      { content: [{ type: "text" as const, text: "done" }], stopReason: "stop" as const },
+    ];
+  }
+
+  it("boundary turn 放行前缀跳变，其余 turn messages 历史追加不变", async () => {
+    const fake = createFakeModel(fiveCallScript());
+
+    const session = new AgentSession({
+      model: fake,
+      tools: [echoTool],
+      hooks: [autoCompaction({
+        maxContextTokens: 1,
+        triggerRatio: 1,
+        keepRecent: 2,
+        resummarizeEvery: 100,
+        tokenCounter: { estimate: () => 999 },
+        summarize: async () => "summary",
+      })],
+    });
+    await session.run("go");
+
+    const calls = fake.getCalls();
+    expect(calls.length).toBe(5);
+
+    // 统计前缀跳变次数（messages[0] 改变的 call）
+    let boundaryCallIdx = -1;
+    for (let i = 1; i < calls.length; i++) {
+      const prev = calls[i - 1]!.messages;
+      const curr = calls[i]!.messages;
+      // 前缀跳变 = messages[0] 不同
+      const firstMsgChanged = JSON.stringify(curr[0]) !== JSON.stringify(prev[0]);
+      if (firstMsgChanged) {
+        expect(boundaryCallIdx).toBe(-1); // 只允许一次 boundary 跳变
+        boundaryCallIdx = i;
+      }
+    }
+
+    // 必须有一次 boundary（压缩确实触发了）
+    expect(boundaryCallIdx).toBeGreaterThan(0);
+
+    // boundary 之后：所有 call 追加不变
+    for (let i = boundaryCallIdx + 1; i < calls.length; i++) {
+      const prev = calls[i - 1]!.messages;
+      const curr = calls[i]!.messages;
+      expect(curr.length).toBeGreaterThan(prev.length);
+      expect(curr.slice(0, prev.length)).toEqual(prev);
+    }
+
+    fake.teardown();
+  });
+
+  it("boundary 之后的多 turn 中 messages[0]（summary）是同一对象引用（bytes 绝对稳定）", async () => {
+    const fake = createFakeModel(fiveCallScript());
+
+    const session = new AgentSession({
+      model: fake,
+      tools: [echoTool],
+      hooks: [autoCompaction({
+        maxContextTokens: 1,
+        triggerRatio: 1,
+        keepRecent: 2,
+        resummarizeEvery: 100,
+        tokenCounter: { estimate: () => 999 },
+        summarize: async () => "STABLE-SUMMARY",
+      })],
+    });
+    await session.run("go");
+
+    const calls = fake.getCalls();
+
+    // 找到 boundary 之后（有 summaryMsg 的那批 call）
+    const postBoundaryCalls = calls.filter((c) =>
+      typeof c.messages[0]?.content === "string"
+        ? c.messages[0].content.includes("STABLE-SUMMARY")
+        : Array.isArray(c.messages[0]?.content)
+          ? c.messages[0].content.some((b: { type: string; text?: string }) => b.type === "text" && b.text?.includes("STABLE-SUMMARY"))
+          : false
+    );
+
+    expect(postBoundaryCalls.length).toBeGreaterThanOrEqual(2); // 至少 2 个 turn 共享同一 summary
+
+    // 验证同一对象引用（=== 严格相等）
+    const firstSummaryMsg = postBoundaryCalls[0]!.messages[0]!;
+    for (let i = 1; i < postBoundaryCalls.length; i++) {
+      expect(postBoundaryCalls[i]!.messages[0]).toBe(firstSummaryMsg); // 引用相同
+    }
+
+    fake.teardown();
+  });
+
+  it("autoCompaction + store: resume() 重建的首条消息与 live 投影 messages[0] 深度相等（两套合一）", async () => {
+    const store = new MemorySessionStore();
+    const sessionId = "boundary-resume-parity";
+
+    const fake = createFakeModel([
+      { content: [{ type: "toolCall" as const, name: "echo", arguments: { msg: "1" } }], stopReason: "toolUse" as const },
+      { content: [{ type: "toolCall" as const, name: "echo", arguments: { msg: "2" } }], stopReason: "toolUse" as const },
+      { content: [{ type: "text" as const, text: "done" }], stopReason: "stop" as const },
+    ]);
+
+    const session = new AgentSession({
+      model: fake,
+      tools: [echoTool],
+      store,
+      sessionId,
+      hooks: [autoCompaction({
+        maxContextTokens: 1,
+        triggerRatio: 1,
+        keepRecent: 2,
+        resummarizeEvery: 100,
+        tokenCounter: { estimate: () => 999 },
+        summarize: async () => "boundary-summary-text",
+      })],
+    });
+    await session.run("go");
+
+    // live session 最后几次 LLM call 的 messages[0] = summaryMsg
+    const allCalls = fake.getCalls();
+    const liveFirstMsg = allCalls.at(-1)!.messages[0];
+    expect(liveFirstMsg).toBeDefined();
+
+    // resume from store
+    const fake2 = createFakeModel([]); // 不再需要新的 LLM call
+    const resumed = await AgentSession.resume(store, sessionId, {
+      model: fake2,
+      tools: [echoTool],
+    });
+
+    // resume 重建的 messages[0] 应与 live 投影 messages[0] 深度相等
+    expect(resumed.messages[0]).toEqual(liveFirstMsg);
+    // 且内容含 boundary-summary-text
+    const content = resumed.messages[0]?.content;
+    const text = typeof content === "string" ? content : JSON.stringify(content);
+    expect(text).toContain("boundary-summary-text");
+
+    fake.teardown();
+    fake2.teardown();
   });
 });
