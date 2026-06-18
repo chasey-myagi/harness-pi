@@ -2,7 +2,7 @@
 
 > Plugin 解剖、命名/状态约定、标准库 plugin 的完整设计。
 >
-> **计数（以 `packages/plugins/src/index.ts` 实际导出为准）**：**21 个返回 `Hook` 的 plugin 工厂** + **2 个面向模型的工具/技能工厂**（`toolSearch` 返回 `HarnessTool`、`skills` 返回 `{hook, tool}`）+ **1 个 summary 模板辅助件**（`defaultSummarize` / `DEFAULT_SUMMARY_TEMPLATE`，给压缩插件的 `summarize` 用）。分「核心 12」（§5.1–5.12，bidding-agent parity 起点）与「高级 / 0.3.0 新增」（§5.13–5.22，compaction 体系 + 权限 + deferred/skills + loop-engineering verifier）两档。
+> **计数（以 `packages/plugins/src/index.ts` 实际导出为准）**：**22 个返回 `Hook` 的 plugin 工厂** + **2 个面向模型的工具/技能工厂**（`toolSearch` 返回 `HarnessTool`、`skills` 返回 `{hook, tool}`）+ **1 个 summary 模板辅助件**（`defaultSummarize` / `DEFAULT_SUMMARY_TEMPLATE`，给压缩插件的 `summarize` 用）。分「核心 12」（§5.1–5.12，bidding-agent parity 起点）与「高级 / 0.3.0 新增」（§5.13–5.22，compaction 体系 + 权限 + deferred/skills + loop-engineering verifier）两档。
 
 ## 0. 目录
 
@@ -36,6 +36,7 @@
    - [5.19 turn-end-guard](#519-turn-end-guard)
    - [5.20 permission-gate](#520-permission-gate)
    - [5.21 deferred-tools + tool-search + skills](#521-deferred-tools--tool-search--skills)（O1/O2 渐进式暴露）
+   - [5.22 prefix-shape](#522-prefix-shape)（prompt-cache 失效实时归因）
 6. [测试规约](#6-测试规约)
 
 ## 1. Plugin 是什么
@@ -185,7 +186,7 @@ export function _resetForTests(): void { ... }
 
 ## 5. 标准库 plugin
 
-> 共 **20 个 `Hook` 工厂** + **2 个工具/技能工厂**（`toolSearch` / `skills`）+ **1 个 summary 模板辅助件**（`defaultSummarize`）。下分「核心 12」（§5.1–5.12）与「高级 / 0.3.0 新增」（§5.13–5.21）。
+> 共 **21 个 `Hook` 工厂** + **2 个工具/技能工厂**（`toolSearch` / `skills`）+ **1 个 summary 模板辅助件**（`defaultSummarize`）。下分「核心 12」（§5.1–5.12）与「高级 / 0.3.0 新增」（§5.13–5.22）。
 
 ### 核心 12
 
@@ -1819,6 +1820,61 @@ export function skills(specs: SkillSpec[], opts?: { toolName?: string }): { hook
 - execution 与 listing 解耦、permissionGate 仍拦
 - toolSearch / skill 屏障型；skills catalog 不含 body、激活是 union、未知 skill 抛、空/重名构造期抛
 （见 `deferred-tools.test.ts` / `skills.test.ts`）
+
+---
+
+### 5.22 prefix-shape
+
+#### 目的
+
+给 prompt-cache 失效装上**实时归因**。provider 在 durable prefix（model/provider 标识 + system + tools schema）边界做 KV-cache，前缀逐字节不变才可能命中。本插件每 turn canonicalize 出这段 durable prefix、算稳定 hash、与上一 turn 比，变了就分类原因（model / system / tool_schema / provider_options）并经 `ctx.log` 暴露；可选在 `onLlmEnd` 用真实 `usage.cacheRead` 做「预测 vs 实测」对账。把「这一 turn 为什么没命中 cache」从事后 A/B 提前到每 turn 可见（背景见 #106：`trimHistory` 每轮改写旧历史破坏前缀、命中 93%→74%）。移植自 maka `request-shape.ts`，砍到 durable-prefix-only（不做 history projection / tool-source-economy / zod 转换）。
+
+#### Hook 形态
+
+Transform-observe（`transformToolsBeforeLlm` 观测式 passthrough，**返回 void 不改写 tools**）+ 可选 Event（`onLlmEnd` 只读 usage 对账）。零内核改动、fail-open。
+
+#### 完整设计
+
+```ts
+import { prefixShape, getPrefixShapeState } from "@harness-pi/plugins";
+
+// 最小：只 log「prefix 变了 + 原因」
+prefixShape();
+
+// 接 metric / 对账（典型生产形态，与 cost-tracker 一样 metric 走 opt-in 回调，不占 CoreMetricKind）
+prefixShape({
+  onPrefixChange: (ctx, diag) => emitMetric(ctx, { kind: "prefix.shape", reason: diag.changeReason }),
+  onCacheReconcile: (ctx, info) =>
+    emitMetric(ctx, { kind: "cache.reconcile", predicted: info.changeReason, hitRatio: info.cacheHitRatio }),
+});
+```
+
+每 turn 把 `PrefixShapeDiagnostic { prefixHash, changeReason, components, turnIdx, toolCount }` 写进 `ctx.state["prefix-shape.last"]`，`getPrefixShapeState(ctx)` 读取。`changeReason ∈ {first_turn, model_or_provider_changed, system_prompt_changed, tool_schema_changed, provider_options_changed, stable}`，优先级 model > system > tools > providerOptions。
+
+> tools 的**线上顺序**计入 hash（canonicalize 不排顶层数组，只排 schema 内 `required`/`enum`）—— 工具重排会真正破坏前缀，应被如实标成 `tool_schema_changed`，不 pre-sort 掩盖。
+
+#### 配置选项
+
+- `providerOptions?: (ctx) => Record<string, unknown>` —— provider options 指纹源。**默认不参与**（内核不经 hook 暴露 provider options；只有你每 turn 主动改 temperature / thinking budget 时才需要喂）。
+- `onPrefixChange?` —— prefix 变化（非 stable/first_turn）时回调，典型 emit metric。
+- `onCacheReconcile?` —— `onLlmEnd` 把预测 reason 与真实 `usage.cacheRead` 配对（默认不挂）。
+- `log?: boolean` —— 变化时自动 `ctx.log.info` 一行（默认 true）。
+
+#### 与其他 plugin 交互
+
+- 挂在 `deferred-tools` **之后**才能看到激活后的 active 子集（pipe 按注册顺序串行）；反了也只是「按全集算 hash」，退化不致命。
+- 与 `cost-tracker` 正交：cost-tracker 读 `usage` 算钱，本插件读 `usage.cacheRead` 看命中，互不耦合。
+- 诊断的是「durable prefix 这一段稳不稳」，**不**解释全部 cache miss——history 增长本身会让超出公共前缀的后缀 miss（那是 `trim-history`/compaction 那条线的事）。
+
+#### 失败模式
+
+- 纯观测、fail-open：hook 抛错不挡 LLM call（pipe 语义）。
+- **两条已知盲区（文档化、不修——修就破坏零内核改动，与 `auto-compaction` 同档）**：① system 指纹取 `ctx.config.systemPrompt` = 构造期 pre-pipe base，若挂了 `transformSystemPromptBeforeLlm` 每 turn 改写 system 会漏报 `system_prompt_changed`（当前无 first-party hook 这么干）；② provider options 默认不参与分类。
+- ⚠️ `reason === "stable"` 是命中的**必要非充分**条件，不等于该 100% 命中；`onCacheReconcile` 给的是关联信号、非因果证明。
+
+#### 测试要点
+
+纯函数（`stableHash` 键序无关/数组顺序敏感、`required`/`enum` 乱序同 hash、`classifyPrefixChange` 各分支 + 优先级）+ 插件行为（`createTestContext` 直调：first_turn / stable 不 log / tool_schema_changed 触发 log+回调 / log:false / providerOptions opt-in）+ 真管线冒烟（`AgentSession`+`createFakeModel`：两 turn 同 tools → turn-2 stable、注入 `usage.cached` 对账）。见 `prefix-shape.test.ts`。
 
 ---
 
