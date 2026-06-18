@@ -291,10 +291,9 @@ export function autoCompaction(opts: AutoCompactionOptions): Hook {
     ((summary, n) => `[auto-compacted summary of ${n} earlier messages]\n${summary}`);
 
   // 闭包缓存：session 级（每 session 一个 hook 实例）。
-  // summaryMsg 缓存 Message 对象本身（不只是文本），同一对象跨 turn 复用 → bytes 不变 → provider 缓存命中。
-  // coveredCount：投影视图坐标，仅供 messages.slice 切尾用。
-  // rawCoveredCount：_messages 坐标，用于跨 boundary 正确计算 resummarizeEvery 增量。
-  let cache: { coveredCount: number; summaryMsg: Message; rawCoveredCount: number } | null = null;
+  // summaryMsg 缓存 Message 对象本身（不只是文本）→ 同一对象跨 turn 复用 → bytes 不变 → provider 缓存命中。
+  // coveredCount：单一 _messages 真相坐标 —— 折进 summary 的前缀条数（内核切片 + 本插件本 turn 投影共用同一坐标）。
+  let cache: { coveredCount: number; summaryMsg: Message } | null = null;
 
   return {
     name: "autoCompaction",
@@ -327,42 +326,46 @@ export function autoCompaction(opts: AutoCompactionOptions): Hook {
         systemPrompt: ctx.config.systemPrompt,
       });
       if (estimated <= threshold) return undefined;
-      // 已经压无可压（tail 即全部）→ 总结救不了，交给 overflow 兜底，不在这里空转。
-      if (messages.length <= keepRecent) return undefined;
+      // 真相消息坐标 raw：真实会话用内核 _messages（ctx.messages）；直接调 transform 的单元测试场景
+      // （ctx.messages 为空）降级用 pipe 入参 messages。覆盖范围一律基于 raw，绝不混用投影视图坐标。
+      const raw = ctx.messages.length > 0 ? ctx.messages : messages;
 
-      const targetCover = messages.length - keepRecent; // 想把前 targetCover 条总结掉
+      // 已经压无可压（raw tail 即全部）→ 总结救不了，交给 overflow 兜底。
+      if (raw.length <= keepRecent) return undefined;
 
-      // resummarizeEvery 判据双坐标：
-      //   ctx.messages.length > 0（真实会话）→ _messages 坐标，跨 boundary 后增量仍正确；
-      //   ctx.messages.length === 0（直接测试场景）→ 降级回投影视图坐标，向后兼容。
-      const rawCoveredCount_new = Math.max(0, ctx.messages.length - keepRecent);
+      // ⚠️ 坐标系统一（修 Codex 交叉验证发现的 High bug）：targetCover / summary / coveredCount / 投影
+      // 全部基于 raw（_messages 真相），绝不用投影视图 messages（含 _pendingAttachments + 上一个 summary，
+      // 坐标会漂）。targetCover = 折进 summary 的前缀条数；尾部恒保留 keepRecent 条真实消息。
+      const targetCover = raw.length - keepRecent;
       const needsResummarize =
-        cache === null ||
-        (ctx.messages.length > 0
-          ? rawCoveredCount_new - cache.rawCoveredCount >= resummarizeEvery
-          : targetCover - cache.coveredCount >= resummarizeEvery);
+        cache === null || targetCover - cache.coveredCount >= resummarizeEvery;
 
       if (needsResummarize) {
-        // summarize 抛错让其冒泡：内核 pipe 对 transform 是 fail-open（记一笔后退化为不压缩）。
-        // 赋值在 await 之后，抛错时 cache 不被脏写。
-        const text = await opts.summarize(messages.slice(0, targetCover), ctx);
-        // 缓存 Message 对象（不只是文本）→ 同一对象跨 turn 复用 → timestamp 不变 → bytes 稳定 → 缓存命中。
+        // 分离本 turn 的 pending：真实会话内核投影 messages = [prevSummary?, raw.slice(prevCovered), ...pending]，
+        // 用重算前的 cache 还原主体长度、尾部即 pending（onTurnStart 等注入的 additionalContext）；
+        // 直接测试场景（ctx.messages 为空）messages 即全量、无 pending。
+        // 前提：autoCompaction 在 pipe 中靠前、messages 未被其他 transform 重排（强约束见红线② follow-up）。
+        const prevCovered = cache?.coveredCount ?? 0;
+        const mainLen = (cache !== null ? 1 : 0) + (raw.length - prevCovered);
+        const pending: Message[] = ctx.messages.length > 0 ? messages.slice(mainLen) : [];
+
+        // summarize 抛错让其冒泡：内核 pipe 对 transform 是 fail-open。赋值在 await 之后，抛错时 cache 不脏写。
+        // 总结 raw 真相前 targetCover 条（不用投影视图，避免 pending / 旧 summary 污染坐标）。
+        const text = await opts.summarize(raw.slice(0, targetCover), ctx);
+        // 缓存 Message 对象本身 → 同一对象跨 turn 复用 → bytes 稳定 → provider 缓存命中。
         const summaryMsg = createUserMessage(wrap(text, targetCover));
-        cache = { coveredCount: targetCover, summaryMsg, rawCoveredCount: rawCoveredCount_new };
-        // 仅在**本 turn 真跑了一次新总结**时标记，供 postCompactFileReread 下一 turn 重读关键文件
-        // （opt-in，缺该插件无副作用）。**不可**放在分支外：messages 是 append-only 原始 _messages，
-        // 一旦越阈值就永久在阈值之上，分支外 set 会让每个越界 turn 都重置标记 → 重读每 turn 重复注入。
+        cache = { coveredCount: targetCover, summaryMsg };
+        // 本 turn 真跑了新总结才标记，供 postCompactFileReread 下一 turn 重读关键文件（opt-in）。
         ctx.state.set(POST_COMPACT_PENDING_KEY, ctx.turnIdx);
-        // 把 boundary 写进 ctx.state → 内核在 turn 结束时读取并更新 _activeBoundary。
-        // 下一 turn 的 _phaseLlmCall 投影 [summary, _messages[K..]] → 前缀 bytes 固定 → 缓存命中。
-        // coveredCount 用 _messages 索引（ctx.messages = 内核 _messages），供内核切片。
-        ctx.state.set(ACTIVE_BOUNDARY_KEY, { summary: cache.summaryMsg, coveredCount: rawCoveredCount_new });
-        return [cache.summaryMsg, ...messages.slice(cache.coveredCount)];
+        // 写 boundary（单一 raw 坐标）→ 内核 turn 末读取、下一 turn 投影 [summary, _messages.slice(coveredCount), pending]。
+        ctx.state.set(ACTIVE_BOUNDARY_KEY, { summary: summaryMsg, coveredCount: targetCover });
+        // 本 turn 立即投影，与内核下一 turn 投影同坐标 → 前缀一致、不重发已覆盖消息。
+        return [summaryMsg, ...raw.slice(targetCover), ...pending];
       }
 
-      // 已有 boundary、本 turn 无需重算：返回 undefined（pass-through）。
-      // 内核已在 _phaseLlmCall 用 _activeBoundary 投影 [summary, _messages[K..]]；
-      // 该序列随新消息追加自然增长，不再做额外裁剪 → append-only、prefix 绝对稳定。
+      // 已有 boundary、本 turn 无需重算：return undefined（pass-through）。
+      // 内核已在 _phaseLlmCall 用 _activeBoundary 投影 [summary, _messages.slice(coveredCount), pending]；
+      // 随新消息追加自然增长 → append-only、prefix 稳定。
       return undefined;
     },
 

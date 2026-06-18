@@ -116,9 +116,9 @@ import type {
 } from "./hook.js";
 
 /**
- * autoCompaction が `ctx.state` に書き込む live 境界の well-known key。
- * カーネルはこの key を各 turn 後に読み取り、`_activeBoundary` を更新する。
- * Plugin は `@harness-pi/core` から import して使う。
+ * autoCompaction 写入 `ctx.state` 的 live 境界 well-known key。
+ * 内核每个 turn 结束后读取此 key、更新 `_activeBoundary`。
+ * Plugin 从 `@harness-pi/core` import 使用。
  */
 export const ACTIVE_BOUNDARY_KEY = "harness-pi.activeBoundary" as const;
 import { ToolExecutor, findToolByName } from "./tool-executor.js";
@@ -287,10 +287,10 @@ export class AgentSession {
   private readonly _store: SessionStore | undefined;
   private _persistedCount: number;
   /**
-   * Live 境界（autoCompaction が ctx.state に書いたものをカーネルが保持）。
-   * null = 境界未設定（通常の全量 _messages を LLM に渡す）。
-   * 非 null = `[boundary.summary, ..._messages.slice(coveredCount), ...pending]` として投影する。
-   * summary は同一オブジェクトを使い回すことで prefix bytes が安定する（prompt-cache 命中率向上）。
+   * Live 境界（autoCompaction 写入 ctx.state、由内核持有）。
+   * null = 未设定境界（照常把全量 _messages 发给 LLM）。
+   * 非 null = 投影成 `[boundary.summary, ..._messages.slice(coveredCount), ...pending]`。
+   * summary 复用同一对象 → prefix bytes 稳定（提升 prompt-cache 命中率）。
    */
   private _activeBoundary: ActiveBoundary | null = null;
   /** strict 持久化模式：run 结束落盘不全则把返回的 RunSummary.reason 改 error（见选项注释）。 */
@@ -1179,10 +1179,10 @@ export class AgentSession {
         }
       }
 
-      // ctx.state から live boundary を読み取り _activeBoundary を更新する。
-      // store の有無に関わらず行う（live 投影の安定化が目的、永続化とは独立）。
-      // autoCompaction が transformMessagesBeforeLlm 内で ctx.state.set(ACTIVE_BOUNDARY_KEY, ...) した場合に
-      // 次 turn の _phaseLlmCall が同一 summary オブジェクトで投影できるようになる。
+      // 从 ctx.state 读取 live boundary、更新 _activeBoundary。
+      // 不论有无 store 都执行（目的是稳定 live 投影，与持久化无关）。
+      // autoCompaction 在 transformMessagesBeforeLlm 内 ctx.state.set(ACTIVE_BOUNDARY_KEY, ...) 后，
+      // 下一 turn 的 _phaseLlmCall 即可用同一 summary 对象投影。
       const newBoundary = this._ctx.state.get(ACTIVE_BOUNDARY_KEY);
       if (newBoundary !== undefined) {
         this._activeBoundary = newBoundary;
@@ -1281,9 +1281,9 @@ export class AgentSession {
       this.systemPrompt,
       this._ctx,
     );
-    // live boundary 投影：_activeBoundary が設定済みなら [summary, _messages[K..], pending]、
-    // 未設定なら従来通り [_messages, pending]。summary オブジェクトを使い回すことで
-    // turn 間の prefix bytes が安定し、provider の prompt-cache 命中率を最大化する。
+    // live boundary 投影：_activeBoundary 已设则投 [summary, _messages[K..], pending]，
+    // 未设则照旧 [_messages, pending]。复用同一 summary 对象 →
+    // turn 间 prefix bytes 稳定、最大化 provider 的 prompt-cache 命中率。
     const baseMessages: Message[] = this._activeBoundary !== null
       ? [
           this._activeBoundary.summary,

@@ -175,20 +175,19 @@ export interface OnAfterFlushResult {
 }
 
 /**
- * Live 境界状態（カーネルが `_activeBoundary` として保持）。
- * autoCompaction が `transformMessagesBeforeLlm` 内で `ctx.state` にセット、
- * カーネルが各 turn 後に読み取り、次 turn の `baseMessages` 投影に使う。
+ * Live 境界状态（由内核作为 `_activeBoundary` 持有）。
+ * autoCompaction 在 `transformMessagesBeforeLlm` 内写入 `ctx.state`，
+ * 内核每个 turn 后读取、用于下一 turn 的 `baseMessages` 投影。
  *
- * **summary を同一オブジェクトとして使い回す**ことで、prefix bytes が安定し、
- * provider の prompt-cache 命中率を最大化する（`createUserMessage` の timestamp が
- * 毎 turn 変わる問題を解消）。
+ * **复用同一 summary 对象** → prefix bytes 稳定、最大化 provider 的 prompt-cache
+ * 命中率（解决 `createUserMessage` 的 timestamp 每 turn 变化的问题）。
  */
 export interface ActiveBoundary {
-  /** LLM に送る projected messages の先頭に置く summary message。同一オブジェクト再利用 = bytes 安定。 */
+  /** 放在发给 LLM 的投影 messages 首位的 summary message。复用同一对象 = bytes 稳定。 */
   summary: Message;
   /**
-   * `_messages` の先頭から何条を summary に要約済みか（`_messages` インデックス基準）。
-   * カーネルは `[summary, ..._messages.slice(coveredCount), ...pendingAttachments]` と投影する。
+   * 已把 `_messages` 开头多少条折进 summary（以 `_messages` 索引为基准）。
+   * 内核投影成 `[summary, ..._messages.slice(coveredCount), ...pendingAttachments]`。
    */
   coveredCount: number;
 }
@@ -313,7 +312,7 @@ export interface MergedHookResult {
  * 未注册的 key 走 fallback：`get/set` 接受 `string` 并退回 `unknown`，跟当前调用点行为一致。
  */
 export interface HookStateRegistry {
-  /** カーネルが管理する live 境界。autoCompaction が書き込み、カーネルが投影に使う。 */
+  /** 内核管理的 live 境界。autoCompaction 写入、内核用于投影。 */
   "harness-pi.activeBoundary": ActiveBoundary;
 }
 

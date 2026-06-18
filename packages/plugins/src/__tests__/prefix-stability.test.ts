@@ -376,3 +376,77 @@ describe("[GREEN] autoCompaction: boundary 后 prefix 稳定（切片1 回归门
     fake.teardown();
   });
 });
+
+/* ────── [GREEN] autoCompaction + pending attachment：坐标系一致（回归 Codex High bug）────── */
+
+/** message 的 content（string 或 block 数组）是否含某子串。 */
+function msgContains(m: { content?: unknown } | undefined, s: string): boolean {
+  if (!m) return false;
+  const c = m.content;
+  if (typeof c === "string") return c.includes(s);
+  if (Array.isArray(c)) {
+    return c.some(
+      (b) => typeof (b as { text?: string }).text === "string" && (b as { text?: string }).text!.includes(s),
+    );
+  }
+  return false;
+}
+
+describe("[GREEN] autoCompaction + pending attachment：boundary 后不重发已覆盖消息", () => {
+  /**
+   * 回归 Codex 交叉验证发现的 High bug：summary 覆盖范围（targetCover）原用含 _pendingAttachments
+   * 的投影视图坐标，写给内核的 coveredCount 却用不含 pending 的 _messages 坐标，基准错位 →
+   * 有 pending（onTurnStart 注入 additionalContext）触发 boundary 时，已被 summary 覆盖的旧消息
+   * 会在下一 turn 投影里被重新发送（破坏 prompt-cache 前缀稳定）。
+   *
+   * 断言：去掉每次投影尾部的 pending 后，boundary 之后的投影满足 append-only（前缀字节稳定、
+   * 不重发已覆盖消息）。坐标错位时此断言失败。
+   */
+  it("onTurnStart 注入 pending 时，boundary 后投影（去 pending）前缀稳定", async () => {
+    const attachHook: Hook = {
+      name: "attach",
+      onTurnStart() {
+        return { additionalContext: "ATTACH-CTX" };
+      },
+    };
+    const fake = createFakeModel([
+      { content: [{ type: "toolCall" as const, name: "echo", arguments: { msg: "1" } }], stopReason: "toolUse" as const },
+      { content: [{ type: "toolCall" as const, name: "echo", arguments: { msg: "2" } }], stopReason: "toolUse" as const },
+      { content: [{ type: "toolCall" as const, name: "echo", arguments: { msg: "3" } }], stopReason: "toolUse" as const },
+      { content: [{ type: "text" as const, text: "done" }], stopReason: "stop" as const },
+    ]);
+    const session = new AgentSession({
+      model: fake,
+      tools: [echoTool],
+      hooks: [
+        autoCompaction({
+          maxContextTokens: 1,
+          triggerRatio: 1,
+          keepRecent: 2,
+          resummarizeEvery: 100,
+          tokenCounter: { estimate: () => 999 },
+          summarize: async () => "SUM",
+        }),
+        attachHook,
+      ],
+    });
+    await session.run("go");
+
+    const calls = fake.getCalls();
+    // 去掉每次投影尾部的 pending（含 ATTACH-CTX 的 attachment message）
+    const proj = calls.map((c) => c.messages.filter((m) => !msgContains(m, "ATTACH-CTX")));
+    // boundary = 投影首条变成 summary "SUM" 的那次
+    const boundaryIdx = proj.findIndex((m) => msgContains(m[0], "SUM"));
+    expect(boundaryIdx).toBeGreaterThan(-1); // 压缩确实触发
+
+    // boundary 之后：去 pending 投影 append-only（前缀稳定、不重发被 summary 覆盖的消息）
+    for (let i = boundaryIdx + 1; i < proj.length; i++) {
+      const prev = proj[i - 1]!;
+      const curr = proj[i]!;
+      expect(curr.length).toBeGreaterThanOrEqual(prev.length);
+      expect(curr.slice(0, prev.length)).toEqual(prev);
+    }
+
+    fake.teardown();
+  });
+});
