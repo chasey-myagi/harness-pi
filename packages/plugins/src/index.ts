@@ -142,3 +142,19 @@ export type { ToolSearchOptions } from "./tool-search.js";
 
 export { skills } from "./skills.js";
 export type { SkillSpec, SkillsOptions } from "./skills.js";
+
+export {
+  prefixShape,
+  getPrefixShapeState,
+  computeDurablePrefix,
+  classifyPrefixChange,
+  stableHash,
+} from "./prefix-shape.js";
+export type {
+  PrefixShapeOptions,
+  PrefixShapeDiagnostic,
+  PrefixChangeReason,
+  DurablePrefixComponents,
+  DurablePrefixInput,
+  CacheReconcileInfo,
+} from "./prefix-shape.js";
