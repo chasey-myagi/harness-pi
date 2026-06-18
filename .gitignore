@@ -4,6 +4,8 @@ dist/
 .DS_Store
 .env
 .env.local
+# npm publish token（发布时在 repo 根临时写、用完即删；列此防 token 文件被误提交）
+.npmrc
 
 # coding-agent runtime output (session logs, persisted sessions, metrics)
 .harness-pi/
