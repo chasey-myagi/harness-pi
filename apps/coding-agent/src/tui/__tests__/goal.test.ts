@@ -134,6 +134,23 @@ describe("parseGoalCommand", () => {
     });
   });
 
+  it("repeated --budget with later 0 clears the limit (last-wins, codex P2)", () => {
+    // last-wins + `--budget 0`=无限：后者必须解除前者的 100，不能残留旧上限。
+    expect(parseGoalCommand("optimize --budget 100 --budget 0")).toEqual({
+      goal: "optimize",
+      maxTurns: 5,
+      budgetTokens: undefined,
+      successHint: undefined,
+    });
+  });
+
+  it('repeated --success with later "" clears the hint (last-wins, codex P3)', () => {
+    // last-wins + 空=无 hint：空的后者必须解除前者，不能把旧 success criteria 织进 prompt。
+    const r = parseGoalCommand('ship --success tests pass --success ""');
+    expect(r?.successHint).toBeUndefined();
+    expect(r?.goal).toBe("ship");
+  });
+
   it("does not partial-match a flag-prefixed word (word boundary)", () => {
     // `--max-turns-doc` 不是 `--max-turns`：词边界挡住后续 `-`，整词原样留在 goal、maxTurns 取默认。
     expect(parseGoalCommand("write the --max-turns-doc section")).toEqual({

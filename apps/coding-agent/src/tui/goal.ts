@@ -55,9 +55,11 @@ export function parseGoalCommand(rest: string): GoalOptions | null {
 
   // --budget <N>；非法值也消费掉完整 token，避免把 flag 原样发给 LLM。
   text = text.replace(/--budget(?![-\w])(?:\s+((?!--)\S+))?/gi, (_, n: string | undefined) => {
+    // last-wins：每个**合法数值**出现都覆盖最终值，≤0 视为「无限」→ 清空（修 codex P2：
+    // `--budget 100 --budget 0` 的后者应解除上限，旧 `if(v>0)` 会残留前值 100）。非法值不动既有值。
     if (n !== undefined && /^[+-]?\d+$/.test(n)) {
       const v = parseInt(n, 10);
-      if (v > 0) budgetTokens = v;
+      budgetTokens = v > 0 ? v : undefined;
     }
     return "";
   });
@@ -67,9 +69,10 @@ export function parseGoalCommand(rest: string): GoalOptions | null {
     /--success(?![-\w])\s+(?:"([^"]*)"|(.+?))(?=\s+--|$)/gi,
     (_match: string, quoted: string | undefined, unquoted: string | undefined) => {
       const hint = (quoted ?? unquoted ?? "").trim();
-      // 空 hint（`--success ""` 或纯空白）语义统一为「无 hint」——与 buildGoalPrompt 的
-      // `if(opts.successHint)` 一致，不留 present-but-empty 的歧义态。
-      if (hint.length > 0) successHint = hint;
+      // last-wins：每个 --success 出现都覆盖最终值。空 hint（`--success ""` 或纯空白）语义统一为
+      // 「无 hint」→ 清空（修 codex P3：`--success a --success ""` 的空后者应解除前 hint，而非残留 a）。
+      // 与 buildGoalPrompt 的 `if(opts.successHint)` 一致，不留 present-but-empty 的歧义态。
+      successHint = hint.length > 0 ? hint : undefined;
       return "";
     },
   );
