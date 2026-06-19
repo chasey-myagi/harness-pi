@@ -63,6 +63,24 @@ describe("postCompactFileReread", () => {
     expect(providerCalls).toBe(0); // 没压缩 → 根本不解析
   });
 
+  it("UTF-8 截断落在码点边界、不产生 U+FFFD（#98 回归）", async () => {
+    // maxBytes=5，中文每字 3 bytes："日本語…" → 码点边界截断保留 "日"(3 bytes)，
+    // 不切到 "本" 中间（原字节级 Buffer.subarray 会切第 2 字、末尾产生替换字符 U+FFFD）。
+    const hook = postCompactFileReread({
+      maxBytes: 5,
+      fileContentProvider: async () => "日本語テスト",
+    });
+    const ctx = fakeCtx([toolCallMsg("read", { path: "/a.ts" })], { pending: 0 });
+    const out = await hook.onTurnStart!({ turnIdx: 1 }, ctx);
+
+    expect(out).toBeDefined();
+    const text = out!.additionalContext!;
+    expect(text).not.toContain("�"); // 无替换字符
+    expect(text).toContain("日"); // 第 1 字保留（3 ≤ 5）
+    expect(text).not.toContain("本"); // 第 2 字累计 6 > 5，码点边界截掉
+    expect(text).toContain("[truncated to 5 bytes]");
+  });
+
   it("resolves referenced paths and injects their current content after compaction", async () => {
     const fs: Record<string, string> = { "/a.ts": "AAA", "/b.ts": "BBB" };
     const hook = postCompactFileReread({

@@ -115,27 +115,44 @@ async function spawnSubAgent(
   // O5：spawn 前 fire onSubagentStart（子在 depth+1）。
   await ctx.fireSubagentStart({ agentId: sub.id, task, depth: depth + 1 });
   // 父 signal 透传 → sub-agent 可被父的 abort 协作式取消。
-  // start↔end 配对依赖 `sub.run()` **永不 throw**：内核 turn loop 把所有终态（done/aborted/error/
-  // max_turns）转成 RunSummary 返回（仅 re-entrancy guard 会 throw，而这里每次造全新 sub 跑一次、不可能命中）。
-  // 若将来 run() 改成某些路径 throw，下面的 fireSubagentEnd 会被跳过、留下没配对 end 的 start——届时需补 try/finally。
-  const summary = await sub.run(task, { signal });
-  // opt-in 续聊：把跑完首轮的子 session 留住（默认不传 → 跑完即弃）。
-  onSpawn?.(sub);
-  const result = subAgentResult(sub, summary);
-  // O5：跑完后 fire onSubagentEnd（带终态）。summaryText 复用回灌父模型的同一份文本；无文本则省略该字段
-  // （对齐 OnSubagentEndInput.summaryText「无文本输出则缺省」的契约）。注意 error 终态下 lastMessage 语义
-  // 同 RunSummary.lastMessage——可能是上一成功 turn 的陈旧文本，消费者应配合 reason 判读。
-  const summaryText = messageText(summary.lastMessage);
-  await ctx.fireSubagentEnd({
-    agentId: sub.id,
-    task,
-    depth: depth + 1,
-    reason: summary.reason,
-    turns: summary.turns,
-    usage: summary.usage,
-    ...(summaryText ? { summaryText } : {}),
-  });
-  return result;
+  // start↔end 配对：`sub.run()` 当前**永不 throw**（内核 turn loop 把所有终态 done/aborted/error/
+  // max_turns 转成 RunSummary 返回；仅 re-entrancy guard throw，而这里每次造全新 sub 跑一次、不可能命中）。
+  // 下面用 try/finally 做**防御性兜底**（#98）：万一将来 run() 某路径 throw，finally 补发 error end
+  // 保证 start↔end 配对、不留 orphan start。
+  let ended = false;
+  try {
+    const summary = await sub.run(task, { signal });
+    // opt-in 续聊：把跑完首轮的子 session 留住（默认不传 → 跑完即弃）。
+    onSpawn?.(sub);
+    const result = subAgentResult(sub, summary);
+    // O5：跑完后 fire onSubagentEnd（带终态）。summaryText 复用回灌父模型的同一份文本；无文本则省略该字段
+    // （对齐 OnSubagentEndInput.summaryText「无文本输出则缺省」的契约）。注意 error 终态下 lastMessage 语义
+    // 同 RunSummary.lastMessage——可能是上一成功 turn 的陈旧文本，消费者应配合 reason 判读。
+    const summaryText = messageText(summary.lastMessage);
+    await ctx.fireSubagentEnd({
+      agentId: sub.id,
+      task,
+      depth: depth + 1,
+      reason: summary.reason,
+      turns: summary.turns,
+      usage: summary.usage,
+      ...(summaryText ? { summaryText } : {}),
+    });
+    ended = true;
+    return result;
+  } finally {
+    // run() 抛错（当前不可达）→ 补发 error end 保证配对；zero usage 占位（无真实终态数据）。
+    if (!ended) {
+      await ctx.fireSubagentEnd({
+        agentId: sub.id,
+        task,
+        depth: depth + 1,
+        reason: "error",
+        turns: 0,
+        usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+      });
+    }
+  }
 }
 
 export function subAgentTool(opts: SubAgentToolOptions): HarnessTool {
