@@ -341,26 +341,30 @@ export function autoCompaction(opts: AutoCompactionOptions): Hook {
         cache === null || targetCover - cache.coveredCount >= resummarizeEvery;
 
       if (needsResummarize) {
-        // 分离本 turn 的 pending：真实会话内核投影 messages = [prevSummary?, raw.slice(prevCovered), ...pending]，
-        // 用重算前的 cache 还原主体长度、尾部即 pending（onTurnStart 等注入的 additionalContext）；
-        // 直接测试场景（ctx.messages 为空）messages 即全量、无 pending。
-        // 前提：autoCompaction 在 pipe 中靠前、messages 未被其他 transform 重排（强约束见红线② follow-up）。
+        // summary 覆盖范围用 raw（_messages 真相）坐标算 targetCover；但**本 turn 投影从 pipe 入参 messages 切**，
+        // 以保留上游 transform 的修改（文档顺序 microcompact → autoCompaction 中 microcompact 已压过的 tail
+        // 不能被还原成原始大输出 —— 见 codex 交叉验证 P1）。viewCover = targetCover 映射到 messages 视图坐标：
+        //   真实会话 messages=[prevSummary?, raw.slice(prevCovered), ...pending] → (有 prevSummary?1:0)+(targetCover-prevCovered)；
+        //   直接测试场景（ctx.messages 为空）messages 即 raw、无 prevSummary 偏移 → viewCover=targetCover。
         const prevCovered = cache?.coveredCount ?? 0;
-        const mainLen = (cache !== null ? 1 : 0) + (raw.length - prevCovered);
-        const pending: Message[] = ctx.messages.length > 0 ? messages.slice(mainLen) : [];
+        const viewCover =
+          ctx.messages.length > 0
+            ? (cache !== null ? 1 : 0) + (targetCover - prevCovered)
+            : targetCover;
 
         // summarize 抛错让其冒泡：内核 pipe 对 transform 是 fail-open。赋值在 await 之后，抛错时 cache 不脏写。
-        // 总结 raw 真相前 targetCover 条（不用投影视图，避免 pending / 旧 summary 污染坐标）。
+        // 总结 raw 真相前 targetCover 条（用原始内容，不被上游 transform 的占位符污染）。
         const text = await opts.summarize(raw.slice(0, targetCover), ctx);
         // 缓存 Message 对象本身 → 同一对象跨 turn 复用 → bytes 稳定 → provider 缓存命中。
         const summaryMsg = createUserMessage(wrap(text, targetCover));
         cache = { coveredCount: targetCover, summaryMsg };
         // 本 turn 真跑了新总结才标记，供 postCompactFileReread 下一 turn 重读关键文件（opt-in）。
         ctx.state.set(POST_COMPACT_PENDING_KEY, ctx.turnIdx);
-        // 写 boundary（单一 raw 坐标）→ 内核 turn 末读取、下一 turn 投影 [summary, _messages.slice(coveredCount), pending]。
+        // 写 boundary（raw=_messages 真相坐标）→ 内核 turn 末读取、下一 turn 投影 [summary, _messages.slice(coveredCount), pending]；
+        // 下一 turn firePipeMessages 会对该投影重跑上游 transform，效果不丢。
         ctx.state.set(ACTIVE_BOUNDARY_KEY, { summary: summaryMsg, coveredCount: targetCover });
-        // 本 turn 立即投影，与内核下一 turn 投影同坐标 → 前缀一致、不重发已覆盖消息。
-        return [summaryMsg, ...raw.slice(targetCover), ...pending];
+        // 本 turn 投影从 messages 视图切（保留上游 transform 处理过的 tail + 尾部 pending），首条换 summary。
+        return [summaryMsg, ...messages.slice(viewCover)];
       }
 
       // 已有 boundary、本 turn 无需重算：return undefined（pass-through）。

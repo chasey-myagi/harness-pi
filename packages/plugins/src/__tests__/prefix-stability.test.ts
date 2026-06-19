@@ -450,3 +450,60 @@ describe("[GREEN] autoCompaction + pending attachment：boundary 后不重发已
     fake.teardown();
   });
 });
+
+/* ────── [GREEN] autoCompaction 保留上游 transform（composition，回归 codex P1）────── */
+
+describe("[GREEN] autoCompaction + 上游 transform：不还原已压缩的 tail", () => {
+  /**
+   * 回归 codex 交叉验证 P1：autoCompaction 在 pipe 中位于上游 transform（文档顺序 microcompact →
+   * autoCompaction）之后时，本 turn 投影必须从 pipe 入参 messages（已被上游处理）切，而非从 raw
+   * （原始 _messages）重建——否则上游已压缩/redact 的 tail 会被还原成原始大输出重新发给 LLM。
+   */
+  it("autoCompaction 不还原上游已 redact 的 tail（保留上游 transform 效果）", async () => {
+    // 上游 transform：把所有 toolResult 内容替换成 REDACTED（模拟 microcompact 压 tail 的 tool 输出）
+    const redactHook: Hook = {
+      name: "redact",
+      transformMessagesBeforeLlm(msgs) {
+        return msgs.map((m) =>
+          m.role === "toolResult"
+            ? { ...m, content: [{ type: "text" as const, text: "REDACTED" }] }
+            : m,
+        );
+      },
+    };
+    const fake = createFakeModel([
+      { content: [{ type: "toolCall" as const, name: "echo", arguments: { msg: "1" } }], stopReason: "toolUse" as const },
+      { content: [{ type: "toolCall" as const, name: "echo", arguments: { msg: "2" } }], stopReason: "toolUse" as const },
+      { content: [{ type: "toolCall" as const, name: "echo", arguments: { msg: "3" } }], stopReason: "toolUse" as const },
+      { content: [{ type: "text" as const, text: "done" }], stopReason: "stop" as const },
+    ]);
+    const session = new AgentSession({
+      model: fake,
+      tools: [echoTool],
+      // 文档顺序：上游 redact 在前、autoCompaction 在后
+      hooks: [
+        redactHook,
+        autoCompaction({
+          maxContextTokens: 1,
+          triggerRatio: 1,
+          keepRecent: 2,
+          resummarizeEvery: 100,
+          tokenCounter: { estimate: () => 999 },
+          summarize: async () => "SUM",
+        }),
+      ],
+    });
+    await session.run("go");
+
+    const calls = fake.getCalls();
+    // boundary 后的投影（messages[0]=SUM）：保留的 toolResult tail 必须是 REDACTED，
+    // 不能还原成上游 redact 前的原始 "echoed:" 内容。
+    const boundaryCalls = calls.filter((c) => msgContains(c.messages[0], "SUM"));
+    expect(boundaryCalls.length).toBeGreaterThan(0);
+    for (const c of boundaryCalls) {
+      expect(c.messages.some((m) => msgContains(m, "echoed:"))).toBe(false);
+    }
+
+    fake.teardown();
+  });
+});
