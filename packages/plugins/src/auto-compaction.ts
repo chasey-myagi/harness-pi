@@ -360,9 +360,15 @@ export function autoCompaction(opts: AutoCompactionOptions): Hook {
         cache = { coveredCount: targetCover, summaryMsg };
         // 本 turn 真跑了新总结才标记，供 postCompactFileReread 下一 turn 重读关键文件（opt-in）。
         ctx.state.set(POST_COMPACT_PENDING_KEY, ctx.turnIdx);
-        // 写 boundary（raw=_messages 真相坐标）→ 内核 turn 末读取、下一 turn 投影 [summary, _messages.slice(coveredCount), pending]；
-        // 下一 turn firePipeMessages 会对该投影重跑上游 transform，效果不丢。
-        ctx.state.set(ACTIVE_BOUNDARY_KEY, { summary: summaryMsg, coveredCount: targetCover });
+        // live boundary 只在 coveredCount 基于 durable ctx.messages(_messages 真相)坐标时写 —— 否则
+        // 内核下一 turn 按它 slice _messages 会丢真实消息（codex P2：ctx.messages 空 + 仅 transient
+        // pending 的退化场景，如 fresh session continue() 只带 onTurnStart attachments）。
+        // ctx.messages 空时本 turn 投影仍生效（view-only one-turn），但不持久化 boundary。
+        if (ctx.messages.length > 0) {
+          // 内核 turn 末读取、下一 turn 投影 [summary, _messages.slice(coveredCount), pending]；
+          // 下一 turn firePipeMessages 会对该投影重跑上游 transform，效果不丢。
+          ctx.state.set(ACTIVE_BOUNDARY_KEY, { summary: summaryMsg, coveredCount: targetCover });
+        }
         // 本 turn 投影从 messages 视图切（保留上游 transform 处理过的 tail + 尾部 pending），首条换 summary。
         return [summaryMsg, ...messages.slice(viewCover)];
       }
