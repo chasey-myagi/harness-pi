@@ -44,14 +44,17 @@ export function parseGoalCommand(rest: string): GoalOptions | null {
   let budgetTokens: number | undefined = undefined;
   let successHint: string | undefined = undefined;
 
+  // 全局 replace + 词边界 `(?![-\w])`：① 重复 flag 全部消费（非全局只去首个、残留字面量会发给 LLM）；
+  // ② `--max-turns-doc` / `--budgetary` 这类把 flag 当子串的词不被部分吞掉（边界挡住后续 `-`/字母）。
+
   // --max-turns <N>；非法值忽略并清掉完整 token，避免污染 goal 文本（如 3.5 残留 .5）。
-  text = text.replace(/--max-turns(?:\s+((?!--)\S+))?/i, (_, n: string | undefined) => {
+  text = text.replace(/--max-turns(?![-\w])(?:\s+((?!--)\S+))?/gi, (_, n: string | undefined) => {
     if (n !== undefined && /^[+-]?\d+$/.test(n)) maxTurns = Math.max(1, parseInt(n, 10));
     return "";
   });
 
   // --budget <N>；非法值也消费掉完整 token，避免把 flag 原样发给 LLM。
-  text = text.replace(/--budget(?:\s+((?!--)\S+))?/i, (_, n: string | undefined) => {
+  text = text.replace(/--budget(?![-\w])(?:\s+((?!--)\S+))?/gi, (_, n: string | undefined) => {
     if (n !== undefined && /^[+-]?\d+$/.test(n)) {
       const v = parseInt(n, 10);
       if (v > 0) budgetTokens = v;
@@ -61,9 +64,12 @@ export function parseGoalCommand(rest: string): GoalOptions | null {
 
   // --success "quoted" or --success until next flag / stray -- / end.
   text = text.replace(
-    /--success\s+(?:"([^"]+)"|(.+?))(?=\s+--|$)/i,
+    /--success(?![-\w])\s+(?:"([^"]*)"|(.+?))(?=\s+--|$)/gi,
     (_match: string, quoted: string | undefined, unquoted: string | undefined) => {
-      successHint = (quoted ?? unquoted ?? "").trim();
+      const hint = (quoted ?? unquoted ?? "").trim();
+      // 空 hint（`--success ""` 或纯空白）语义统一为「无 hint」——与 buildGoalPrompt 的
+      // `if(opts.successHint)` 一致，不留 present-but-empty 的歧义态。
+      if (hint.length > 0) successHint = hint;
       return "";
     },
   );
@@ -231,7 +237,8 @@ export function classifyGoalOutcome(
   const rawAbortReason = summary?.abortReason?.trim();
   const runAborted = summary?.reason === "aborted" || userAborted;
   const success = verdict === "reached";
-  const aborted = runAborted && userAborted && !success;
+  // 吸收律：runAborted = (reason==="aborted") || userAborted，故 `runAborted && userAborted` ≡ `userAborted`。
+  const aborted = userAborted && !success;
   const guardAborted = runAborted && !userAborted && !success;
   const budgetExhausted =
     guardAborted && rawAbortReason !== undefined && /token budget exhausted/i.test(rawAbortReason);
