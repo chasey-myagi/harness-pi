@@ -132,6 +132,25 @@ describe("postCompactFileReread", () => {
     expect(await hook.onTurnStart!({ turnIdx: 1 }, ctx)).toBeUndefined();
   });
 
+  it("recovers from a provider throw: skips the failing file, still injects siblings (#98)", async () => {
+    // provider 对某个 path 抛错不该拖垮整个 turn——记一笔、跳过该文件，兄弟文件照常注入、onTurnStart 不 reject。
+    const hook = postCompactFileReread({
+      fileContentProvider: async (p) => {
+        if (p === "/boom.ts") throw new Error("read failed");
+        return "OK_BODY";
+      },
+    });
+    const ctx = fakeCtx(
+      [toolCallMsg("read", { path: "/boom.ts" }), toolCallMsg("read", { path: "/good.ts" })],
+      { pending: 0 },
+    );
+    const out = await hook.onTurnStart!({ turnIdx: 1 }, ctx); // 不 reject
+    const text = (out as { additionalContext: string }).additionalContext;
+    expect(text).toContain("OK_BODY"); // 好文件仍注入
+    expect(text).not.toContain("/boom.ts"); // 抛错文件被跳过
+    expect(text).not.toContain("read failed");
+  });
+
   it("bounds the number of files to maxFiles (most-recently-referenced first)", async () => {
     const calls: string[] = [];
     const hook = postCompactFileReread({

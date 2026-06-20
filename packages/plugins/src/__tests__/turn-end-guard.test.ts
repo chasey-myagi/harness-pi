@@ -144,6 +144,28 @@ describe("turnEndGuard", () => {
     expect(injected).toHaveLength(2);
   });
 
+  it("regression: retry budget is fresh across run → continue (no stale count, no premature give-up) (#98)", async () => {
+    // onSessionStart 每轮重置计数：run() 把 maxRetries 预算用尽放行后，continue() 必须拿到**全新**预算、
+    // 仍能强制续跑——否则上一轮的计数残留会让 continue() 立刻 give-up（continuations=0）。
+    const model = createFakeModel([]); // 自动补默认响应，无需精确计数
+    const check = vi.fn(() => ({ ok: false, message: "not yet" })); // 永远不过
+
+    const session = new AgentSession({
+      model,
+      tools: [],
+      hooks: [turnEndGuard({ check, maxRetries: 1 })],
+      maxContinuations: 10,
+    });
+
+    const s1 = await session.run("go");
+    expect(s1.continuations).toBe(1); // 强制 1 次后预算耗尽、放行停止
+
+    const s2 = await session.continue();
+    // continue 重新拿到 maxRetries 预算 → 又强制 1 次（若计数残留则提前 give-up、continuations=0）。
+    expect(s2.continuations).toBe(1);
+    expect(check).toHaveBeenCalledTimes(4); // 两轮各 2 次（强制 1 次 + 预算用尽 1 次）
+  });
+
   it("regression: without turnEndGuard, no continuation happens", async () => {
     const model = createFakeModel([
       { content: [{ type: "text", text: "done" }] },

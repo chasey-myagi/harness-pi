@@ -4,7 +4,7 @@
 
 import { describe, it, expect, vi } from "vitest";
 import { HookDispatcher, mergeResults, defaultTimeoutFor } from "../dispatcher.js";
-import type { Hook, HookContext } from "../index.js";
+import type { Hook, HookContext, OnSubagentEndInput, Usage } from "../index.js";
 import { createTestContext } from "../testing.js";
 
 function fakeCtx(): HookContext {
@@ -407,12 +407,19 @@ describe("HookDispatcher subagent events (O5)", () => {
   });
 
   it("fireEvent('onSubagentEnd') dispatches terminal state to matched hooks", async () => {
-    const seen: any[] = [];
+    const seen: OnSubagentEndInput[] = [];
     const hooks: Hook[] = [
       { name: "probe", onSubagentEnd: (input) => { seen.push(input); } },
     ];
     const d = new HookDispatcher(hooks);
-    const usage = { input: 1, output: 2 } as any;
+    const usage: Usage = {
+      input: 1,
+      output: 2,
+      cacheRead: 0,
+      cacheWrite: 0,
+      totalTokens: 3,
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+    };
     await d.fireEvent(
       "onSubagentEnd",
       { agentId: "sub-1", task: "do x", depth: 1, reason: "done", turns: 3, usage, summaryText: "result" },
