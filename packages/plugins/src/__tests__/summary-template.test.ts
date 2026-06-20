@@ -113,4 +113,16 @@ describe("defaultSummarize / summary template", () => {
     const out = renderSummaryPrompt([createUserMessage("x")]);
     expect(out).toBe(DEFAULT_SUMMARY_TEMPLATE.replace("{transcript}", "user: x"));
   });
+
+  it("renderMessage covers string content and image blocks (#98)", () => {
+    // 两条未覆盖分支：① content 为裸 string（非 block 数组）；② block 数组里的 image block → "[image]"。
+    const stringMsg = { role: "user", content: "PLAIN_STRING" } as unknown as Message;
+    const imageMsg = {
+      role: "user",
+      content: [{ type: "image", source: { kind: "base64", data: "x", mimeType: "image/png" } }],
+    } as unknown as Message;
+    const out = renderSummaryPrompt([stringMsg, imageMsg], "{transcript}");
+    expect(out).toContain("user: PLAIN_STRING");
+    expect(out).toContain("user: [image]");
+  });
 });
