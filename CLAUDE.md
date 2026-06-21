@@ -62,7 +62,7 @@ POSTGRES_TEST_URL=postgres://postgres:test@localhost:5432/harness_pi_test pnpm -
 
 # 跑 dogfood agent / 示例
 pnpm --filter @harness-pi/coding-agent start -- --cwd . --model dashscope:qwen-plus "inspect this repo"
-pnpm --filter @harness-pi-example/01-bare-kernel start   # examples/ 下 01~04
+pnpm --filter @harness-pi-example/01-bare-kernel start   # examples/ 下 01~05
 ```
 
 dogfood agent(命令名 **`hpi`**):默认 full mode 挂全部 tools(`--read-only` 只挂只读);`--disable bash,write` 关指定 tool;session log 默认对高危 tool args 脱敏(`--log-args full|none`、`--no-log`)。详见 `README.md` Dogfood 段。

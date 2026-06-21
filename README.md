@@ -39,6 +39,22 @@
    - Adapter：plugin 的 I/O 后端（metric sink、log sink、session store）
 5. **不强加 DB**、**不强加 frontend**、**不强加 metric kinds**。Sink 走接口 + peerDep；自定义 metric kind 用 TS module augmentation。
 
+## harness-pi 与 Loop Engineering
+
+"Loop Engineering"——把 agent 跑成**带护栏的循环**（"harness 的上一层"）——正在成为共识。Claude Code / Codex 把 `/loop`、`/goal` 这类循环做成**不透明的内置命令**；harness-pi 的定位是互补的另一端：**不卖某一条 loop 命令，卖装那台循环的可编程零件**。一条生产级 loop 需要的护栏，在 harness-pi 里几乎都已是 first-class hook / controller（且方向正是后端服务 / 批处理 agent，不是终端 UX）：
+
+| Loop 需要的护栏 | harness-pi 现成件（均已 ship + 测试覆盖） |
+|---|---|
+| 停止条件 / 验收闸门 | `turnEndGuard`（模型想停时跑 check，不过则回灌原因强制续跑） |
+| 生成者 / 验证者分离（maker-verifier） | `subAgentTool` / `routedSubAgentTool`——把验证放进**回合之外的独立 sub-agent**（不同指令、只回 PASS/FAIL），符合"别批改自己的作业" |
+| 硬保险丝（预算 / 无进展 / 熔断） | `tokenBudget` / `repeatedCallGuard` / `emptyRunGuard` / `watchdog` |
+| 上下文经济（cache 友好） | `autoCompaction` + **封存投影**（v0.5.0）+ `prefixShape` 前缀诊断 |
+| 知识固化（skills） | `skills` / `deferredTools`（O1/O2 渐进暴露） |
+| 外置状态 / 可恢复 | `SessionStore`（append-only）+ `compaction_boundary` |
+| 并行 / 扇出编排 | controllers：`parallel` / `pipeline` / `workPool` / `forkSession` |
+
+> Claude Code 给你一个不透明的 `/goal`；harness-pi 给你**装那台摇柄的零件**。用上表的现成 hook 可以从零件拼出一条 maker-verifier loop（生成者干活 → 独立 reviewer 回合外判 PASS/FAIL → 预算 / 无进展做硬保险丝），不依赖任何内置命令——可运行示例见 [`examples/05-maker-verifier-loop`](examples/05-maker-verifier-loop)。
+
 ## 当前状态
 
 `harness-pi` 现在处在 **v0.5.0** 阶段：core loop、hook dispatcher、standard plugins、controllers、first-party tools、dogfood coding agent、offline examples 和测试都已经落地，足够做 spike/review。v0.5.0 的重点是 **cache-aware 封存投影**——把 `compaction_boundary` 提为 live 投影一等公民，让上下文投影前缀字节稳定、对 provider prompt-cache 友好（配 prefix 稳定性回归门 + 真 provider cache A/B 脚本验证）。
@@ -83,7 +99,9 @@ harness-pi/
 ├── examples/
 │   ├── 01-bare-kernel/
 │   ├── 02-with-plugins/
-│   └── 03-tools/
+│   ├── 03-tools/
+│   ├── 04-batch-pipeline/
+│   └── 05-maker-verifier-loop/  # maker-verifier loop assembled from hooks
 └── README.md
 ```
 
