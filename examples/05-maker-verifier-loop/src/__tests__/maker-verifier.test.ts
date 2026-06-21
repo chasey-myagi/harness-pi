@@ -85,4 +85,24 @@ describe("maker-verifier loop（现成 hook 拼装）", () => {
     expect(result.reworks).toBe(5); // 强制返工 5 次
     expect(result.reason).toBe("done");
   });
+
+  it("reviewer 基础设施失败（provider 错误）→ maker abort、surface 出来、不掩盖为普通 FAIL（回归 codex P2）", async () => {
+    const makerModel = createFakeModel([
+      { content: [{ type: "toolCall", name: "submit", arguments: { solution: "x" } }], stopReason: "toolUse" },
+      { content: [{ type: "text", text: "Done." }] },
+    ]);
+    // reviewer 第一次 review 就 provider 错误（stream 抛）→ 子 session reason="error"。
+    const reviewerModel = createFakeModel([{ content: [], streamThrows: new Error("provider 500") }]);
+
+    const result = await runMakerVerifierLoop({
+      makerModel,
+      reviewerModel,
+      task: "do the thing",
+      stopCondition: "anything",
+      maxReworks: 3,
+    });
+
+    expect(result.gateError).toBeDefined(); // gate 失败显式 surface —— 不是 done+passed=false 掩盖
+    expect(result.passed).toBe(false);
+  });
 });

@@ -42,6 +42,12 @@ export interface MakerVerifierResult {
   passed: boolean;
   /** maker 最后提交的解。 */
   finalSolution: string;
+  /**
+   * **验证闸本身**失败时的原因（reviewer provider 抛错 / 非正常终态）。set 即表示这条结果**不可信**
+   * ——不是「reviewer 说没过」，而是「reviewer 根本没判成」。与 passed=false 区分开，别把 gate 故障
+   * 当普通未达成掩盖。
+   */
+  gateError?: string;
 }
 
 export interface MakerVerifierOptions {
@@ -55,8 +61,17 @@ export interface MakerVerifierOptions {
   stopCondition: string;
   /** 最多强制返工几次（达上限仍 FAIL 则放行停止，绝不无限转）。默认 3。 */
   maxReworks?: number;
-  /** maker session 总 token 预算（硬保险丝）。默认 50_000。 */
+  /**
+   * **每一方** session 的 token 预算（硬保险丝）。默认 50_000。注意 reviewer 是独立 session，
+   * 其用量不计入 maker 的预算——故对 maker、对**每次** review 各挂一道 budget。聚合上界 ≈
+   * maker 预算 + (maxReworks + 1) × reviewer 单次预算（接真 provider 时据此估算总成本）。
+   */
   budgetTokens?: number;
+  /**
+   * 单次 reviewer LLM 调用的超时（毫秒）。默认 120_000。turnEndGuard 是 event 类 hook，超时会 fail-open
+   * 丢弃续跑结果 → gate 被静默绕过；真 reviewer provider 慢时必须给足，否则验证形同虚设。
+   */
+  reviewerTimeoutMs?: number;
 }
 
 /**
@@ -67,6 +82,7 @@ export async function runMakerVerifierLoop(
 ): Promise<MakerVerifierResult> {
   let lastSolution = "";
   let passed = false;
+  let gateError: string | undefined;
 
   // maker 提交解的 toy 工具（真实场景是 write/edit + 跑测试后提交 diff）。
   const submitTool: HarnessTool = {
@@ -80,6 +96,7 @@ export async function runMakerVerifierLoop(
   };
 
   const maxReworks = opts.maxReworks ?? 3;
+  const budget = opts.budgetTokens ?? 50_000;
   const maker = new AgentSession({
     model: opts.makerModel,
     tools: [submitTool],
@@ -89,12 +106,16 @@ export async function runMakerVerifierLoop(
     maxContinuations: maxReworks + 1,
     hooks: [
       // 停止闸：maker 想停 → 跑独立 reviewer → FAIL 则回灌 gap 强制返工、PASS 则放行。
+      // timeoutMs 必须覆盖真 reviewer provider 的耗时——turnEndGuard 是 event 类、超时 fail-open 会丢弃
+      // 续跑结果让 gate 被静默绕过（默认 30s 对真 LLM 不够）。
       turnEndGuard({
         maxRetries: maxReworks,
-        check: async () => {
-          // 独立 reviewer sub-agent：全新 AgentSession、不同 system prompt、无 tools（不能改代码）。
+        timeoutMs: opts.reviewerTimeoutMs ?? 120_000,
+        check: async (ctx) => {
+          // 独立 reviewer sub-agent：全新 AgentSession、不同 system prompt、无 edit/write 工具（不能改代码）。
           // 复用同一个 reviewerModel 实例 → fake model 的 response 队列在多轮 review 间推进
-          //（真 provider 则是同一模型每次对当前 solution 重新判断）。
+          //（真 provider 则是同一模型每次对当前 solution 重新判断）。挂自己的 tokenBudget 封住单次 review 成本
+          // （reviewer 在独立 session、用量不进 maker 预算）。
           const reviewer = new AgentSession({
             model: opts.reviewerModel,
             tools: [],
@@ -102,10 +123,27 @@ export async function runMakerVerifierLoop(
               `You are a strict, independent reviewer. You cannot edit code. ` +
               `Stop condition: ${opts.stopCondition}. ` +
               `Reply with exactly "PASS" or "FAIL: <one-line gap>".`,
+            hooks: [tokenBudget({ budget, diminishingThreshold: 0 })],
           });
-          const summary = await reviewer.run(
-            `Review this submitted solution:\n${lastSolution || "(nothing submitted yet)"}`,
-          );
+          // reviewer 基础设施失败（provider 抛错 / 非正常终态）→ 验证闸本身坏了。**别**把空/陈旧 verdict
+          // 当普通 FAIL 掩盖（那会让外层以 done+passed=false 收场、看不出 gate 失效）。两种失败都接住：
+          // ① reviewer.run 抛（stream 同步抛被内核 fail-open 后仍可能冒泡）；② 返回非 done 终态。
+          // 经 gateError 显式 surface（ctx.abort 尽力而为，但从 continuation-check 内未必改写终态）。
+          let summary;
+          try {
+            summary = await reviewer.run(
+              `Review this submitted solution:\n${lastSolution || "(nothing submitted yet)"}`,
+            );
+          } catch (err) {
+            gateError = `reviewer threw: ${err instanceof Error ? err.message : String(err)}`;
+            ctx.abort(gateError);
+            return { ok: true };
+          }
+          if (summary.reason !== "done") {
+            gateError = `reviewer failed to produce a verdict (reviewer reason=${summary.reason})`;
+            ctx.abort(gateError);
+            return { ok: true };
+          }
           const verdict = assistantText(summary.lastMessage);
           if (/^\s*PASS\b/i.test(verdict)) {
             passed = true;
@@ -120,7 +158,7 @@ export async function runMakerVerifierLoop(
       // 「无进展」，但 maker-verifier loop 的实际进展发生在**回合外的 reviewer**、不计入 maker delta，简洁
       // 回合会被误判为摆烂、在 reviewer 评判前就 abort。这里只保留**显式预算上限**这一条硬闸。
       // repeatedCallGuard 不内置 abort，在 onRepeat 里 ctx.abort 当熔断（domain-free 设计，由调用方组合）。
-      tokenBudget({ budget: opts.budgetTokens ?? 50_000, diminishingThreshold: 0 }),
+      tokenBudget({ budget, diminishingThreshold: 0 }),
       repeatedCallGuard({
         threshold: 4,
         onRepeat: (ctx, p) =>
@@ -132,5 +170,12 @@ export async function runMakerVerifierLoop(
   const summary = await maker.run(opts.task);
   // reworks = 内核记录的强制续跑次数（turnEndGuard FAIL→force）。比手数 check-FAIL 更准：
   // 达 maxRetries 上限那次「放行停止」的 FAIL 不算返工，continuations 自然不计它。
-  return { reason: summary.reason, reworks: summary.continuations, passed, finalSolution: lastSolution };
+  const result: MakerVerifierResult = {
+    reason: summary.reason,
+    reworks: summary.continuations,
+    passed,
+    finalSolution: lastSolution,
+  };
+  if (gateError !== undefined) result.gateError = gateError;
+  return result;
 }

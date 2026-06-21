@@ -101,6 +101,14 @@ tokenBudget/repeatedCallGuard 保险丝），是本设计的活 spike。
 2. **关掉 `tokenBudget` 的「递减收益」启发式**（`diminishingThreshold: 0`），只保留显式预算上限。递减检测按
    maker 每 turn 的 token delta 判「无进展」，但 maker-verifier loop 的实际进展发生在**回合外的 reviewer**、
    不计入 maker delta —— 简洁回合会被误判摆烂、在 reviewer 评判前 abort（`reason:"aborted"`）。
+3. **`turnEndGuard` 的 `timeoutMs` 要覆盖真 reviewer LLM 调用**。它是 event 类 hook，超时 **fail-open**——
+   续跑结果被丢弃、maker 直接 `done` 而没拿到 PASS（gate 被静默绕过），reviewer promise 还在后台跑。默认 30s
+   对真 provider 不够，按 reviewer 耗时给足。
+4. **reviewer 失败要显式 surface，别当普通 FAIL**。reviewer 子 session 以 `reason:"error"`/`"max_turns"`
+   结束（provider 5xx/401、坏 tool-call 循环）时，若仍读 `lastMessage` 把空/陈旧 verdict 当 FAIL，外层会以
+   `done`+`passed=false` 收场、掩盖**验证闸本身坏了**。必须先查 `summary.reason`，非 `done` 就 abort / 上报。
+5. **reviewer 的 token 在独立 session、不进 maker 的 `tokenBudget`**。要么对 reviewer 也挂一道 budget（聚合
+   上界 ≈ maker 预算 + (maxReworks+1) × reviewer 单次预算），要么共享用量记账——否则「硬预算」名不副实。
 
 ## 6. CLI 表面（复用 v1 解析 + #105 卫生）
 
