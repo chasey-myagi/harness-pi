@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { AgentSession, createUserMessage } from "@harness-pi/core";
+import { AgentSession, createUserMessage, ACTIVE_BOUNDARY_KEY } from "@harness-pi/core";
 import { createTestContext, createFakeModel } from "@harness-pi/core/testing";
 import type { Message, Tool } from "@earendil-works/pi-ai";
 import {
@@ -37,6 +37,23 @@ describe("autoCompaction", () => {
     expect(early!.length).toBe(3); // 5 - keepRecent(2)
     expect(textOf(view![0]!)).toContain("SUM:3");
     expect(view!.slice(1).map(textOf)).toEqual(["4", "5"]);
+  });
+
+  it("ctx.messages 空（退化/单元场景）触发压缩时不写 live boundary（回归 codex P2）", async () => {
+    // raw fallback 到 messages 参数时 coveredCount 不基于 durable _messages；若仍写 boundary，
+    // 内核下一 turn 会按错坐标 slice _messages、丢真实消息（fresh continue() 只带 transient
+    // attachments 的退化场景）。故 ctx.messages 空时本 turn 投影生效但**不持久化 boundary**。
+    const compact = autoCompaction({
+      maxContextTokens: 100,
+      triggerRatio: 0.5,
+      keepRecent: 2,
+      tokenCounter: { estimate: ({ messages }) => messages.length * 20 }, // 5 msgs => 100 > 50
+      summarize: (e) => `SUM:${e.length}`,
+    });
+    const { ctx } = createTestContext(); // ctx.messages 为空
+    const view = await compact.transformMessagesBeforeLlm!(grow(5), ctx);
+    expect(view).toBeDefined(); // 本 turn 投影仍生效（view-only one-turn）
+    expect(ctx.state.get(ACTIVE_BOUNDARY_KEY)).toBeUndefined(); // 但不写 boundary
   });
 
   it("does not compact below the token threshold (returns undefined, summarize not called)", async () => {

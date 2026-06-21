@@ -63,6 +63,24 @@ describe("postCompactFileReread", () => {
     expect(providerCalls).toBe(0); // 没压缩 → 根本不解析
   });
 
+  it("UTF-8 截断落在码点边界、不产生 U+FFFD（#98 回归）", async () => {
+    // maxBytes=5，中文每字 3 bytes："日本語…" → 码点边界截断保留 "日"(3 bytes)，
+    // 不切到 "本" 中间（原字节级 Buffer.subarray 会切第 2 字、末尾产生替换字符 U+FFFD）。
+    const hook = postCompactFileReread({
+      maxBytes: 5,
+      fileContentProvider: async () => "日本語テスト",
+    });
+    const ctx = fakeCtx([toolCallMsg("read", { path: "/a.ts" })], { pending: 0 });
+    const out = await hook.onTurnStart!({ turnIdx: 1 }, ctx);
+
+    expect(out).toBeDefined();
+    const text = out!.additionalContext!;
+    expect(text).not.toContain("�"); // 无替换字符
+    expect(text).toContain("日"); // 第 1 字保留（3 ≤ 5）
+    expect(text).not.toContain("本"); // 第 2 字累计 6 > 5，码点边界截掉
+    expect(text).toContain("[truncated to 5 bytes]");
+  });
+
   it("resolves referenced paths and injects their current content after compaction", async () => {
     const fs: Record<string, string> = { "/a.ts": "AAA", "/b.ts": "BBB" };
     const hook = postCompactFileReread({
@@ -112,6 +130,25 @@ describe("postCompactFileReread", () => {
     const hook = postCompactFileReread({ fileContentProvider: async () => null });
     const ctx = fakeCtx([toolCallMsg("read", { path: "/a.ts" })], { pending: 0 });
     expect(await hook.onTurnStart!({ turnIdx: 1 }, ctx)).toBeUndefined();
+  });
+
+  it("recovers from a provider throw: skips the failing file, still injects siblings (#98)", async () => {
+    // provider 对某个 path 抛错不该拖垮整个 turn——记一笔、跳过该文件，兄弟文件照常注入、onTurnStart 不 reject。
+    const hook = postCompactFileReread({
+      fileContentProvider: async (p) => {
+        if (p === "/boom.ts") throw new Error("read failed");
+        return "OK_BODY";
+      },
+    });
+    const ctx = fakeCtx(
+      [toolCallMsg("read", { path: "/boom.ts" }), toolCallMsg("read", { path: "/good.ts" })],
+      { pending: 0 },
+    );
+    const out = await hook.onTurnStart!({ turnIdx: 1 }, ctx); // 不 reject
+    const text = (out as { additionalContext: string }).additionalContext;
+    expect(text).toContain("OK_BODY"); // 好文件仍注入
+    expect(text).not.toContain("/boom.ts"); // 抛错文件被跳过
+    expect(text).not.toContain("read failed");
   });
 
   it("bounds the number of files to maxFiles (most-recently-referenced first)", async () => {

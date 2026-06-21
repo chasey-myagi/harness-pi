@@ -112,7 +112,15 @@ import type {
   SessionConfigView,
   ToolExecResult,
   ContextOverflowInput,
+  ActiveBoundary,
 } from "./hook.js";
+
+/**
+ * autoCompaction 写入 `ctx.state` 的 live 境界 well-known key。
+ * 内核每个 turn 结束后读取此 key、更新 `_activeBoundary`。
+ * Plugin 从 `@harness-pi/core` import 使用。
+ */
+export const ACTIVE_BOUNDARY_KEY = "harness-pi.activeBoundary" as const;
 import { ToolExecutor, findToolByName } from "./tool-executor.js";
 import { createAttachmentMessage } from "./types.js";
 import type { HarnessTool } from "./types.js";
@@ -278,6 +286,13 @@ export class AgentSession {
   /** 可选会话存储 + 已 append 进 store 的 messages 数（避免重复落盘）。 */
   private readonly _store: SessionStore | undefined;
   private _persistedCount: number;
+  /**
+   * Live 境界（autoCompaction 写入 ctx.state、由内核持有）。
+   * null = 未设定境界（照常把全量 _messages 发给 LLM）。
+   * 非 null = 投影成 `[boundary.summary, ..._messages.slice(coveredCount), ...pending]`。
+   * summary 复用同一对象 → prefix bytes 稳定（提升 prompt-cache 命中率）。
+   */
+  private _activeBoundary: ActiveBoundary | null = null;
   /** strict 持久化模式：run 结束落盘不全则把返回的 RunSummary.reason 改 error（见选项注释）。 */
   private readonly _strictPersistence: boolean;
   /** 本 session 累积的持久化失败记录；两种模式下都如实挂上 RunSummary.persistenceErrors。 */
@@ -1164,6 +1179,15 @@ export class AgentSession {
         }
       }
 
+      // 从 ctx.state 读取 live boundary、更新 _activeBoundary。
+      // 不论有无 store 都执行（目的是稳定 live 投影，与持久化无关）。
+      // autoCompaction 在 transformMessagesBeforeLlm 内 ctx.state.set(ACTIVE_BOUNDARY_KEY, ...) 后，
+      // 下一 turn 的 _phaseLlmCall 即可用同一 summary 对象投影。
+      const newBoundary = this._ctx.state.get(ACTIVE_BOUNDARY_KEY);
+      if (newBoundary !== undefined) {
+        this._activeBoundary = newBoundary;
+      }
+
       if (outcome === "done") return { turnIdx, reason: "done" };
       if (outcome === "abort") return { turnIdx, reason: "aborted" };
       if (outcome === "error") return { turnIdx, reason: "error" };
@@ -1257,10 +1281,19 @@ export class AgentSession {
       this.systemPrompt,
       this._ctx,
     );
-    const baseMessages: Message[] = [
-      ...this._messages,
-      ...this._pendingAttachments,
-    ];
+    // live boundary 投影：_activeBoundary 已设则投 [summary, _messages[K..], pending]，
+    // 未设则照旧 [_messages, pending]。复用同一 summary 对象 →
+    // turn 间 prefix bytes 稳定、最大化 provider 的 prompt-cache 命中率。
+    const baseMessages: Message[] = this._activeBoundary !== null
+      ? [
+          this._activeBoundary.summary,
+          ...this._messages.slice(this._activeBoundary.coveredCount),
+          ...this._pendingAttachments,
+        ]
+      : [
+          ...this._messages,
+          ...this._pendingAttachments,
+        ];
     const transformed = await this._dispatcher.firePipeMessages(
       baseMessages,
       this._ctx,

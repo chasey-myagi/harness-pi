@@ -119,9 +119,18 @@ export function postCompactFileReread(
         let body = content;
         let truncated = "";
         if (Buffer.byteLength(body, "utf8") > maxBytes) {
-          // 按字节上界截断到 maxBytes。注意：在多字节 UTF-8 字符中间切会让末尾出现一个替换字符
-          // （U+FFFD）——注入内容是给模型看的 advisory，可接受；故不保证截断点落在码点边界。
-          body = Buffer.from(body, "utf8").subarray(0, maxBytes).toString("utf8");
+          // 按 maxBytes 字节上界截断，但只在**码点边界**处切：for...of 按 Unicode 码点迭代
+          // （不拆 surrogate pair），逐码点累加字节直到再加一个就超界——不切断多字节 UTF-8 字符、
+          // 不产生尾随 U+FFFD（修 #98：原 Buffer.subarray 字节级截断会在多字节中间切）。
+          let kept = "";
+          let bytes = 0;
+          for (const ch of body) {
+            const n = Buffer.byteLength(ch, "utf8");
+            if (bytes + n > maxBytes) break;
+            bytes += n;
+            kept += ch;
+          }
+          body = kept;
           truncated = `\n[truncated to ${maxBytes} bytes]`;
         }
         blocks.push(`<file path="${p}">\n${body}${truncated}\n</file>`);

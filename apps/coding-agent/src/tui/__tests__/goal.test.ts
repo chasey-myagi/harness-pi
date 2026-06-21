@@ -115,13 +115,65 @@ describe("parseGoalCommand", () => {
     });
   });
 
-  it("uses the first --success flag and leaves later repeated flags as goal text", () => {
+  it("consumes all repeated --success flags (last wins, no literal leaks to goal)", () => {
+    // 全局 replace：重复 flag 全部消费、last-wins；旧非全局只去首个、残留 `--success second pass` 发给 LLM。
     expect(parseGoalCommand("ship --success first pass --success second pass")).toEqual({
-      goal: "ship --success second pass",
+      goal: "ship",
       maxTurns: 5,
       budgetTokens: undefined,
-      successHint: "first pass",
+      successHint: "second pass",
     });
+  });
+
+  it("consumes all repeated --budget flags (last wins, no literal leaks to goal)", () => {
+    expect(parseGoalCommand("optimize --budget 100 --budget 200")).toEqual({
+      goal: "optimize",
+      maxTurns: 5,
+      budgetTokens: 200,
+      successHint: undefined,
+    });
+  });
+
+  it("repeated --budget with later 0 clears the limit (last-wins, codex P2)", () => {
+    // last-wins + `--budget 0`=无限：后者必须解除前者的 100，不能残留旧上限。
+    expect(parseGoalCommand("optimize --budget 100 --budget 0")).toEqual({
+      goal: "optimize",
+      maxTurns: 5,
+      budgetTokens: undefined,
+      successHint: undefined,
+    });
+  });
+
+  it('repeated --success with later "" clears the hint (last-wins, codex P3)', () => {
+    // last-wins + 空=无 hint：空的后者必须解除前者，不能把旧 success criteria 织进 prompt。
+    const r = parseGoalCommand('ship --success tests pass --success ""');
+    expect(r?.successHint).toBeUndefined();
+    expect(r?.goal).toBe("ship");
+  });
+
+  it("does not partial-match a flag-prefixed word (word boundary)", () => {
+    // `--max-turns-doc` 不是 `--max-turns`：词边界挡住后续 `-`，整词原样留在 goal、maxTurns 取默认。
+    expect(parseGoalCommand("write the --max-turns-doc section")).toEqual({
+      goal: "write the --max-turns-doc section",
+      maxTurns: 5,
+      budgetTokens: undefined,
+      successHint: undefined,
+    });
+  });
+
+  it("treats --budget 0 as no limit (v>0 guard boundary)", () => {
+    expect(parseGoalCommand("tidy up --budget 0")).toEqual({
+      goal: "tidy up",
+      maxTurns: 5,
+      budgetTokens: undefined,
+      successHint: undefined,
+    });
+  });
+
+  it('treats empty --success "" as no hint (not present-but-empty)', () => {
+    const r = parseGoalCommand('ship it --success ""');
+    expect(r?.successHint).toBeUndefined();
+    expect(r?.goal).toBe("ship it");
   });
 });
 
@@ -413,6 +465,17 @@ describe("classifyGoalOutcome", () => {
           abortReason: "token budget exhausted: 120/100",
         } as any,
         "GOAL_STATUS: REACHED",
+      ),
+    ).toMatchObject({ verdict: "reached", aborted: false, budgetExhausted: false });
+  });
+
+  it("treats REACHED as success even when a user abort lands on the same turn", () => {
+    // Esc 正好撞上 REACHED：success 优先于中断修饰符 → aborted=false（钉死 aborted=userAborted&&!success 简化）。
+    expect(
+      classifyGoalOutcome(
+        { turns: 2, continuations: 1, reason: "aborted" } as any,
+        "GOAL_STATUS: REACHED",
+        true,
       ),
     ).toMatchObject({ verdict: "reached", aborted: false, budgetExhausted: false });
   });

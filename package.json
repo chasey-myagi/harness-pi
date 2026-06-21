@@ -1,8 +1,8 @@
 {
   "name": "harness-pi",
   "private": true,
-  "version": "0.1.0",
-  "description": "Production harness for pi-ai-based agents — kernel + plugins",
+  "version": "0.5.0",
+  "description": "Service-runtime harness for @earendil-works/pi-ai agents — minimal kernel + plugins",
   "license": "MIT",
   "repository": {
     "type": "git",
