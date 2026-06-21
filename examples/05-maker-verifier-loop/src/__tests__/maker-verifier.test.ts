@@ -11,16 +11,13 @@ import { runMakerVerifierLoop } from "../maker-verifier.js";
 const V1_BUGGY = "def first(xs): return xs[0]";
 const V2_FIXED = "def first(xs): return xs[0] if xs else None";
 
-// usage 给真实量级：fake 的 ~0 token 会被 tokenBudget 的「递减收益」检测误判为无进展、提前熔断。
-const USAGE = { input: 600, output: 2000 };
-
 describe("maker-verifier loop（现成 hook 拼装）", () => {
   it("独立 reviewer 打回首版 → 强制返工一次 → 修复版放行", async () => {
     const makerModel = createFakeModel([
-      { content: [{ type: "toolCall", name: "submit", arguments: { solution: V1_BUGGY } }], stopReason: "toolUse", usage: USAGE },
-      { content: [{ type: "text", text: "Submitted. Done." }], usage: USAGE },
-      { content: [{ type: "toolCall", name: "submit", arguments: { solution: V2_FIXED } }], stopReason: "toolUse", usage: USAGE },
-      { content: [{ type: "text", text: "Fixed and resubmitted. Done." }], usage: USAGE },
+      { content: [{ type: "toolCall", name: "submit", arguments: { solution: V1_BUGGY } }], stopReason: "toolUse" },
+      { content: [{ type: "text", text: "Submitted. Done." }] },
+      { content: [{ type: "toolCall", name: "submit", arguments: { solution: V2_FIXED } }], stopReason: "toolUse" },
+      { content: [{ type: "text", text: "Fixed and resubmitted. Done." }] },
     ]);
     const reviewerModel = createFakeModel([
       { content: [{ type: "text", text: "FAIL: crashes on the empty list" }] },
@@ -46,7 +43,6 @@ describe("maker-verifier loop（现成 hook 拼装）", () => {
     const makerModel = createFakeModel(
       Array.from({ length: 4 }, () => ({
         content: [{ type: "text" as const, text: "I think it's done." }],
-        usage: USAGE,
       })),
     );
     const reviewerModel = createFakeModel(
@@ -66,5 +62,27 @@ describe("maker-verifier loop（现成 hook 拼装）", () => {
     expect(result.passed).toBe(false); // 从未放行
     expect(result.reworks).toBe(2); // 恰好强制到上限
     expect(result.reason).toBe("done"); // 上限后放行停止——有界，不无限空转
+  });
+
+  it("maxReworks≥内核默认 maxContinuations(5) 时仍能等到最终 PASS（回归 codex P2-A）", async () => {
+    // 内核在 fire onContinuationCheck 前先查 maxContinuations。若不把它从 maxReworks 抬高，
+    // maxReworks=5 会在第 6 次 check 前以 max_continuations 退出、reviewer 等不到最后那次 PASS。
+    const makerModel = createFakeModel([]); // 每轮自动补文本响应（想停）→ 触发 check
+    const reviewerModel = createFakeModel([
+      ...Array.from({ length: 5 }, () => ({ content: [{ type: "text" as const, text: "FAIL: not yet" }] })),
+      { content: [{ type: "text" as const, text: "PASS" }] }, // 第 6 次 check 放行
+    ]);
+
+    const result = await runMakerVerifierLoop({
+      makerModel,
+      reviewerModel,
+      task: "do the thing",
+      stopCondition: "high bar",
+      maxReworks: 5,
+    });
+
+    expect(result.passed).toBe(true); // 第 6 次 check 拿到 PASS（没被 max_continuations 截断）
+    expect(result.reworks).toBe(5); // 强制返工 5 次
+    expect(result.reason).toBe("done");
   });
 });

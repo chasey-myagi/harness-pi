@@ -79,13 +79,18 @@ export async function runMakerVerifierLoop(
     },
   };
 
+  const maxReworks = opts.maxReworks ?? 3;
   const maker = new AgentSession({
     model: opts.makerModel,
     tools: [submitTool],
+    // 内核在 fire onContinuationCheck **前**先查 maxContinuations（默认 5）。turnEndGuard 每次 FAIL→force
+    // 算一次 continuation，所以 maxContinuations 必须 > maxReworks，否则 maxReworks≥5 时内核会先以
+    // max_continuations 退出、reviewer 等不到最后那次 PASS/exhaust。留 +1 给最终评判的那次 check。
+    maxContinuations: maxReworks + 1,
     hooks: [
       // 停止闸：maker 想停 → 跑独立 reviewer → FAIL 则回灌 gap 强制返工、PASS 则放行。
       turnEndGuard({
-        maxRetries: opts.maxReworks ?? 3,
+        maxRetries: maxReworks,
         check: async () => {
           // 独立 reviewer sub-agent：全新 AgentSession、不同 system prompt、无 tools（不能改代码）。
           // 复用同一个 reviewerModel 实例 → fake model 的 response 队列在多轮 review 间推进
@@ -111,8 +116,11 @@ export async function runMakerVerifierLoop(
         },
       }),
       // 硬保险丝：总预算 + 无进展（重复同一 tool call）熔断 —— 防摆烂、防空转。
+      // diminishingThreshold:0 关掉 tokenBudget 的「递减收益」启发式：它按 maker 每 turn 的 token delta 判
+      // 「无进展」，但 maker-verifier loop 的实际进展发生在**回合外的 reviewer**、不计入 maker delta，简洁
+      // 回合会被误判为摆烂、在 reviewer 评判前就 abort。这里只保留**显式预算上限**这一条硬闸。
       // repeatedCallGuard 不内置 abort，在 onRepeat 里 ctx.abort 当熔断（domain-free 设计，由调用方组合）。
-      tokenBudget({ budget: opts.budgetTokens ?? 50_000 }),
+      tokenBudget({ budget: opts.budgetTokens ?? 50_000, diminishingThreshold: 0 }),
       repeatedCallGuard({
         threshold: 4,
         onRepeat: (ctx, p) =>

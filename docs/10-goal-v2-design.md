@@ -90,6 +90,18 @@ tokenBudget/repeatedCallGuard 保险丝），是本设计的活 spike。
 - **成本**：每次 review = 一次 sub-agent run = 真实 token。`maxReworks` + `tokenBudget` 共同封顶，避免 review
   本身烧穿预算。
 
+## 5b. 落地必踩的两个 wiring 坑（来自 example 05 + codex 交叉验证）
+
+把这套从零件拼出来时，有两处内核/插件交互必须显式处理，否则「有界 loop」会在未测路径上失效：
+
+1. **`maxContinuations` 要从 `maxReworks` 抬高**。内核在 fire `onContinuationCheck` **之前**先查
+   `maxContinuations`（默认 5）；turnEndGuard 每次 FAIL→force 算一次 continuation。若不抬高，`maxReworks ≥ 5`
+   会在最后一次评判 check 触发前就以 `reason:"max_continuations"` 退出，reviewer 永远等不到那次 PASS。
+   修法：`maxContinuations = maxReworks + 1`（+1 留给最终评判的那次 check）。
+2. **关掉 `tokenBudget` 的「递减收益」启发式**（`diminishingThreshold: 0`），只保留显式预算上限。递减检测按
+   maker 每 turn 的 token delta 判「无进展」，但 maker-verifier loop 的实际进展发生在**回合外的 reviewer**、
+   不计入 maker delta —— 简洁回合会被误判摆烂、在 reviewer 评判前 abort（`reason:"aborted"`）。
+
 ## 6. CLI 表面（复用 v1 解析 + #105 卫生）
 
 ```
