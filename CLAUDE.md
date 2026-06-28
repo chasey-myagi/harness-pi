@@ -4,6 +4,31 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 > 上层还有 `../CLAUDE.md`(通用 LLM 编码准则:先想清楚、简单优先、外科手术式修改、目标驱动)与全局 `~/.claude/CLAUDE.md`(代码风格:`X | None`、保留异常链等)。本文件只补 **harness-pi 仓库专属**的架构与约定,不重复那些。
 
+## Agent workflow contract
+
+本文件是 Claude Code 的 native adapter，不是单独的 workflow policy。Claude Code、Codex 和其他 agent
+surface 都必须使用同一套 Pilot 合同：
+
+1. `AGENTS.md`
+2. `AGENT_USAGE.md`
+3. `workflow.yaml`
+4. `states.yaml`
+5. `labels.yaml`
+6. `docs/AGENT_SURFACES.md`
+7. `docs/AGENT_CODING_RULES.md`
+8. `docs/REVIEW_RUBRIC.md`（做 advisory review 时）
+9. `skills/harness-pi-workflow/SKILL.md`
+
+规则边界：
+
+- `workflow.yaml` 决定 route 和 gates；本文件只补 harness-pi 架构不变量。
+- ambiguous / architecture / public API / cross-package / workflow-policy 变更默认先写 spec。
+- implementation 前先读目标文件、附近测试、现有 patterns；不要凭记忆写代码。
+- 保持 diff surgical，不做顺手重构，不静默加 dependency/config。
+- PR handoff 前使用 `/test-review` -> `/code-review` -> `/linus-review --tone=civil`，并用
+  `checks/review_gate.py` 验证 evidence。
+- 最终 review、merge、release、security decision 都是 human gate。
+
 ## 这是什么
 
 `harness-pi` 是一个把 pi-ai agent 跑成**后端服务/批处理 worker** 的最小运行时 harness(pnpm + TypeScript monorepo)。三层定位:

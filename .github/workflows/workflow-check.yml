@@ -1,0 +1,17 @@
+name: Workflow Contract
+
+on:
+  push:
+    branches: [main, dev]
+  pull_request:
+    branches: [main, dev]
+
+jobs:
+  workflow-check:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate workflow contract
+        run: python3 checks/check_workflow.py --repo . --all-specs

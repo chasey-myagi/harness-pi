@@ -1,0 +1,188 @@
+name: harness-pi-pilot
+version: 0.1.0
+description: Pilot workflow contract for harness-pi agent work.
+
+agent_surfaces:
+  codex:
+    native_instruction_file: AGENTS.md
+  claude_code:
+    native_instruction_file: CLAUDE.md
+  generic_cli:
+    native_instruction_file: AGENTS.md
+  shared_contract:
+    - workflow.yaml
+    - states.yaml
+    - labels.yaml
+    - AGENT_USAGE.md
+  surface_files_are_adapters: true
+
+durable_state:
+  provider: github
+  objects:
+    - issues
+    - labels
+    - pull_requests
+    - comments
+    - reviews
+    - branches
+    - checks
+
+automation_policy:
+  default_mode: dry_run
+  allowed_agent_actions:
+    - propose_labels
+    - draft_specs
+    - draft_tasks
+    - implement_code
+    - review_pull_request
+    - diagnose_ci
+    - draft_release_notes
+  forbidden_agent_actions:
+    - final_approval
+    - merge
+    - force_push
+    - close_disputed_issue
+    - public_security_disclosure
+    - permission_change
+  required_human_gates:
+    - readiness_label
+    - spec_approval
+    - final_pr_review
+    - security_decision
+    - merge
+    - release
+
+artifacts:
+  product_spec: specs/GH{issue_number}/product.md
+  tech_spec: specs/GH{issue_number}/tech.md
+  task_plan: specs/GH{issue_number}/tasks.md
+  agent_review: review/PR{pr_number}/agent-review.json
+  review_gate: review/PR{pr_number}/review-gate.json
+  test_review: review/PR{pr_number}/test-review.md
+  code_review: review/PR{pr_number}/code-review.md
+  linus_review: review/PR{pr_number}/linus-review.md
+  triage_result: review/GH{issue_number}/triage.json
+
+review_gate:
+  mode: ordered_advisory
+  required_before:
+    - agent_review
+    - human_review
+  evidence_artifact: review_gate
+  stages:
+    test_review:
+      order: 1
+      skill: /test-review
+      artifact: test_review
+      required_when:
+        - tests_added_or_modified
+        - test_plan_requires_new_tests
+      pass_condition: report_result_pass
+      blocks_on_fail:
+        - review_pr
+        - human_review
+    code_review:
+      order: 2
+      skill: /code-review
+      artifact: code_review
+      required_when:
+        - implementation_changed
+      pass_condition: report_result_pass
+      blocks_on_fail:
+        - review_pr
+        - human_review
+    linus_review:
+      order: 3
+      skill: /linus-review --tone=civil
+      artifact: linus_review
+      required_when:
+        - implementation_changed
+        - architecture_or_abstraction_changed
+      pass_condition: rating_applied_or_looks_reasonable_with_no_blocking_findings
+      passing_ratings:
+        - Applied.
+        - Looks reasonable.
+      blocking_ratings:
+        - Revert this.
+        - Please fix and resend.
+        - Close, but no cigar.
+      blocks_on_fail:
+        - human_review
+        - merge_ready
+
+action_policy:
+  actions:
+    triage_issue:
+      allowed_from:
+        - new_issue
+        - needs_info
+        - triaged
+      required_artifacts:
+        - linked_issue
+      creates_artifacts:
+        - triage_result
+      human_gates: []
+    write_spec:
+      allowed_from:
+        - triaged
+        - ready_to_spec
+      required_artifacts:
+        - linked_issue
+      creates_artifacts:
+        - product_spec
+        - tech_spec
+      human_gates:
+        - readiness_label
+    implement:
+      allowed_from:
+        - ready_to_implement
+      required_artifacts:
+        - linked_issue
+        - product_spec
+        - tech_spec
+      creates_artifacts:
+        - task_plan
+      human_gates:
+        - readiness_label
+        - spec_approval
+    review_pr:
+      allowed_from:
+        - impl_pr_open
+        - agent_review
+        - human_review
+      required_artifacts:
+        - linked_issue
+        - linked_pr
+        - verification
+      creates_artifacts:
+        - test_review
+        - code_review
+        - linus_review
+        - review_gate
+        - agent_review
+      human_gates:
+        - final_pr_review
+    fix_ci:
+      allowed_from:
+        - human_review
+        - ci_green
+      required_artifacts:
+        - linked_pr
+      creates_artifacts:
+        - verification
+      human_gates: []
+    draft_release_note:
+      allowed_from:
+        - merged
+      required_artifacts:
+        - linked_pr
+      creates_artifacts:
+        - release_note
+      human_gates:
+        - release
+
+presentation:
+  default_locale: zh-CN
+  supported_locales:
+    - en-US
+    - zh-CN

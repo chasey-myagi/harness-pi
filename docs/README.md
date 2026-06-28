@@ -15,6 +15,15 @@
 | 06 | [controllers](06-controllers.md) | lifecycle-restart / work-pool / lease-queue 三个 controller、未来 controller 占位 | 编排多 session / 高阶模式的人 |
 | 07 | [adapters](07-adapters.md) | Sink 接口、内存 / NDJSON / Postgres / OTel sink、peerDep 约定 | 实现新 sink / 写 metrics 后端的人 |
 | 08 | [claude-code-lessons](08-claude-code-lessons.md) | 系统扫描 Claude Code 源码后按模块整理"借鉴 / 拒绝 / 推迟"清单 + 具体 API 改动建议 | 想看设计选型依据 / 验证 prior art 的人 |
+| 12 | [agent-loop-development-workflow](12-agent-loop-development-workflow.md) | 如何用 surface-neutral maker-verifier loop 来开发 harness-pi 本身 | 设计 agent-driven 开发流程的人 |
+
+## Agent workflow
+
+| 文档 | 内容 | 建议读者 |
+|---|---|---|
+| [AGENT_SURFACES](AGENT_SURFACES.md) | Codex、Claude Code、generic agent runner 如何共享同一 Pilot 合同 | 配置 agent 入口的人 |
+| [AGENT_CODING_RULES](AGENT_CODING_RULES.md) | agent 写代码时的反模式和行为规则 | 所有 coding agent |
+| [REVIEW_RUBRIC](REVIEW_RUBRIC.md) | advisory review 的检查清单、三审 review-gate 和禁止越权措辞 | reviewer agent / human reviewer |
 
 ## 路线图
 
