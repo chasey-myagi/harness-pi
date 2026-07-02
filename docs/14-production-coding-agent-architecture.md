@@ -116,4 +116,22 @@ metrics dashboard 口径也要以"run 健康度"为一等维度：done-rate / �
 
 ## 7. 落地追踪
 
-对应 GitHub issues 建立后在此回填编号。本文档是设计的权威沉淀；issue 与本文冲突时以更新时间新者为准，并回改另一方。
+对应 GitHub issues（2026-07-03 建立）。本文档是设计的权威沉淀；issue 与本文冲突时以更新时间新者为准，并回改另一方。
+
+| 工作包 | Issue | 内容 | 被阻塞于 |
+|---|---|---|---|
+| A · 防护反转 | [#139](https://github.com/chasey-myagi/harness-pi/issues/139) | headless 默认运行时护栏（tokenBudget/watchdog/costTracker） | —（并行内核 #127/#133） |
+| A · 防护反转 | [#140](https://github.com/chasey-myagi/harness-pi/issues/140) | 工具危险度元数据（isReadOnly/isDestructive/isOpenWorld） | — |
+| A · 防护反转 | [#146](https://github.com/chasey-myagi/harness-pi/issues/146) | permissionGate policy 模式 + 审计 | #140 |
+| B · 装配地基 | [#141](https://github.com/chasey-myagi/harness-pi/issues/141) | AgentFeatures + 四层配置链（TypeBox 校验） | — |
+| B · 装配地基 | [#147](https://github.com/chasey-myagi/harness-pi/issues/147) | createCodingSession(features)，拆 god-function | #141 |
+| B · 装配地基 | [#149](https://github.com/chasey-myagi/harness-pi/issues/149) | observability recipe + 统一 resolveModel | #147 |
+| C · 安全纵深 | [#142](https://github.com/chasey-myagi/harness-pi/issues/142) | bash exec 咽喉点契约钉死（DOCS） | — |
+| C · 安全纵深 | [#148](https://github.com/chasey-myagi/harness-pi/issues/148) | sandboxCapability 薄版（seatbelt/bwrap，**HITL**） | #142 |
+| C · 安全纵深 | [#143](https://github.com/chasey-myagi/harness-pi/issues/143) | Project Trust 信任门 | — |
+| D · 交付形态 | [#144](https://github.com/chasey-myagi/harness-pi/issues/144) | 事件渲染单管线 + output-guard | — |
+| D · 交付形态 | [#150](https://github.com/chasey-myagi/harness-pi/issues/150) | transport-neutral 审批通道 | #146、#144 |
+| D · 交付形态 | [#151](https://github.com/chasey-myagi/harness-pi/issues/151) | hpi --mode rpc（JSONL 命令协议） | #147、#144、#150 |
+| D · 交付形态 | [#145](https://github.com/chasey-myagi/harness-pi/issues/145) | session 版本号 + one-shot 契约（turn 上限 + NDJSON stdout） | — |
+
+**未建（需求拉动，见 §5/§6）**：server 分包、eval 回归门 dashboard 化、rewind UX（rewind 触发内核 `BranchableSessionStore` 候选 B）。
