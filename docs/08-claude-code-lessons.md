@@ -56,7 +56,7 @@
 | 5.2 | `appendSystemMessage` UI-only 消息（normalizeMessagesForAPI 边界过滤） | `Tool.ts:207` | ✅ borrow | [03-hook-system](03-hook-system.md) `systemMessage` 字段已经接近这个 |
 | 5.3 | 多 `createXxxMessage` helper（user / system / interrupt / attachment） | `utils/messages.ts` | ✅ borrow | [02-kernel](02-kernel.md) 暴露 `createAttachmentMessage` |
 | 6.1 | Permission 系统（rule / classifier / denialTracking / autoMode） | `utils/permissions/*` | ❌ skip | (太重；plugin `leaseDecision` 模式已足够) |
-| 6.2 | MCP 集成 | `services/mcp/*` | ❌ skip | (Mario 不做，我们也不做) |
+| 6.2 | MCP 集成 | `services/mcp/*` | ⏸️ app/adapter | 不进 core；coding-agent 产品化时作为 adapter / tool pack opt-in |
 | 6.3 | Statsig / feature gates | `query/config.ts` | ❌ skip | (业务侧自己控制) |
 
 下面按模块详述每条。
@@ -759,12 +759,12 @@ Claude Code 在 `query/config.ts:18` 大量用 `checkStatsigFeatureGate_*` 控�
 
 ### ❌ 永不做（明确决定）
 
-- Permission rule system（用户用 `decision: deny` plugin 自己做）
-- MCP（Mario 不做，我们也不做）
+- Claude Code 式重型 Permission rule system（harness-pi 走轻量 `permissionGate` plugin + app policy）
+- MCP 进 core（coding-agent 产品化可做 adapter / tool pack opt-in）
 - Statsig / feature flag 系统（业务自己控制）
 - 全局 mutable cost tracker（用 ctx.state + sink 替代）
 - 自动 context overflow recovery（让 watchdog restart 处理）
-- 自动 compaction（用户用 `transformMessagesBeforeLlm` plugin）
+- core 内置自动 compaction（策略已在 `@harness-pi/plugins`，由 app 显式装配）
 - 自动 prompt cache 管理（pi-ai 自己处理）
 - `saveCacheSafeParams` 模块级 mutable side channel（Claude Code 自己注释承认是 hack）
 

@@ -31,7 +31,7 @@
 ## 哲学
 
 1. **Kernel 极简**。`@harness-pi/core` 只做两件事：跑 pi-ai 的 LLM-tool 循环 + 派发 hook。无 metric、无 watchdog、无 pool、无 compaction 策略——内核只 fire `onContextOverflow` / `onContinuationCheck` / `onAfterFlush` 等观测点，策略全在插件/控制器。
-2. **一切皆 hook**。watchdog、metrics、trim/auto/micro-compaction、tool output buffer、log、empty-run guard、lease decision、permission gate、token/cost/tool-stats、turn-end guard、deferred-tools/skills——全部是 hook 实例，全部在 `@harness-pi/plugins` 里（20 个 `Hook` 工厂 + `toolSearch`/`skills` 工具工厂，详见 [docs/05-plugins](docs/05-plugins.md)）。
+2. **一切皆 hook**。watchdog、metrics、trim/auto/micro-compaction、tool output buffer、log、empty-run guard、lease decision、permission gate、token/cost/tool-stats、turn-end guard、deferred-tools/skills——全部是 hook 实例，全部在 `@harness-pi/plugins` 里（具体导出计数以 [docs/05-plugins](docs/05-plugins.md) 和 `packages/plugins/src/index.ts` 为准）。
 3. **基础 coding tools 是一等包**。服务端 agent 也需要 read/grep/bash 这类工具；它们不该由每个消费者重写。
 4. **Plugin ≠ Controller ≠ Adapter**。
    - Plugin：钩 loop 事件（装饰器形态）

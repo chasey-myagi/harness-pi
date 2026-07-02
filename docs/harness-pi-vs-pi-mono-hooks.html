@@ -1,0 +1,1873 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>harness-pi × pi-mono · Agent Core 设计理念对比</title>
+<style>
+  :root {
+    --bg:        oklch(0.985 0.004 250);
+    --surface:   oklch(1 0 0);
+    --surface-2: oklch(0.975 0.006 250);
+    --ink:       oklch(0.26 0.02 262);
+    --ink-soft:  oklch(0.46 0.02 262);
+    --ink-faint: oklch(0.60 0.015 262);
+    --line:      oklch(0.90 0.008 262);
+    --line-soft: oklch(0.94 0.006 262);
+    --accent:    oklch(0.55 0.13 262);
+    --accent-bg: oklch(0.96 0.025 262);
+
+    --harness:    oklch(0.53 0.14 262);
+    --harness-bg: oklch(0.965 0.025 262);
+    --pimono:     oklch(0.50 0.15 322);
+    --pimono-bg:  oklch(0.965 0.03 322);
+
+    --ok:        oklch(0.58 0.12 152);
+    --ok-bg:     oklch(0.95 0.04 152);
+    --warn:      oklch(0.66 0.12 75);
+    --warn-bg:   oklch(0.95 0.05 85);
+    --bad:       oklch(0.56 0.17 27);
+    --bad-bg:    oklch(0.95 0.04 27);
+    --under:     oklch(0.54 0.11 245);
+    --under-bg:  oklch(0.95 0.035 245);
+
+    --mono: "SF Mono", "JetBrains Mono", "Cascadia Code", ui-monospace, Menlo, Consolas, monospace;
+    --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
+  }
+
+  * { box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--ink);
+    font-family: var(--sans);
+    line-height: 1.65;
+    font-size: 16px;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  .wrap { max-width: 1020px; margin: 0 auto; padding: 0 24px; }
+
+  header.masthead {
+    padding: 64px 0 36px;
+    border-bottom: 1px solid var(--line);
+  }
+  .eyebrow {
+    font-family: var(--mono);
+    font-size: 12.5px;
+    letter-spacing: 0.08em;
+    color: var(--accent);
+    text-transform: uppercase;
+    margin: 0 0 14px;
+  }
+  h1 {
+    font-size: 32px;
+    line-height: 1.22;
+    margin: 0 0 14px;
+    letter-spacing: -0.01em;
+  }
+  .lede {
+    font-size: 17px;
+    color: var(--ink-soft);
+    max-width: 74ch;
+    margin: 0 0 22px;
+  }
+  .meta-row {
+    display: flex; flex-wrap: wrap; gap: 10px;
+    font-family: var(--mono); font-size: 12.5px; color: var(--ink-faint);
+    margin-bottom: 20px;
+  }
+  .meta-row span {
+    background: var(--surface-2);
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    padding: 4px 10px;
+  }
+
+  nav.toc {
+    display: flex; flex-wrap: wrap; gap: 8px 6px;
+    font-family: var(--mono); font-size: 12px;
+  }
+  nav.toc a {
+    color: var(--ink-soft);
+    text-decoration: none;
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    padding: 5px 10px;
+  }
+  nav.toc a:hover { color: var(--accent); border-color: var(--accent); }
+
+  .legend {
+    display: grid;
+    grid-template-columns: repeat(2, 1fr);
+    gap: 12px;
+    margin: 28px 0 8px;
+  }
+  .legend .item {
+    display: flex; gap: 12px; align-items: flex-start;
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    padding: 12px 14px;
+  }
+  .dot { width: 11px; height: 11px; border-radius: 50%; margin-top: 6px; flex: none; }
+  .legend .label { font-weight: 650; font-size: 14.5px; }
+  .legend .desc { font-size: 13px; color: var(--ink-soft); }
+
+  section { padding: 52px 0; border-bottom: 1px solid var(--line-soft); }
+  .sec-tag {
+    font-family: var(--mono); font-size: 12px; color: var(--accent);
+    letter-spacing: 0.06em; margin: 0 0 8px;
+  }
+  h2 { font-size: 25px; margin: 0 0 6px; letter-spacing: -0.01em; }
+  h3 { font-size: 18px; margin: 34px 0 10px; }
+  h4 { font-size: 15px; margin: 22px 0 8px; color: var(--ink-soft); font-family: var(--mono); font-weight: 600; }
+  p { margin: 0 0 14px; }
+
+  code, .mono { font-family: var(--mono); font-size: 0.9em; }
+  p code, li code, td code {
+    background: var(--surface-2);
+    border: 1px solid var(--line-soft);
+    border-radius: 5px;
+    padding: 1px 5px;
+    font-size: 0.86em;
+    color: oklch(0.42 0.07 262);
+  }
+  .fileref { color: var(--accent); font-family: var(--mono); font-size: 0.85em; }
+
+  pre {
+    background: oklch(0.22 0.018 262);
+    color: oklch(0.92 0.01 262);
+    border-radius: 10px;
+    padding: 16px 18px;
+    overflow-x: auto;
+    font-family: var(--mono);
+    font-size: 12.6px;
+    line-height: 1.6;
+    margin: 14px 0;
+  }
+  pre .cmt { color: oklch(0.62 0.03 152); }
+  pre .key { color: oklch(0.78 0.11 300); }
+  pre .str { color: oklch(0.80 0.10 130); }
+  pre .fn  { color: oklch(0.80 0.10 230); }
+  pre .tag { color: oklch(0.75 0.12 27); }
+
+  figure {
+    margin: 26px 0;
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: 14px;
+    padding: 20px;
+  }
+  figure svg { display: block; width: 100%; height: auto; }
+  figcaption {
+    font-size: 13px; color: var(--ink-faint);
+    margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--line-soft);
+    font-family: var(--mono);
+  }
+
+  table { width: 100%; border-collapse: collapse; margin: 18px 0; font-size: 14px; }
+  th, td { text-align: left; padding: 11px 12px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th { font-size: 12px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--ink-faint); font-weight: 600; background: var(--surface-2); }
+  tr:last-child td { border-bottom: none; }
+  td.v { white-space: nowrap; }
+  th.col-harness { color: var(--harness); background: var(--harness-bg); }
+  th.col-pimono  { color: var(--pimono);  background: var(--pimono-bg); }
+
+  .badge {
+    display: inline-flex; align-items: center; gap: 6px;
+    font-size: 12.5px; font-weight: 650;
+    padding: 3px 9px; border-radius: 20px;
+    font-family: var(--mono);
+    white-space: nowrap;
+  }
+  .badge::before { content: ""; width: 7px; height: 7px; border-radius: 50%; }
+  .b-ok    { color: var(--ok);    background: var(--ok-bg); }
+  .b-ok::before    { background: var(--ok); }
+  .b-warn  { color: oklch(0.50 0.11 70); background: var(--warn-bg); }
+  .b-warn::before  { background: var(--warn); }
+  .b-bad   { color: var(--bad);   background: var(--bad-bg); }
+  .b-bad::before   { background: var(--bad); }
+  .b-harness { color: var(--harness); background: var(--harness-bg); }
+  .b-harness::before { background: var(--harness); }
+  .b-pimono  { color: var(--pimono);  background: var(--pimono-bg); }
+  .b-pimono::before  { background: var(--pimono); }
+
+  ul, ol { margin: 0 0 16px; padding-left: 22px; }
+  li { margin-bottom: 7px; }
+
+  .callout {
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    padding: 16px 18px;
+    margin: 18px 0;
+    font-size: 14.5px;
+  }
+  .callout.bad     { background: var(--bad-bg);  border-color: oklch(0.85 0.06 27); }
+  .callout.warn    { background: var(--warn-bg); border-color: oklch(0.87 0.06 85); }
+  .callout.ok      { background: var(--ok-bg);   border-color: oklch(0.86 0.06 152); }
+  .callout.harness { background: var(--harness-bg); border-color: oklch(0.85 0.05 262); }
+  .callout.pimono  { background: var(--pimono-bg);  border-color: oklch(0.85 0.06 322); }
+  .callout .ct { font-family: var(--mono); font-size: 11.5px; text-transform: uppercase; letter-spacing: 0.06em; display: block; margin-bottom: 6px; font-weight: 700; }
+  .callout.bad .ct     { color: var(--bad); }
+  .callout.warn .ct    { color: oklch(0.50 0.11 70); }
+  .callout.ok .ct      { color: var(--ok); }
+  .callout.harness .ct { color: var(--harness); }
+  .callout.pimono .ct  { color: var(--pimono); }
+
+  .reason-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin: 20px 0; }
+  .reason-card {
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    padding: 16px 18px;
+  }
+  .reason-card h4 { margin: 0 0 8px; font-family: var(--sans); font-size: 15px; color: var(--ink); font-weight: 700; }
+  .reason-card p { font-size: 13.5px; color: var(--ink-soft); margin-bottom: 8px; }
+  .reason-card .why { font-size: 13px; color: var(--ink-faint); border-top: 1px dashed var(--line); padding-top: 8px; margin-top: 10px; }
+  .reason-card .why b { color: var(--ink-soft); }
+
+  footer { padding: 48px 0 80px; color: var(--ink-faint); font-size: 13px; }
+  footer a { color: var(--accent); }
+
+  @media (max-width: 760px) {
+    .legend, .reason-grid { grid-template-columns: 1fr; }
+    h1 { font-size: 26px; }
+    .wrap { padding: 0 18px; }
+  }
+</style>
+</head>
+<body>
+
+<header class="masthead">
+  <div class="wrap">
+    <p class="eyebrow">Architecture comparison · Agent Core 设计理念对比</p>
+    <h1>harness-pi × pi-mono — "Hook 作为一等公民" 到底不一样在哪</h1>
+    <p class="lede">
+      harness-pi 的 <code>@harness-pi/core</code> 故意没有基于上游 <code>@earendil-works/pi-agent-core</code>（pi-mono monorepo 的一部分）——
+      它自己重写了一个 agent loop，换来的是「hook 作为一等公民」。这句话经常被当成营销用语一带而过，
+      这份报告把它拆开：两边的 loop 实际怎么写、扩展点长什么样、事件怎么流、tool 怎么并发、状态怎么持久化——
+      逐项对代码，再回答两个更难的问题：<b>pi-mono 有什么设计得比我们好</b>，<b>我们有什么设计得比它好</b>，以及<b>为什么</b>。
+    </p>
+    <div class="meta-row">
+      <span>harness-pi: packages/core 0.5.0</span>
+      <span>pi-mono: @earendil-works/pi-agent-core 0.80.3</span>
+      <span>研究方式: 2 路并行源码探查（本仓库 + clone 的 earendil-works/pi-mono）</span>
+      <span>第二部分: 3 路并行架构深挖（先读码、只出方案）</span>
+      <span>生成: 2026-07-02</span>
+    </div>
+    <nav class="toc">
+      <a href="#overview">总览</a>
+      <a href="#background">背景定位</a>
+      <a href="#architecture">整体架构对比</a>
+      <a href="#hooks-harness">harness-pi 的 4 态 Hook 引擎</a>
+      <a href="#extensions-pimono">pi-mono 的三层扩展机制</a>
+      <a href="#turn-loop">Turn Loop 时序对比</a>
+      <a href="#concurrency">Tool 并发对比</a>
+      <a href="#events">事件系统对比</a>
+      <a href="#persistence">持久化模型对比</a>
+      <a href="#comparison-table">全面对比总表</a>
+      <a href="#pimono-wins">pi-mono 更好的地方</a>
+      <a href="#harness-wins">harness-pi 更好的地方</a>
+      <a href="#conclusion">结语</a>
+      <a href="#deep-dive">Ⅱ·深挖导言</a>
+      <a href="#dd-persistence">Ⅱ·持久化与 sideQuestion</a>
+      <a href="#dd-state">Ⅱ·ctx.state 与分层</a>
+      <a href="#dd-migration">Ⅱ·迁移内核风险</a>
+      <a href="#dd-seam">Ⅱ·L1 seam 策略</a>
+      <a href="#dd-verdict">Ⅱ·总裁决</a>
+    </nav>
+
+    <div class="legend">
+      <div class="item"><span class="dot" style="background:var(--harness)"></span><div><div class="label">harness-pi</div><div class="desc"><code>@harness-pi/core</code>：自研内核，统一 Hook 接口贯穿全部扩展面。</div></div></div>
+      <div class="item"><span class="dot" style="background:var(--pimono)"></span><div><div class="label">pi-mono</div><div class="desc"><code>@earendil-works/pi-agent-core</code> + 上层 <code>coding-agent</code>：分层扩展机制。</div></div></div>
+    </div>
+  </div>
+</header>
+
+<!-- ============ 总览 ============ -->
+<section id="overview">
+  <div class="wrap">
+    <p class="sec-tag">OVERVIEW · 先说结论</p>
+    <h2>一句话结论：两边都叫"可扩展"，但扩展的是不同的东西</h2>
+    <p>
+      pi-mono 的 <code>@earendil-works/pi-agent-core</code> 优化的是「一个干净、状态管理正确、事件流忠实的单 agent loop」，
+      可扩展性是**追加**的——先有能跑的 loop，再在它外面套一层可选的 <code>AgentHarness</code> 拿到持久化和一个真正的多监听器 hook 总线，
+      再往上 <code>coding-agent</code> 又搭了第三套、完全独立的 Extension 系统给终端 UI 用。三层各自为政，没有一个类型贯穿始终。
+    </p>
+    <p>
+      harness-pi 反过来：先设计一个**贯穿内核到插件的单一 <code>Hook</code> 接口**（四种精确的执行语义：event / decision / transform / around），
+      再把 loop 写成"围绕这个接口派发"的壳。代价是内核比 pi-agent-core 的 <code>agent-loop.ts</code> 复杂（自估 400-600 LOC 的额外重写成本），
+      换来的是 <b>decision hook 可以真正拦截</b>（deny / modify / abort），而不只是"事后收到通知"。
+    </p>
+    <div class="callout harness">
+      <span class="ct">核心差异一句话</span>
+      pi-mono 把"可扩展"理解成 <b>observer（观察者，看得到但改不了）</b> + 若干具名单槽位回调；
+      harness-pi 把"可扩展"理解成 <b>interceptor（拦截器，能否决、能改写、能注入、能中止）</b>，
+      并且四种语义（并行观察 / 顺序拦截 / 链式改写 / 嵌套包裹）被显式建模、显式合并、显式失败语义化——而不是揉成一个"谁先返回非空谁赢"的黑盒。
+    </div>
+    <p>
+      但这不等于"harness-pi 全面更好"。pi-mono 在<b>会话数据模型</b>（可分支的 session 树 vs 线性 append-only 日志）和
+      <b>分层可选复杂度</b>（想要极简 loop 就不用背负 hook 派发的心智负担）上有真实的、值得借鉴的设计。后文会展开。
+    </p>
+  </div>
+</section>
+
+<!-- ============ 背景定位 ============ -->
+<section id="background">
+  <div class="wrap">
+    <p class="sec-tag">BACKGROUND · 先弄清楚两边分别是什么</p>
+    <h2>两个包，两种自我定位</h2>
+
+    <table>
+      <thead><tr><th></th><th class="col-harness">harness-pi</th><th class="col-pimono">pi-mono</th></tr></thead>
+      <tbody>
+        <tr><td>包名</td><td><code>@harness-pi/core</code></td><td><code>@earendil-works/pi-agent-core</code></td></tr>
+        <tr><td>自我描述</td><td>"Agent kernel — pi-ai loop + <b>first-class hook system</b>"</td><td>"General-purpose agent with transport abstraction, state management, and attachment support"</td></tr>
+        <tr><td>版本</td><td>0.5.0</td><td>0.80.3</td></tr>
+        <tr><td>定位</td><td>服务端 / 批处理 worker 的 agent 运行时</td><td>终端 coding agent（<code>pi</code> CLI）背后的通用 agent 库</td></tr>
+        <tr><td>都依赖</td><td colspan="2"><code>@earendil-works/pi-ai</code>（统一 LLM API，两边都"不动它一行"）</td></tr>
+        <tr><td>内核体量</td><td><code>session.ts</code> 单文件即整个仓库最重的文件</td><td><code>agent-loop.ts</code> 748 行 + <code>agent.ts</code> 575 行，两个不算大的文件</td></tr>
+        <tr><td>架构决策文档</td><td><code>docs/00-07</code> 系列专门写"为什么不基于 pi-agent-core"</td><td>无对等文档；<code>AGENTS.md</code> 只是贡献者代码规范，没有架构取舍记录</td></tr>
+      </tbody>
+    </table>
+
+    <p>harness-pi 自己文档里对这个决策的原始论述（<span class="fileref">docs/01-architecture.md:136-165</span>）：</p>
+
+    <div class="callout harness">
+      <span class="ct">docs/01-architecture.md §4 · 为什么不依赖 pi-agent-core</span>
+      "pi-agent-core 是个干净的库（agent-loop.js 307 行、agent.js 409 行），重写它本身<b>不是</b>目标。
+      但它的扩展模型不匹配我们的需求。" ——随文附了一张对比表（本报告 <a href="#hooks-harness">§ harness-pi 的 4 态 Hook 引擎</a> 一节复述），
+      结论是："红色那几条恰好是 production harness 最有价值的能力。<b>这是设计哲学差异</b>，不是缺 feature 几行能补的。
+      pi-agent-core 不应该背我们的需求——它是给 pi-coding-agent 用的，目标是终端编码 agent 的状态管理。"
+    </div>
+
+    <p>
+      这段话本身已经很诚实：pi-agent-core 不是"做得差"，是<b>目标不同</b>。它要服务的是一个终端里的交互式编码助手——
+      单用户、单会话为主、需要 rewind/fork 对话分支这类 UX、可以让上层 CLI 自己处理"这个工具调用要不要拦下来"。
+      harness-pi 要服务的是无人值守跑在服务器上的 worker：多 session 编排、lease 冲突拦截、per-turn watchdog、
+      审计级 recorded 事件轨——这些需求在"observer 模式"下要么做不到，要么每个都要自己发明一套临时约定。
+    </p>
+  </div>
+</section>
+
+<!-- ============ 整体架构对比 ============ -->
+<section id="architecture">
+  <div class="wrap">
+    <p class="sec-tag">ARCHITECTURE · 一张图看懂分裂在哪</p>
+    <h2>harness-pi：一个接口贯穿三层 vs pi-mono：三层各自一套机制</h2>
+    <p>
+      两边都是"三层"，但"三层共享什么"完全不同。harness-pi 的 Controller / Plugin / Kernel 三层<b>共享同一个 <code>Hook</code> 类型</b>——
+      一个 plugin 作者写一个对象字面量，同时实现 <code>onPreToolUse</code>（decision）和 <code>onTurnEnd</code>（event）毫无障碍，
+      因为两者都是同一个 <code>Hook</code> 接口上的字段。pi-mono 的三层——<code>agent-loop.ts</code>/<code>Agent</code>、
+      <code>AgentHarness</code>、<code>coding-agent</code> 的 <code>Extension</code>——是<b>三套互不知情的机制</b>：
+      写一个 <code>AgentHarness</code> hook 用的类型和写一个 <code>coding-agent</code> extension 用的类型没有任何共同祖先。
+    </p>
+
+    <figure>
+      <svg viewBox="0 0 960 470" role="img" aria-label="harness-pi 与 pi-mono 三层架构对比">
+        <defs>
+          <marker id="archA" markerWidth="9" markerHeight="9" refX="7" refY="4.5" orient="auto">
+            <path d="M0,0 L9,4.5 L0,9 z" fill="var(--harness)"/>
+          </marker>
+        </defs>
+
+        <text x="20" y="14" font-family="var(--mono)" font-size="13" font-weight="700" fill="var(--harness)">harness-pi — 单一 Hook 接口贯穿三层</text>
+        <text x="500" y="14" font-family="var(--mono)" font-size="13" font-weight="700" fill="var(--pimono)">pi-mono — 三层扩展机制互不相通</text>
+
+        <!-- LEFT: harness-pi stack -->
+        <rect x="20" y="24" width="420" height="86" rx="12" fill="var(--harness-bg)" stroke="oklch(0.82 0.05 262)"/>
+        <text x="38" y="48" font-family="var(--sans)" font-size="13.5" font-weight="700" fill="oklch(0.32 0.05 262)">Controller 层（11+）</text>
+        <text x="38" y="68" font-family="var(--mono)" font-size="11" fill="oklch(0.5 0.03 262)">workPool · leaseQueue · lifecycleRestart</text>
+        <text x="38" y="86" font-family="var(--mono)" font-size="11" fill="oklch(0.5 0.03 262)">subAgentTool · forkSession · compactOnOverflow</text>
+
+        <rect x="20" y="134" width="420" height="86" rx="12" fill="var(--harness-bg)" stroke="oklch(0.82 0.05 262)"/>
+        <text x="38" y="158" font-family="var(--sans)" font-size="13.5" font-weight="700" fill="oklch(0.32 0.05 262)">Plugin 层（24 Hook 工厂）</text>
+        <text x="38" y="178" font-family="var(--mono)" font-size="11" fill="oklch(0.5 0.03 262)">watchdog · tokenBudget · repeatedCallGuard</text>
+        <text x="38" y="196" font-family="var(--mono)" font-size="11" fill="oklch(0.5 0.03 262)">systemReminder · leaseDecision · costTracker…</text>
+
+        <rect x="20" y="244" width="420" height="96" rx="12" fill="oklch(1 0 0)" stroke="var(--harness)" stroke-width="1.6"/>
+        <text x="38" y="270" font-family="var(--sans)" font-size="13.5" font-weight="700" fill="var(--harness)">Kernel：AgentSession + HookDispatcher</text>
+        <text x="38" y="292" font-family="var(--mono)" font-size="11" fill="oklch(0.5 0.03 262)">同一个 Hook 接口，4 态精确派发</text>
+        <text x="38" y="310" font-family="var(--mono)" font-size="11" fill="oklch(0.5 0.03 262)">event / decision / transform / around</text>
+        <text x="38" y="328" font-family="var(--mono)" font-size="11" fill="oklch(0.55 0.03 262)">对任何 plugin/controller 概念零感知</text>
+
+        <rect x="20" y="364" width="420" height="66" rx="12" fill="var(--surface-2)" stroke="var(--line)"/>
+        <text x="38" y="388" font-family="var(--sans)" font-size="13" font-weight="600" fill="oklch(0.42 0.02 262)">pi-ai（L1，不动一行）</text>
+        <text x="38" y="408" font-family="var(--mono)" font-size="11" fill="oklch(0.55 0.02 262)">统一 LLM API · tool spec · event stream</text>
+
+        <!-- continuous spine -->
+        <line x1="40" y1="110" x2="40" y2="134" stroke="var(--harness)" stroke-width="2" marker-end="url(#archA)"/>
+        <line x1="40" y1="220" x2="40" y2="244" stroke="var(--harness)" stroke-width="2" marker-end="url(#archA)"/>
+        <line x1="40" y1="340" x2="40" y2="364" stroke="var(--harness)" stroke-width="2" marker-end="url(#archA)"/>
+        <text x="60" y="128" font-family="var(--mono)" font-size="10" fill="var(--harness)">同一个 Hook 类型，从上到下贯穿</text>
+
+        <!-- RIGHT: pi-mono stack, disconnected -->
+        <rect x="500" y="24" width="420" height="86" rx="12" fill="var(--pimono-bg)" stroke="oklch(0.82 0.06 322)"/>
+        <text x="518" y="48" font-family="var(--sans)" font-size="13.5" font-weight="700" fill="oklch(0.34 0.08 322)">coding-agent：Extension 系统</text>
+        <text x="518" y="68" font-family="var(--mono)" font-size="11" fill="oklch(0.5 0.04 322)">ExtensionRunner + createExtensionAPI()</text>
+        <text x="518" y="86" font-family="var(--mono)" font-size="11" fill="oklch(0.5 0.04 322)">面向终端 UI，引用 TUI/Theme/Overlay 等类型</text>
+
+        <text x="710" y="122" font-family="var(--mono)" font-size="15" text-anchor="middle" fill="oklch(0.6 0.05 322)">╌╌ 不复用下面的类型 ╌╌</text>
+
+        <rect x="500" y="134" width="420" height="86" rx="12" fill="var(--pimono-bg)" stroke="oklch(0.82 0.06 322)"/>
+        <text x="518" y="158" font-family="var(--sans)" font-size="13.5" font-weight="700" fill="oklch(0.34 0.08 322)">AgentHarness：on() / emitHook()</text>
+        <text x="518" y="178" font-family="var(--mono)" font-size="11" fill="oklch(0.5 0.04 322)">19 种事件、单总线（Map&lt;type,Set&lt;handler&gt;&gt;）</text>
+        <text x="518" y="196" font-family="var(--mono)" font-size="11" fill="oklch(0.5 0.04 322)">最后一个非 undefined 结果覆盖前面的</text>
+
+        <text x="710" y="232" font-family="var(--mono)" font-size="15" text-anchor="middle" fill="oklch(0.6 0.05 322)">╌╌ 底层完全不知道它存在 ╌╌</text>
+
+        <rect x="500" y="244" width="420" height="96" rx="12" fill="oklch(1 0 0)" stroke="oklch(0.75 0.08 322)" stroke-width="1.6"/>
+        <text x="518" y="270" font-family="var(--sans)" font-size="13.5" font-weight="700" fill="var(--pimono)">Agent / agentLoop</text>
+        <text x="518" y="292" font-family="var(--mono)" font-size="11" fill="oklch(0.5 0.04 322)">具名单槽位回调：beforeToolCall / afterToolCall …</text>
+        <text x="518" y="310" font-family="var(--mono)" font-size="11" fill="oklch(0.5 0.04 322)">+ Agent.subscribe()：只读 listener，不能拦截</text>
+        <text x="518" y="328" font-family="var(--mono)" font-size="11" fill="oklch(0.55 0.04 322)">没有"hook"这个词，也没有通用注册表</text>
+
+        <rect x="500" y="364" width="420" height="66" rx="12" fill="var(--surface-2)" stroke="var(--line)"/>
+        <text x="518" y="388" font-family="var(--sans)" font-size="13" font-weight="600" fill="oklch(0.42 0.02 262)">pi-ai：Model&lt;any&gt; / streamOptions</text>
+        <text x="518" y="408" font-family="var(--mono)" font-size="11" fill="oklch(0.55 0.02 262)">与 harness-pi 用的是同一个 pi-ai</text>
+      </svg>
+      <figcaption>左：Controller→Plugin→Kernel 共享一个 Hook 类型，构造期 <code>assertCriticalDecisionHooks</code> 还能跨层校验。右：三层各自定义扩展语义，AgentHarness 的拦截能力不会向下渗透到裸 Agent，也不会向上被 Extension 系统复用。</figcaption>
+    </figure>
+
+    <p>
+      这张图直接回答"hook 作为一等公民"这句话具体指什么：<b>不是"有没有 hook"，是"hook 是不是贯穿整个系统的单一心智模型"</b>。
+      pi-mono 三层里，只有中间的 <code>AgentHarness</code> 有真正的拦截能力（block/patch），而且这一层是<b>可选的</b>——
+      直接用最底层的 <code>Agent</code>/<code>agentLoop</code>（<code>pi-agent-core</code> 的对外主入口）完全不知道"hook"这个概念，
+      只有几个具名单槽位回调。harness-pi 反过来，从 <code>AgentSession</code> 内核往上到最外层 Controller，
+      每一层说的都是同一种语言：一个 <code>Hook</code> 对象。
+    </p>
+  </div>
+</section>
+
+<!-- ============ harness-pi 4态 Hook 引擎 ============ -->
+<section id="hooks-harness">
+  <div class="wrap">
+    <p class="sec-tag">HARNESS-PI · 深挖内核</p>
+    <h2>"一等公民"具体落地：一个 <code>Hook</code> 接口，四种执行语义</h2>
+    <p>
+      <span class="fileref">packages/core/src/hook.ts:460-622</span> 定义的 <code>Hook</code> 接口，字段按方法名前缀分成四组，
+      <code>HookDispatcher</code> 按前缀路由到四种不同的执行策略——这是整个"一等公民"说法的技术落点：
+    </p>
+
+    <pre><code>export interface Hook {
+  name: string;                    <span class="cmt">// 调试/metrics/log 归因，必须唯一</span>
+  timeout?: number;                <span class="cmt">// per-hook 超时(ms)：event 默认100 / decision 200 / pipe 500</span>
+  internal?: boolean;              <span class="cmt">// 内部 hook 不上报 metric</span>
+  requires?: string[];             <span class="cmt">// 硬依赖：缺失/顺序错 → warn，不阻塞</span>
+  prefers?: string[];              <span class="cmt">// 软依赖：有更好，无 warning</span>
+  conflictsWith?: string[];        <span class="cmt">// 声明冲突：同时存在 → warn</span>
+  failClosed?: boolean;            <span class="cmt">// 仅 decision hook：超时/抛错时 true=deny，false(默认)=fail-open</span>
+  critical?: boolean;              <span class="cmt">// 安全关键 hook：强制显式声明 failClosed，否则构造期直接 throw</span>
+
+  <span class="cmt">// ── Event：Promise.all 并行，纯观察 + 注入 ──</span>
+  onSessionStart?(input, ctx): HookResult | void | Promise&lt;...&gt;;
+  onTurnStart?(input, ctx): HookResult | void | Promise&lt;...&gt;;
+  onTurnEnd?(input, ctx): HookResult | void | Promise&lt;...&gt;;
+  onLlmEnd?(input, ctx): HookResult | void | Promise&lt;...&gt;;
+  onContextOverflow?(input, ctx): HookResult | void | Promise&lt;...&gt;;
+  onAfterFlush?(input, ctx): OnAfterFlushResult | void | Promise&lt;...&gt;;  <span class="cmt">// collect-return</span>
+  onPostToolUse?(input, ctx): HookResult | void | Promise&lt;...&gt;;
+  onContinuationCheck?(input, ctx): HookResult | void | Promise&lt;...&gt;;
+  onSessionEnd?(input, ctx): HookResult | void | Promise&lt;...&gt;;
+  onError?(input, ctx): void | Promise&lt;void&gt;;
+  onSubagentStart?(input, ctx): void | Promise&lt;void&gt;;
+  onSubagentEnd?(input, ctx): void | Promise&lt;void&gt;;
+  onSteer?(input, ctx): HookResult | void | Promise&lt;...&gt;;
+
+  <span class="cmt">// ── Decision：顺序 await，可 short-circuit ──</span>
+  onPreToolUse?(input, ctx): HookResult | void | Promise&lt;...&gt;;
+  onUserPromptSubmit?(input, ctx): HookResult | void | Promise&lt;...&gt;;
+
+  <span class="cmt">// ── Transform：顺序 pipe，链式改写 ──</span>
+  transformSystemPromptBeforeLlm?(systemPrompt, ctx): string | void | Promise&lt;...&gt;;
+  transformMessagesBeforeLlm?(messages, ctx): Message[] | void | Promise&lt;...&gt;;
+  transformToolsBeforeLlm?(tools, ctx): Tool[] | void | Promise&lt;...&gt;;
+
+  <span class="cmt">// ── Around：嵌套洋葱，reduceRight 构造 ──</span>
+  wrapTurn?(ctx, next: () =&gt; Promise&lt;void&gt;): Promise&lt;void&gt;;
+  wrapToolExec?(call, ctx, next: () =&gt; Promise&lt;ToolExecResult&gt;): Promise&lt;ToolExecResult&gt;;
+}</code></pre>
+
+    <p>四种形态共用一个统一返回 envelope（<span class="fileref">hook.ts:255-279</span>），dispatcher 负责解释里面的字段，hook 本身不直接调用任何"deny()"之类的命令式 API：</p>
+
+    <pre><code>export interface HookResult {
+  continue?: boolean;                       <span class="cmt">// false → 结束 session（任一 false 即 false）</span>
+  stopReason?: string;
+  decision?: "allow" | "deny";              <span class="cmt">// 仅 decision hook；首个给出即赢</span>
+  reason?: string;
+  updatedInput?: Record&lt;string, unknown&gt;;   <span class="cmt">// 改 tool 参数（last-writer-wins）</span>
+  updatedToolOutput?: ToolExecResult;        <span class="cmt">// 改 tool 结果（last-writer-wins）</span>
+  additionalContext?: string;                <span class="cmt">// 拼成 attachment，按注册顺序累积，非决断字段</span>
+  systemMessage?: string;                    <span class="cmt">// 给用户 console，不进 LLM context</span>
+}</code></pre>
+
+    <figure>
+      <svg viewBox="0 0 920 460" role="img" aria-label="harness-pi 4 态 Hook 派发引擎">
+        <defs>
+          <marker id="hAr" markerWidth="8" markerHeight="8" refX="6.5" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="oklch(0.5 0.08 262)"/></marker>
+        </defs>
+
+        <rect x="24" y="20" width="430" height="200" rx="12" fill="oklch(0.975 0.02 262)" stroke="oklch(0.86 0.04 262)"/>
+        <text x="42" y="46" font-family="var(--mono)" font-size="13" font-weight="700" fill="oklch(0.42 0.1 262)">① Event — 并行 · Promise.all</text>
+        <text x="42" y="66" font-family="var(--sans)" font-size="11.5" fill="oklch(0.5 0.02 262)">on*（13 个）：onTurnStart / onLlmEnd / onPostToolUse …</text>
+        <g font-family="var(--mono)" font-size="11" fill="oklch(0.3 0.02 262)">
+          <circle cx="80" cy="120" r="6" fill="oklch(0.6 0.1 262)"/><text x="58" y="150">hook A</text>
+          <circle cx="160" cy="120" r="6" fill="oklch(0.6 0.1 262)"/><text x="138" y="150">hook B</text>
+          <circle cx="240" cy="120" r="6" fill="oklch(0.6 0.1 262)"/><text x="218" y="150">hook C</text>
+          <line x1="80" y1="130" x2="160" y2="180" stroke="oklch(0.7 0.04 262)" stroke-width="1.2"/>
+          <line x1="160" y1="130" x2="160" y2="180" stroke="oklch(0.7 0.04 262)" stroke-width="1.2"/>
+          <line x1="240" y1="130" x2="160" y2="180" stroke="oklch(0.7 0.04 262)" stroke-width="1.2"/>
+          <rect x="300" y="100" width="130" height="44" rx="8" fill="oklch(1 0 0)" stroke="oklch(0.85 0.04 262)"/>
+          <text x="316" y="120" font-size="10.5">mergeResults()</text>
+          <text x="316" y="136" font-size="10" fill="oklch(0.55 0.02 262)">按字段规则合并</text>
+        </g>
+        <text x="160" y="200" font-family="var(--mono)" font-size="10.5" text-anchor="middle" fill="oklch(0.5 0.02 262)">无顺序、无短路 — 纯观测 + 注入</text>
+
+        <rect x="466" y="20" width="430" height="200" rx="12" fill="oklch(0.975 0.025 27)" stroke="oklch(0.86 0.05 27)"/>
+        <text x="484" y="46" font-family="var(--mono)" font-size="13" font-weight="700" fill="oklch(0.5 0.13 27)">② Decision — 顺序 · short-circuit</text>
+        <text x="484" y="66" font-family="var(--sans)" font-size="11.5" fill="oklch(0.5 0.02 262)">onPreToolUse / onUserPromptSubmit（2 个）</text>
+        <g font-family="var(--mono)" font-size="11" fill="oklch(0.3 0.02 262)">
+          <rect x="484" y="92" width="92" height="40" rx="8" fill="oklch(1 0 0)" stroke="oklch(0.85 0.04 262)"/><text x="500" y="116">hook A</text>
+          <rect x="612" y="92" width="92" height="40" rx="8" fill="oklch(1 0 0)" stroke="oklch(0.85 0.05 27)" stroke-width="1.8"/><text x="628" y="116">hook B</text>
+          <rect x="740" y="92" width="92" height="40" rx="8" fill="oklch(0.96 0.01 262)" stroke="oklch(0.9 0.02 262)" stroke-dasharray="3 3"/><text x="752" y="116" fill="oklch(0.6 0.02 262)">hook C</text>
+          <line x1="576" y1="112" x2="610" y2="112" stroke="oklch(0.5 0.08 262)" stroke-width="1.4" marker-end="url(#hAr)"/>
+          <text x="612" y="160" font-size="10" fill="oklch(0.5 0.13 27)">decision:"deny" → 立即返回</text>
+          <text x="752" y="160" font-size="10" fill="oklch(0.6 0.02 262)">永不执行</text>
+        </g>
+        <text x="681" y="200" font-family="var(--mono)" font-size="10.5" text-anchor="middle" fill="oklch(0.5 0.02 262)">决断字段首个赢；additionalContext/systemMessage 仍照样累积</text>
+
+        <rect x="24" y="240" width="430" height="200" rx="12" fill="oklch(0.975 0.025 152)" stroke="oklch(0.84 0.05 152)"/>
+        <text x="42" y="266" font-family="var(--mono)" font-size="13" font-weight="700" fill="oklch(0.4 0.1 152)">③ Transform — 顺序 pipe</text>
+        <text x="42" y="286" font-family="var(--sans)" font-size="11.5" fill="oklch(0.5 0.02 262)">transformSystemPrompt / Messages / ToolsBeforeLlm（3 个）</text>
+        <g font-family="var(--mono)" font-size="11" fill="oklch(0.3 0.02 262)">
+          <rect x="42" y="320" width="74" height="40" rx="8" fill="oklch(1 0 0)" stroke="oklch(0.85 0.05 152)"/><text x="58" y="344">f(v)</text>
+          <rect x="158" y="320" width="74" height="40" rx="8" fill="oklch(1 0 0)" stroke="oklch(0.85 0.05 152)"/><text x="174" y="344">g(v)</text>
+          <rect x="274" y="320" width="74" height="40" rx="8" fill="oklch(1 0 0)" stroke="oklch(0.85 0.05 152)"/><text x="290" y="344">h(v)</text>
+          <line x1="116" y1="340" x2="156" y2="340" stroke="oklch(0.45 0.09 152)" stroke-width="1.4" marker-end="url(#hAr)"/>
+          <line x1="232" y1="340" x2="272" y2="340" stroke="oklch(0.45 0.09 152)" stroke-width="1.4" marker-end="url(#hAr)"/>
+          <line x1="348" y1="340" x2="424" y2="340" stroke="oklch(0.45 0.09 152)" stroke-width="1.4" marker-end="url(#hAr)"/>
+          <text x="388" y="336" font-size="10" fill="oklch(0.4 0.09 152)">out</text>
+        </g>
+        <text x="239" y="412" font-family="var(--mono)" font-size="10.5" text-anchor="middle" fill="oklch(0.5 0.02 262)">前者输出 = 后者输入，链式串联</text>
+
+        <rect x="466" y="240" width="430" height="200" rx="12" fill="oklch(0.975 0.025 300)" stroke="oklch(0.85 0.05 300)"/>
+        <text x="484" y="266" font-family="var(--mono)" font-size="13" font-weight="700" fill="oklch(0.45 0.13 300)">④ Around — 洋葱嵌套 · reduceRight</text>
+        <text x="484" y="286" font-family="var(--sans)" font-size="11.5" fill="oklch(0.5 0.02 262)">wrapTurn / wrapToolExec（2 个）</text>
+        <g fill="none">
+          <rect x="520" y="300" width="320" height="120" rx="10" stroke="oklch(0.65 0.1 300)" stroke-width="1.6"/>
+          <rect x="560" y="320" width="240" height="80" rx="10" stroke="oklch(0.6 0.1 300)" stroke-width="1.6"/>
+          <rect x="600" y="340" width="160" height="40" rx="10" fill="oklch(0.97 0.02 300)" stroke="oklch(0.55 0.1 300)" stroke-width="1.6"/>
+        </g>
+        <g font-family="var(--mono)" font-size="10.5" fill="oklch(0.35 0.05 300)">
+          <text x="528" y="316">早注册 hook（外层）</text>
+          <text x="568" y="336">晚注册 hook</text>
+          <text x="680" y="364" text-anchor="middle" fill="oklch(0.3 0.02 262)">inner: next()</text>
+        </g>
+        <text x="681" y="412" font-family="var(--mono)" font-size="10.5" text-anchor="middle" fill="oklch(0.5 0.02 262)">故意不套 per-hook timeout（见正文）</text>
+      </svg>
+      <figcaption>dispatcher.ts：fireEvent(Promise.all) · fireDecision(顺序短路) · firePipe*(链式) · buildWrapTurn(reduceRight 洋葱)</figcaption>
+    </figure>
+
+    <h3>构造期安全校验：不许安全关键 hook "忘了表态"</h3>
+    <p>
+      <code>assertCriticalDecisionHooks</code>（<span class="fileref">dispatcher.ts:637</span>）在 session 构造时强制校验：
+      任何标了 <code>critical:true</code> 的 hook 必须是 decision hook，且必须显式声明 <code>failClosed</code>——否则<b>直接 throw，拒绝构造</b>。
+      这堵的是一类真实会发生的事故：一个本该"超时/抛错就拒绝放行"的安全 hook，因为作者忘了想清楚失败路径，
+      默默 fail-open 放过了本该被拦下的调用，而且不会有任何报错提示你漏掉了这一步。
+    </p>
+
+    <h3>两个真实 hook 实现</h3>
+    <pre><code><span class="cmt">// packages/plugins/src/watchdog.ts — Around 形态</span>
+export function watchdog(opts: WatchdogOptions): Hook {
+  return {
+    name: "watchdog",
+    async wrapTurn(ctx, next) {
+      const timer = setTimeout(() =&gt; {
+        opts.onTimeout?.(ctx, ctx.turnIdx);
+        ctx.abort(`watchdog: turn ${ctx.turnIdx} timed out after ${opts.turnTimeoutMs}ms`);
+      }, opts.turnTimeoutMs);
+      try { await next(); } finally { clearTimeout(timer); }
+    },
+  };
+}</code></pre>
+
+    <pre><code><span class="cmt">// packages/plugins/src/token-budget.ts — Event 组合：注入 + 停止决策两阶段</span>
+export function tokenBudget(opts: TokenBudgetOptions): Hook {
+  return {
+    name: "token-budget",
+    prefers: ["cost-tracker"],  <span class="cmt">// 有更精确的 token 来源就用，没有就自累计</span>
+    onTurnStart(input, ctx) {
+      return { additionalContext: renderBudgetStatus(ctx) }; <span class="cmt">// 每 turn 持续反馈剩余百分比</span>
+    },
+    onTurnEnd(input, ctx) {
+      if (budgetExhausted(ctx) || diminishingReturns(ctx)) {
+        return { continue: false, stopReason: "token-budget-exhausted" };
+      }
+    },
+  };
+}</code></pre>
+
+    <p>
+      两个例子分别展示 around 和 event 两种形态的真实写法：<code>watchdog</code> 用 <code>next()</code> 包裹整个 turn 体，
+      借协作式 <code>ctx.abort()</code> 而不是硬 timeout race 来终止——around hook 之所以<b>不</b>套 per-hook timeout
+      （<span class="fileref">dispatcher.ts:389</span> 注释原话：<code>next()</code> 就是整个 turn/tool exec，时长本就合法可变，
+      "太久"该由协作式 abort 判断，而不是外部 race-timeout 硬杀）。<code>tokenBudget</code> 展示了同一个 hook 对象
+      如何同时挂两个不同的 event 方法，一个负责"持续提醒"，一个负责"最终拍板"，互不干扰。
+    </p>
+
+    <h3>协作面被收窄到 <code>ctx.state</code></h3>
+    <p>
+      Plugin 之间<b>禁止互相 import</b>，协作只能经过 <code>HookContext.state</code>——一个用 TypeScript module augmentation
+      注册 key 类型的共享 map。<code>repeatedCallGuard.ts</code> 是个例子：
+    </p>
+    <pre><code>declare module "@harness-pi/core" {
+  interface HookStateRegistry {
+    "repeated-call-guard:window": Map&lt;string, number&gt;;
+  }
+}</code></pre>
+    <p>
+      这条纪律（连同上面的 <code>requires</code>/<code>prefers</code>/<code>conflictsWith</code> 三个依赖声明字段）
+      是"Hook 一等公民"里容易被忽略的一半：不仅是"能不能拦截"，也是"多个 plugin 同时存在时，协作面有没有被明确约束"。
+    </p>
+  </div>
+</section>
+
+<!-- ============ pi-mono 三层扩展机制全景 ============ -->
+<section id="extensions-pimono">
+  <div class="wrap">
+    <p class="sec-tag">PI-MONO · 深挖 agent-core</p>
+    <h2>pi-mono 的可扩展性：三层，三套互不相通的机制</h2>
+
+    <h3>Layer 1 — <code>agent-loop.ts</code> / <code>Agent</code>：具名单槽位回调，没有通用 hook 概念</h3>
+    <p>
+      <code>AgentLoopConfig</code>（<span class="fileref">packages/agent/src/types.ts:140-282</span>）是最底层 <code>agentLoop()</code>
+      的配置对象。关键点：<b>每个扩展点是一个单独的可选函数字段，不是可注册的数组/Set</b>。想让"日志"“预算控制”“watchdog”
+      三个关注点同时挂在 <code>beforeToolCall</code> 上，调用方必须<b>自己手写一个函数</b>顺序调用三者、手动合并
+      <code>block</code>/<code>reason</code> 结果——loop 内核不提供任何组合/编排能力：
+    </p>
+
+    <pre><code>export interface AgentLoopConfig extends SimpleStreamOptions {
+  model: Model&lt;any&gt;;
+  convertToLlm: (messages: AgentMessage[]) =&gt; Message[] | Promise&lt;Message[]&gt;;   <span class="cmt">// 必需</span>
+  transformContext?: (messages, signal?) =&gt; Promise&lt;AgentMessage[]&gt;;
+  shouldStopAfterTurn?: (context: ShouldStopAfterTurnContext) =&gt; boolean | Promise&lt;boolean&gt;;
+  prepareNextTurn?: (context: PrepareNextTurnContext) =&gt; AgentLoopTurnUpdate | undefined | Promise&lt;...&gt;;
+  getSteeringMessages?: () =&gt; Promise&lt;AgentMessage[]&gt;;
+  getFollowUpMessages?: () =&gt; Promise&lt;AgentMessage[]&gt;;
+  toolExecution?: "sequential" | "parallel";      <span class="cmt">// 默认 "parallel"</span>
+  beforeToolCall?: (context: BeforeToolCallContext, signal?) =&gt; Promise&lt;BeforeToolCallResult | undefined&gt;;
+  afterToolCall?: (context: AfterToolCallContext, signal?) =&gt; Promise&lt;AfterToolCallResult | undefined&gt;;
+}</code></pre>
+
+    <p>
+      每个字段的 TSDoc 都强调"契约稳定性"（<code>Contract: must not throw or reject...</code>）——这是 pi-mono 的另一种设计取向：
+      与其让 dispatcher 处理复杂的失败语义，不如约定"你这个函数不许抛错"，把复杂度推给调用方自律。
+      <code>Agent</code> 类（<code>agent.ts</code>）把这些同名单槽位字段原样存成 <code>this.beforeToolCall</code> 等 public 字段，
+      依然是单槽位，没有升级成列表。
+    </p>
+    <p>
+      <code>Agent</code> 另外提供一个<b>真正的多监听器机制</b>，但只用于只读事件通知，没有拦截能力：
+    </p>
+    <pre><code><span class="cmt">// agent.ts:173, 241-244</span>
+private readonly listeners = new Set&lt;(event: AgentEvent, signal: AbortSignal) =&gt; Promise&lt;void&gt; | void&gt;();
+subscribe(listener) { this.listeners.add(listener); return () =&gt; this.listeners.delete(listener); }</code></pre>
+    <p><code>processEvents()</code> 先用事件更新内部 state，再顺序 <code>await</code> 每个 listener——listener 拿不到"拦截/修改"能力，纯观察者模式。</p>
+
+    <h3>Layer 2 — <code>AgentHarness</code>：一个真正的多监听器 hook 总线，但只存在于这一可选层</h3>
+    <p>
+      <code>AgentHarness</code>（<span class="fileref">harness/agent-harness.ts</span>，1029 行）是包在 <code>Agent</code>/<code>agentLoop</code>
+      外面的可选封装，内置 session 持久化、compaction、branch summarization、skills。它自己实现了一个按事件类型分桶、
+      每类可挂多个 handler 的总线——pi-mono 内部确实用"hook"这个词指代它（<code>AgentHarnessErrorCode</code> 里有 <code>"hook"</code> 分类）：
+    </p>
+    <pre><code>private handlers = new Map&lt;string, Set&lt;AgentHarnessHandler&gt;&gt;();
+
+on(type, handler) {
+  let hs = this.handlers.get(type);
+  if (!hs) { hs = new Set(); this.handlers.set(type, hs); }
+  hs.add(handler);
+  return () =&gt; hs.delete(handler);
+}
+
+private async emitHook(event) {
+  const handlers = this.getHandlers(event.type);
+  if (!handlers?.size) return undefined;
+  let lastResult;
+  for (const handler of handlers) {
+    const result = await handler(event);
+    if (result !== undefined) lastResult = result;   <span class="tag">// ⚠️ 后一个非 undefined 结果覆盖前一个，不是合并</span>
+  }
+  return lastResult;
+}</code></pre>
+    <p>
+      19 种事件类型里（<span class="fileref">harness/types.ts:634-656</span>），只有一部分携带可拦截的 <code>result</code>：
+    </p>
+    <table>
+      <thead><tr><th>事件</th><th>能做什么</th></tr></thead>
+      <tbody>
+        <tr><td><code>before_agent_start</code></td><td>注入额外 messages / 覆盖 systemPrompt</td></tr>
+        <tr><td><code>context</code></td><td>替换整个 messages 数组（≈ harness-pi 的 <code>transformContext</code>，但走同一条总线）</td></tr>
+        <tr><td><code>tool_call</code></td><td>block + reason（≈ <code>onPreToolUse</code>）</td></tr>
+        <tr><td><code>tool_result</code></td><td>patch content/details/isError/terminate（≈ <code>onPostToolUse</code>）</td></tr>
+        <tr><td><code>session_before_compact</code> / <code>session_before_tree</code></td><td>取消或提供自定义 compaction/摘要结果</td></tr>
+        <tr><td>其余 12 种（<code>model_update</code>、<code>queue_update</code>、<code>abort</code> 等）</td><td>只读通知，无 result</td></tr>
+      </tbody>
+    </table>
+    <p>
+      <code>createLoopConfig()</code>（<span class="fileref">agent-harness.ts:399-448</span>）展示了 Layer 2 如何"喂"回 Layer 1
+      的单槽位接口——用一个 lambda 把 <code>emitHook</code> 的 fan-out 结果适配成 Layer 1 期待的<b>单一函数</b>：
+    </p>
+    <pre><code>beforeToolCall: async ({ toolCall, args }) =&gt; {
+  const result = await this.emitHook({ type: "tool_call", toolCallId: toolCall.id, toolName: toolCall.name, input: args });
+  return result ? { block: result.block, reason: result.reason } : undefined;
+},</code></pre>
+    <p>
+      也就是说：多个 <code>AgentHarness</code> hook 想同时判定"要不要 block 这次工具调用"，靠的是 <code>emitHook</code> 里那个
+      "最后一个非 undefined 结果覆盖前面"的规则——如果 hook A 想放行、hook B 想拦截，谁在 <code>Set</code> 里后注册谁说了算，
+      没有短路、没有优先级、没有冲突告警。<b>这是唯一有拦截能力的地方，也是合并语义最粗放的地方</b>。
+    </p>
+
+    <h3>Layer 3 — <code>coding-agent</code> 的 <code>Extension</code> 系统：第三套、独立的插件机制</h3>
+    <p>
+      <code>packages/coding-agent/src/core/extensions/types.ts</code> 开篇注释："Extensions are TypeScript modules that can:
+      Subscribe to agent lifecycle events / Register LLM-callable tools / Register commands, keyboard shortcuts, and CLI flags /
+      Interact with the user via UI primitives"。这是给终端 CLI 产品（<code>pi</code> 命令）的用户写自定义扩展用的，
+      类型定义引用 <code>TUI</code>/<code>Theme</code>/<code>Overlay*</code> 等 UI 类型，由 <code>ExtensionRunner</code>
+      （<span class="fileref">extensions/runner.ts:263</span>）+ <code>createExtensionAPI()</code>
+      （<span class="fileref">extensions/loader.ts:213</span>）驱动。<b>这一层与 <code>AgentHarness.on()</code> 完全独立</b>——
+      两者都能叫"扩展/hook"，但接口、事件类型、生命周期不共享任何祖先。
+    </p>
+
+    <figure>
+      <svg viewBox="0 0 940 340" role="img" aria-label="pi-mono 三层扩展机制全景">
+        <rect x="20" y="20" width="900" height="80" rx="12" fill="var(--pimono-bg)" stroke="oklch(0.82 0.06 322)"/>
+        <text x="40" y="44" font-family="var(--sans)" font-size="13.5" font-weight="700" fill="oklch(0.34 0.08 322)">Layer 3 · coding-agent Extension</text>
+        <text x="40" y="64" font-family="var(--mono)" font-size="11" fill="oklch(0.5 0.04 322)">ExtensionRunner + createExtensionAPI() — 面向终端 UI，独立类型系统</text>
+        <text x="40" y="84" font-family="var(--mono)" font-size="11" fill="oklch(0.55 0.05 322)">不 import、不复用下面任何一层</text>
+
+        <text x="470" y="118" font-family="var(--mono)" font-size="13" text-anchor="middle" fill="oklch(0.6 0.05 322)">╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌</text>
+
+        <rect x="20" y="128" width="900" height="90" rx="12" fill="oklch(1 0 0)" stroke="oklch(0.75 0.08 322)" stroke-width="1.6"/>
+        <text x="40" y="152" font-family="var(--sans)" font-size="13.5" font-weight="700" fill="var(--pimono)">Layer 2 · AgentHarness — 唯一有拦截能力的层</text>
+        <text x="40" y="174" font-family="var(--mono)" font-size="11" fill="oklch(0.5 0.04 322)">Map&lt;eventType, Set&lt;handler&gt;&gt;，19 种事件，5 种可携带 result（可 block/patch）</text>
+        <text x="40" y="194" font-family="var(--mono)" font-size="11" fill="oklch(0.55 0.05 322)">emitHook：最后一个非 undefined 结果覆盖前面 · 可选层，装不装随意</text>
+
+        <text x="470" y="240" font-family="var(--mono)" font-size="13" text-anchor="middle" fill="oklch(0.6 0.05 322)">╌╌╌╌ 底层完全不知道 AgentHarness 存在 ╌╌╌╌</text>
+
+        <rect x="20" y="250" width="900" height="80" rx="12" fill="var(--pimono-bg)" stroke="oklch(0.82 0.06 322)"/>
+        <text x="40" y="274" font-family="var(--sans)" font-size="13.5" font-weight="700" fill="oklch(0.34 0.08 322)">Layer 1 · Agent / agentLoop</text>
+        <text x="40" y="294" font-family="var(--mono)" font-size="11" fill="oklch(0.5 0.04 322)">具名单槽位回调（beforeToolCall / afterToolCall / prepareNextTurn …）</text>
+        <text x="40" y="314" font-family="var(--mono)" font-size="11" fill="oklch(0.55 0.05 322)">+ subscribe()：多监听器，但纯只读，无拦截；无"hook"概念</text>
+      </svg>
+      <figcaption>三层各自定义"扩展"：CLI 产品插件 / 可选 harness 总线 / 内核单槽位回调，互不复用同一套类型或事件语义。</figcaption>
+    </figure>
+
+    <p>
+      值得注意的是，<code>pi-mono</code> 根目录和 <code>packages/agent/README.md</code> 都<b>没有</b>类似
+      harness-pi <code>docs/00-07</code> 那种专门论述"扩展性设计取舍"的架构文档——<code>agent</code> 包的自我描述重心是
+      "state management + event streaming + <code>AgentMessage</code> 抽象（让应用能塞自定义消息类型）"，
+      可扩展性不是这个包被设计出来时的核心叙事。
+    </p>
+  </div>
+</section>
+
+<!-- ============ Turn Loop 时序对比 ============ -->
+<section id="turn-loop">
+  <div class="wrap">
+    <p class="sec-tag">TURN LOOP · 逐步对齐执行顺序</p>
+    <h2>同一件事，两种写法：一轮 LLM + Tool 循环</h2>
+    <p>
+      harness-pi 的 <code>AgentSession</code> 把一轮 turn 拆成 <code>_phaseLlmCall → _phaseToolBatch → _phaseTurnEnd</code>
+      三个显式方法，每个 phase 边界都是一个 hook 注入点。pi-mono 的 <code>agentLoop()</code> 只有<b>一个扁平 while 循环</b>
+      （<span class="fileref">packages/agent/src/agent-loop.ts:155-269</span>），阶段划分是隐式的代码块，没有对外暴露"phase"概念——
+      扩展点是散落在循环体里的具名单槽位回调调用，而不是统一派发。
+    </p>
+
+    <figure>
+      <svg viewBox="0 0 960 760" role="img" aria-label="Turn loop 执行顺序对比">
+        <text x="20" y="20" font-family="var(--mono)" font-size="13" font-weight="700" fill="var(--harness)">harness-pi · AgentSession（session.ts）</text>
+        <text x="500" y="20" font-family="var(--mono)" font-size="13" font-weight="700" fill="var(--pimono)">pi-mono · agentLoop()（agent-loop.ts）</text>
+
+        <!-- harness-pi column rows -->
+        <g font-family="var(--mono)" font-size="11" fill="oklch(0.3 0.02 262)">
+          <rect x="20" y="36" width="420" height="34" rx="8" fill="var(--surface)" stroke="var(--line)"/>
+          <text x="32" y="57">run(prompt) / continue()</text>
+
+          <rect x="20" y="78" width="420" height="34" rx="8" fill="var(--harness-bg)" stroke="oklch(0.82 0.05 262)"/>
+          <text x="32" y="99">onSessionStart</text>
+          <rect x="366" y="83" width="60" height="20" rx="10" fill="oklch(0.6 0.1 262)"/><text x="382" y="97" fill="white" font-weight="700">E</text>
+
+          <rect x="20" y="120" width="420" height="34" rx="8" fill="oklch(0.975 0.025 27)" stroke="oklch(0.86 0.05 27)"/>
+          <text x="32" y="141">onUserPromptSubmit（可 deny 整个 run）</text>
+          <rect x="366" y="125" width="60" height="20" rx="10" fill="oklch(0.56 0.17 27)"/><text x="382" y="139" fill="white" font-weight="700">D</text>
+
+          <rect x="20" y="162" width="420" height="34" rx="8" fill="var(--harness-bg)" stroke="oklch(0.82 0.05 262)"/>
+          <text x="32" y="183">loop: drainSteerInbox → onTurnStart</text>
+          <rect x="366" y="167" width="60" height="20" rx="10" fill="oklch(0.6 0.1 262)"/><text x="382" y="181" fill="white" font-weight="700">E</text>
+
+          <rect x="20" y="204" width="420" height="86" rx="10" fill="oklch(0.975 0.025 300)" stroke="oklch(0.85 0.05 300)" stroke-width="1.4"/>
+          <text x="32" y="222" font-weight="700" fill="oklch(0.45 0.13 300)">wrapTurn( … ) 洋葱包裹</text>
+          <rect x="366" y="208" width="60" height="20" rx="10" fill="oklch(0.5 0.14 300)"/><text x="382" y="222" fill="white" font-weight="700">A</text>
+          <text x="42" y="242">transformSystemPrompt/Messages/Tools</text>
+          <rect x="366" y="230" width="60" height="20" rx="10" fill="oklch(0.5 0.1 152)"/><text x="382" y="244" fill="white" font-weight="700">T</text>
+          <text x="42" y="262">LLM stream → onLlmEnd → onContextOverflow</text>
+          <rect x="366" y="250" width="60" height="20" rx="10" fill="oklch(0.6 0.1 262)"/><text x="382" y="264" fill="white" font-weight="700">E</text>
+          <text x="42" y="282">每个 tool: onPreToolUse→wrapToolExec→onPostToolUse</text>
+
+          <rect x="20" y="298" width="420" height="34" rx="8" fill="oklch(0.6 0.1 262 / 0.12)" stroke="oklch(0.82 0.05 262)"/>
+          <text x="32" y="319">onTurnEnd（可 continue:false 主动中止）</text>
+          <rect x="366" y="303" width="60" height="20" rx="10" fill="oklch(0.6 0.1 262)"/><text x="382" y="317" fill="white" font-weight="700">E</text>
+
+          <rect x="20" y="340" width="420" height="34" rx="8" fill="var(--surface)" stroke="var(--line)"/>
+          <text x="32" y="361">flushToStore()</text>
+
+          <rect x="20" y="382" width="420" height="34" rx="8" fill="var(--harness-bg)" stroke="oklch(0.82 0.05 262)"/>
+          <text x="32" y="403">onAfterFlush（collect-return，内核负责落盘）</text>
+          <rect x="366" y="387" width="60" height="20" rx="10" fill="oklch(0.6 0.1 262)"/><text x="382" y="401" fill="white" font-weight="700">E</text>
+
+          <text x="230" y="436" text-anchor="middle" fill="oklch(0.55 0.02 262)">（回到 loop 顶部，直到 outcome ≠ continue）</text>
+
+          <rect x="20" y="450" width="420" height="34" rx="8" fill="var(--harness-bg)" stroke="oklch(0.82 0.05 262)"/>
+          <text x="32" y="471">onContinuationCheck（可续跑同 session）</text>
+          <rect x="366" y="455" width="60" height="20" rx="10" fill="oklch(0.6 0.1 262)"/><text x="382" y="469" fill="white" font-weight="700">E</text>
+
+          <rect x="20" y="492" width="420" height="34" rx="8" fill="var(--harness-bg)" stroke="oklch(0.82 0.05 262)"/>
+          <text x="32" y="513">onSessionEnd（恰好 fire 一次）</text>
+          <rect x="366" y="497" width="60" height="20" rx="10" fill="oklch(0.6 0.1 262)"/><text x="382" y="511" fill="white" font-weight="700">E</text>
+
+          <rect x="20" y="534" width="420" height="34" rx="8" fill="var(--surface)" stroke="var(--line)"/>
+          <text x="32" y="555">persistTerminal() → 返回 RunSummary</text>
+        </g>
+
+        <!-- pi-mono column rows -->
+        <g font-family="var(--mono)" font-size="11" fill="oklch(0.3 0.02 262)">
+          <rect x="500" y="36" width="420" height="34" rx="8" fill="var(--surface)" stroke="var(--line)"/>
+          <text x="512" y="57">agentLoop(prompts, context, config, signal)</text>
+
+          <rect x="500" y="78" width="420" height="34" rx="8" fill="var(--surface-2)" stroke="var(--line)"/>
+          <text x="512" y="99">outer while(true) → inner while(toolCalls‖pending)</text>
+
+          <rect x="500" y="120" width="420" height="34" rx="8" fill="var(--pimono-bg)" stroke="oklch(0.82 0.06 322)"/>
+          <text x="512" y="141">emit(turn_start) · 注入 pendingMessages</text>
+          <rect x="846" y="125" width="60" height="20" rx="10" fill="oklch(0.6 0.03 322)"/><text x="858" y="139" fill="white" font-weight="700">emit</text>
+
+          <rect x="500" y="162" width="420" height="34" rx="8" fill="var(--pimono-bg)" stroke="oklch(0.82 0.06 322)"/>
+          <text x="512" y="183">streamAssistantResponse → emit(message_*)</text>
+          <rect x="846" y="167" width="60" height="20" rx="10" fill="oklch(0.6 0.03 322)"/><text x="858" y="181" fill="white" font-weight="700">emit</text>
+
+          <rect x="500" y="204" width="420" height="34" rx="8" fill="var(--surface-2)" stroke="var(--line)"/>
+          <text x="512" y="225">stopReason∈{error,aborted} → turn_end/agent_end → return</text>
+
+          <rect x="500" y="246" width="420" height="86" rx="10" fill="oklch(0.975 0.03 322)" stroke="oklch(0.8 0.07 322)" stroke-width="1.2"/>
+          <text x="512" y="264" font-weight="700" fill="oklch(0.4 0.1 322)">executeToolCalls(...)</text>
+          <text x="512" y="284">beforeToolCall（单函数，原始顺序同步跑）</text>
+          <rect x="846" y="272" width="60" height="20" rx="10" fill="var(--pimono)"/><text x="856" y="286" fill="white" font-weight="700">fn</text>
+          <text x="512" y="304">execute()（batch 内 parallel 或 sequential）</text>
+          <text x="512" y="322">afterToolCall（单函数）</text>
+          <rect x="846" y="310" width="60" height="20" rx="10" fill="var(--pimono)"/><text x="856" y="324" fill="white" font-weight="700">fn</text>
+
+          <rect x="500" y="340" width="420" height="34" rx="8" fill="var(--pimono-bg)" stroke="oklch(0.82 0.06 322)"/>
+          <text x="512" y="361">emit(turn_end, {message, toolResults})</text>
+          <rect x="846" y="345" width="60" height="20" rx="10" fill="oklch(0.6 0.03 322)"/><text x="858" y="359" fill="white" font-weight="700">emit</text>
+
+          <rect x="500" y="382" width="420" height="34" rx="8" fill="var(--surface)" stroke="var(--line)"/>
+          <text x="512" y="403">prepareNextTurn?.(...)（单函数，可换 context/model）</text>
+          <rect x="846" y="387" width="60" height="20" rx="10" fill="var(--pimono)"/><text x="856" y="401" fill="white" font-weight="700">fn</text>
+
+          <rect x="500" y="424" width="420" height="34" rx="8" fill="var(--surface)" stroke="var(--line)"/>
+          <text x="512" y="445">shouldStopAfterTurn?.(...) → true → agent_end,return</text>
+          <rect x="846" y="429" width="60" height="20" rx="10" fill="var(--pimono)"/><text x="856" y="443" fill="white" font-weight="700">fn</text>
+
+          <text x="710" y="478" text-anchor="middle" fill="oklch(0.55 0.02 262)">pendingMessages = getSteeringMessages?.()（回到 inner while）</text>
+
+          <rect x="500" y="492" width="420" height="34" rx="8" fill="var(--surface)" stroke="var(--line)"/>
+          <text x="512" y="513">无更多 tool call → getFollowUpMessages?.()</text>
+          <rect x="846" y="497" width="60" height="20" rx="10" fill="var(--pimono)"/><text x="856" y="511" fill="white" font-weight="700">fn</text>
+
+          <text x="710" y="536" text-anchor="middle" fill="oklch(0.55 0.02 262)">有 follow-up → 回 outer while；否则 break</text>
+
+          <rect x="500" y="550" width="420" height="34" rx="8" fill="var(--pimono-bg)" stroke="oklch(0.82 0.06 322)"/>
+          <text x="512" y="571">emit(agent_end) → 返回 AgentMessage[]</text>
+          <rect x="846" y="555" width="60" height="20" rx="10" fill="oklch(0.6 0.03 322)"/><text x="858" y="569" fill="white" font-weight="700">emit</text>
+        </g>
+
+        <!-- legend -->
+        <g font-family="var(--mono)" font-size="10.5" fill="oklch(0.45 0.02 262)">
+          <rect x="20" y="600" width="14" height="14" rx="4" fill="oklch(0.6 0.1 262)"/><text x="40" y="611">E 事件（并行观察）</text>
+          <rect x="150" y="600" width="14" height="14" rx="4" fill="oklch(0.56 0.17 27)"/><text x="170" y="611">D 决策（顺序短路）</text>
+          <rect x="290" y="600" width="14" height="14" rx="4" fill="oklch(0.5 0.1 152)"/><text x="310" y="611">T 转换（链式）</text>
+          <rect x="410" y="600" width="14" height="14" rx="4" fill="oklch(0.5 0.14 300)"/><text x="430" y="611">A 环绕（嵌套）</text>
+          <rect x="500" y="600" width="14" height="14" rx="4" fill="oklch(0.6 0.03 322)"/><text x="520" y="611">emit 只读事件</text>
+          <rect x="630" y="600" width="14" height="14" rx="4" fill="var(--pimono)"/><text x="650" y="611">fn 具名单槽位回调（非注册表）</text>
+        </g>
+      </svg>
+      <figcaption>harness-pi：每个箭头都是同一个 Hook 接口的不同方法，dispatcher 统一派发。pi-mono：每一步要么是只读 emit，要么是调用 config 上一个固定命名的函数——没有中间派发层，多关注点组合靠调用方自己写胶水代码。</figcaption>
+    </figure>
+
+    <p>
+      两边在"progress 事件里 <code>message_update</code> 是渐进式 partial 快照，<code>message_end</code>/<code>onLlmEnd</code>
+      才是权威终态"这条原则上是一致的——但 harness-pi 把这条原则做成了两套独立类型（下节展开），
+      pi-mono 只用一套 <code>AgentEvent</code> 类型表达。另外要指出的一个精度差异：<b>pi-mono 的 <code>beforeToolCall</code>/
+      <code>afterToolCall</code> 是单函数</b>，而不是 harness-pi 的 <code>onPreToolUse</code>/<code>onPostToolUse</code> 那样
+      可以同时挂多个 hook——这解释了为什么"多个关注点组合"在 pi-mono Layer 1 完全没有内置支持，必须手写胶水函数。
+    </p>
+  </div>
+</section>
+
+<!-- ============ Tool 并发控制对比 ============ -->
+<section id="concurrency">
+  <div class="wrap">
+    <p class="sec-tag">CONCURRENCY · 同一批 tool call，两种切法</p>
+    <h2>段级屏障 vs 批次级二元开关</h2>
+    <p>
+      同一个 assistant 消息里可能同时撰写多个 tool call，比如 <code>[read, read, edit, read, read, bash]</code>。
+      两边都不会盲目全并行——但"怎么保守"完全不同。
+    </p>
+
+    <pre><code><span class="cmt">// harness-pi — packages/core/src/tool-executor.ts:52-111</span>
+<span class="cmt">// unsafe = 屏障；只并行"连续的" safe 段，保留模型撰写的调用顺序</span>
+for (const { call, safe } of classified) {
+  if (safe) { safeRun.push(call); continue; }
+  await flushSafeRun();     <span class="cmt">// barrier：先跑完前面连续的 safe 段</span>
+  if (aborted) break;
+  await executeOne(call);   <span class="cmt">// unsafe 顺序执行</span>
+}
+if (!aborted) await flushSafeRun();</code></pre>
+
+    <pre><code><span class="cmt">// pi-mono — packages/agent/src/agent-loop.ts:373-388</span>
+<span class="cmt">// 批次里只要有一个工具是 sequential 模式，整批全部降级为串行</span>
+const hasSequentialToolCall = toolCalls.some(
+  (tc) =&gt; currentContext.tools?.find(t =&gt; t.name === tc.name)?.executionMode === "sequential",
+);
+if (config.toolExecution === "sequential" || hasSequentialToolCall) {
+  return executeToolCallsSequential(...);
+}
+return executeToolCallsParallel(...);</code></pre>
+
+    <figure>
+      <svg viewBox="0 0 960 460" role="img" aria-label="Tool 并发控制对比">
+        <text x="20" y="20" font-family="var(--mono)" font-size="13" font-weight="700" fill="var(--harness)">harness-pi — 段级屏障：仅连续 safe 段并行</text>
+
+        <rect x="30" y="50" width="300" height="110" rx="10" fill="none" stroke="oklch(0.75 0.05 262)" stroke-width="1.4" stroke-dasharray="5 4"/>
+        <rect x="330" y="50" width="150" height="110" rx="10" fill="none" stroke="oklch(0.75 0.08 27)" stroke-width="1.4" stroke-dasharray="5 4"/>
+        <rect x="480" y="50" width="300" height="110" rx="10" fill="none" stroke="oklch(0.75 0.05 262)" stroke-width="1.4" stroke-dasharray="5 4"/>
+        <rect x="780" y="50" width="150" height="110" rx="10" fill="none" stroke="oklch(0.75 0.08 27)" stroke-width="1.4" stroke-dasharray="5 4"/>
+
+        <g font-family="var(--mono)" font-size="12" text-anchor="middle">
+          <rect x="40" y="70" width="130" height="54" rx="8" fill="oklch(0.95 0.03 262)" stroke="oklch(0.8 0.05 262)"/>
+          <text x="105" y="94" fill="oklch(0.32 0.05 262)">read1</text><text x="105" y="112" font-size="9.5" fill="oklch(0.5 0.04 262)">SAFE</text>
+
+          <rect x="190" y="70" width="130" height="54" rx="8" fill="oklch(0.95 0.03 262)" stroke="oklch(0.8 0.05 262)"/>
+          <text x="255" y="94" fill="oklch(0.32 0.05 262)">read2</text><text x="255" y="112" font-size="9.5" fill="oklch(0.5 0.04 262)">SAFE</text>
+
+          <rect x="340" y="70" width="130" height="54" rx="8" fill="oklch(0.95 0.04 27)" stroke="oklch(0.8 0.08 27)"/>
+          <text x="405" y="94" fill="oklch(0.42 0.1 27)">edit</text><text x="405" y="112" font-size="9.5" fill="oklch(0.55 0.08 27)">UNSAFE</text>
+
+          <rect x="490" y="70" width="130" height="54" rx="8" fill="oklch(0.95 0.03 262)" stroke="oklch(0.8 0.05 262)"/>
+          <text x="555" y="94" fill="oklch(0.32 0.05 262)">read3</text><text x="555" y="112" font-size="9.5" fill="oklch(0.5 0.04 262)">SAFE</text>
+
+          <rect x="640" y="70" width="130" height="54" rx="8" fill="oklch(0.95 0.03 262)" stroke="oklch(0.8 0.05 262)"/>
+          <text x="705" y="94" fill="oklch(0.32 0.05 262)">read4</text><text x="705" y="112" font-size="9.5" fill="oklch(0.5 0.04 262)">SAFE</text>
+
+          <rect x="790" y="70" width="130" height="54" rx="8" fill="oklch(0.95 0.04 27)" stroke="oklch(0.8 0.08 27)"/>
+          <text x="855" y="94" fill="oklch(0.42 0.1 27)">bash</text><text x="855" y="112" font-size="9.5" fill="oklch(0.55 0.08 27)">UNSAFE</text>
+        </g>
+        <g font-family="var(--mono)" font-size="10.5" text-anchor="middle" fill="oklch(0.5 0.02 262)">
+          <text x="180" y="178">safe run 1 · 并行</text>
+          <text x="405" y="178">unsafe · 独立屏障</text>
+          <text x="630" y="178">safe run 2 · 并行</text>
+          <text x="855" y="178">unsafe · 独立屏障</text>
+        </g>
+
+        <text x="20" y="230" font-family="var(--mono)" font-size="13" font-weight="700" fill="var(--pimono)">pi-mono — 批次级二元开关：一个 sequential 拖累整批</text>
+
+        <rect x="30" y="260" width="900" height="110" rx="10" fill="none" stroke="oklch(0.78 0.07 322)" stroke-width="1.4" stroke-dasharray="5 4"/>
+        <g font-family="var(--mono)" font-size="12" text-anchor="middle">
+          <rect x="40" y="280" width="130" height="54" rx="8" fill="var(--pimono-bg)" stroke="oklch(0.82 0.06 322)"/>
+          <text x="105" y="304" fill="oklch(0.36 0.08 322)">read1</text><text x="105" y="322" font-size="9.5" fill="oklch(0.55 0.05 322)">parallel-ok</text>
+
+          <rect x="190" y="280" width="130" height="54" rx="8" fill="var(--pimono-bg)" stroke="oklch(0.82 0.06 322)"/>
+          <text x="255" y="304" fill="oklch(0.36 0.08 322)">read2</text><text x="255" y="322" font-size="9.5" fill="oklch(0.55 0.05 322)">parallel-ok</text>
+
+          <rect x="340" y="280" width="130" height="54" rx="8" fill="oklch(1 0 0)" stroke="var(--pimono)" stroke-width="1.8"/>
+          <text x="405" y="304" fill="var(--pimono)">edit</text><text x="405" y="322" font-size="9.5" fill="var(--pimono)">sequential</text>
+
+          <rect x="490" y="280" width="130" height="54" rx="8" fill="var(--pimono-bg)" stroke="oklch(0.82 0.06 322)"/>
+          <text x="555" y="304" fill="oklch(0.36 0.08 322)">read3</text><text x="555" y="322" font-size="9.5" fill="oklch(0.55 0.05 322)">parallel-ok</text>
+
+          <rect x="640" y="280" width="130" height="54" rx="8" fill="var(--pimono-bg)" stroke="oklch(0.82 0.06 322)"/>
+          <text x="705" y="304" fill="oklch(0.36 0.08 322)">read4</text><text x="705" y="322" font-size="9.5" fill="oklch(0.55 0.05 322)">parallel-ok</text>
+
+          <rect x="790" y="280" width="130" height="54" rx="8" fill="oklch(1 0 0)" stroke="var(--pimono)" stroke-width="1.8"/>
+          <text x="855" y="304" fill="var(--pimono)">bash</text><text x="855" y="322" font-size="9.5" fill="var(--pimono)">sequential</text>
+        </g>
+        <text x="480" y="388" font-family="var(--mono)" font-size="11" text-anchor="middle" fill="oklch(0.5 0.05 322)">整批 6 个调用全部退化为串行（哪怕 read1/read2/read3/read4 互相之间毫无冲突）</text>
+        <text x="480" y="408" font-family="var(--mono)" font-size="10.5" text-anchor="middle" fill="oklch(0.55 0.02 262)">（并行分支里 beforeToolCall 校验仍按原始顺序同步跑一遍，只有 execute() 真正并发；写回顺序按原始调用顺序重排）</text>
+      </svg>
+      <figcaption>harness-pi 按"是否连续"切段，pi-mono 按"批次是否含 sequential 工具"整体二选一。谁更好取决于批次组成：混合批次越常见，段级屏障的并行度优势越大；批次通常纯 safe 或纯 unsafe 时，两者退化为等价。</figcaption>
+    </figure>
+
+    <div class="callout warn">
+      <span class="ct">一个容易忽略的反向差异：默认值方向相反</span>
+      harness-pi 的 <code>isConcurrencySafe()</code> <b>默认 false</b>（保守：不声明安全就当不安全，出错也 fail-closed 为 unsafe）。
+      pi-mono 的 <code>toolExecution</code> <b>默认 "parallel"</b>（乐观：不声明 sequential 就当可以并行）。
+      也就是说面对"新写的、忘了声明并发属性的工具"，harness-pi 会保守地把它当成屏障（慢但安全），
+      pi-mono 会乐观地把它并进去（快但如果这个工具其实有副作用冲突，问题不会在类型层面被拦下来）。
+    </div>
+  </div>
+</section>
+
+<!-- ============ 事件系统对比 ============ -->
+<section id="events">
+  <div class="wrap">
+    <p class="sec-tag">EVENTS · 给调用方看到的是什么</p>
+    <h2>双轨类型系统 vs 单一类型的两条通路</h2>
+    <p>
+      两边都同意一条原则：<code>message_update</code> 是回合进行中逐块推送的 partial 快照，只有 <code>message_end</code>
+      （harness-pi）/ 同名字段（pi-mono）才是权威终态，不能拿中间态当结果用。分歧在于：<b>这条原则要不要反映到类型系统里</b>。
+    </p>
+
+    <figure>
+      <svg viewBox="0 0 960 440" role="img" aria-label="事件系统对比">
+        <text x="20" y="20" font-family="var(--mono)" font-size="13" font-weight="700" fill="var(--harness)">harness-pi — 双轨：LiveEvent（进行中）≠ SessionEvent（recorded 权威）</text>
+
+        <g font-family="var(--mono)" font-size="10.5" text-anchor="middle">
+          <rect x="40" y="46" width="156" height="40" rx="20" fill="oklch(0.97 0.015 262)" stroke="oklch(0.85 0.03 262)" stroke-dasharray="4 3"/>
+          <text x="118" y="70" fill="oklch(0.45 0.03 262)">message_start</text>
+          <rect x="206" y="46" width="156" height="40" rx="20" fill="oklch(0.97 0.015 262)" stroke="oklch(0.85 0.03 262)" stroke-dasharray="4 3"/>
+          <text x="284" y="70" fill="oklch(0.45 0.03 262)">text_delta</text>
+          <rect x="372" y="46" width="156" height="40" rx="20" fill="oklch(0.97 0.015 262)" stroke="oklch(0.85 0.03 262)" stroke-dasharray="4 3"/>
+          <text x="450" y="70" fill="oklch(0.45 0.03 262)">toolcall_delta</text>
+          <rect x="538" y="46" width="156" height="40" rx="20" fill="oklch(0.97 0.015 262)" stroke="oklch(0.85 0.03 262)" stroke-dasharray="4 3"/>
+          <text x="616" y="70" fill="oklch(0.45 0.03 262)">message_update</text>
+          <rect x="704" y="46" width="156" height="40" rx="20" fill="oklch(0.94 0.025 262)" stroke="oklch(0.75 0.05 262)" stroke-width="1.6"/>
+          <text x="782" y="70" fill="oklch(0.35 0.05 262)">message_end ✓权威</text>
+        </g>
+        <text x="20" y="104" font-family="var(--mono)" font-size="10.5" fill="oklch(0.5 0.02 262)">session.on() · 细粒度、可丢（UI 抖动用），不进 transcript，listener 抛错被隔离</text>
+
+        <g font-family="var(--mono)" font-size="10.5" text-anchor="middle">
+          <rect x="40" y="140" width="130" height="40" rx="8" fill="var(--harness-bg)" stroke="var(--harness)" stroke-width="1.4"/>
+          <text x="105" y="164" fill="oklch(0.3 0.06 262)">session-start</text>
+          <rect x="180" y="140" width="130" height="40" rx="8" fill="var(--harness-bg)" stroke="var(--harness)" stroke-width="1.4"/>
+          <text x="245" y="164" fill="oklch(0.3 0.06 262)">turn-start</text>
+          <rect x="320" y="140" width="130" height="40" rx="8" fill="var(--harness-bg)" stroke="var(--harness)" stroke-width="1.4"/>
+          <text x="385" y="164" fill="oklch(0.3 0.06 262)">llm-end</text>
+          <rect x="460" y="140" width="130" height="40" rx="8" fill="var(--harness-bg)" stroke="var(--harness)" stroke-width="1.4"/>
+          <text x="525" y="164" fill="oklch(0.3 0.06 262)">tool-end</text>
+          <rect x="600" y="140" width="130" height="40" rx="8" fill="var(--harness-bg)" stroke="var(--harness)" stroke-width="1.4"/>
+          <text x="665" y="164" fill="oklch(0.3 0.06 262)">turn-end</text>
+          <rect x="740" y="140" width="130" height="40" rx="8" fill="var(--harness-bg)" stroke="var(--harness)" stroke-width="1.4"/>
+          <text x="805" y="164" fill="oklch(0.3 0.06 262)">session-end</text>
+        </g>
+        <text x="20" y="198" font-family="var(--mono)" font-size="10.5" fill="oklch(0.5 0.02 262)">runStreaming()/continueStreaming() · recorded 权威轨 · 刻意不含 decision/pipe/around 类 hook 的输出</text>
+
+        <line x1="20" y1="220" x2="940" y2="220" stroke="var(--line)" stroke-width="1"/>
+
+        <text x="20" y="248" font-family="var(--mono)" font-size="13" font-weight="700" fill="var(--pimono)">pi-mono — 单一 AgentEvent，两条通路推送同一份数据</text>
+
+        <rect x="380" y="270" width="200" height="50" rx="10" fill="oklch(1 0 0)" stroke="var(--pimono)" stroke-width="1.6"/>
+        <text x="480" y="292" font-family="var(--mono)" font-size="11.5" text-anchor="middle" fill="var(--pimono)">AgentEvent（单一联合类型）</text>
+        <text x="480" y="310" font-family="var(--mono)" font-size="9.5" text-anchor="middle" fill="oklch(0.55 0.05 322)">agent_start/turn_*/message_*/tool_execution_*</text>
+
+        <line x1="440" y1="320" x2="280" y2="360" stroke="var(--pimono)" stroke-width="1.4"/>
+        <line x1="520" y1="320" x2="680" y2="360" stroke="var(--pimono)" stroke-width="1.4"/>
+
+        <rect x="150" y="360" width="260" height="50" rx="10" fill="var(--pimono-bg)" stroke="oklch(0.82 0.06 322)"/>
+        <text x="280" y="390" font-family="var(--mono)" font-size="11" text-anchor="middle" fill="oklch(0.36 0.08 322)">EventStream（for-await + .result()）</text>
+
+        <rect x="550" y="360" width="260" height="50" rx="10" fill="var(--pimono-bg)" stroke="oklch(0.82 0.06 322)"/>
+        <text x="680" y="390" font-family="var(--mono)" font-size="11" text-anchor="middle" fill="oklch(0.36 0.08 322)">subscribe() 监听器 Set（实时推送）</text>
+      </svg>
+      <figcaption>harness-pi 用两套不同形状的类型分别服务"UI 展示"和"审计/重放"；pi-mono 用一套类型服务两条通路——简单，但把"这条消息是否已经稳定"的判断责任完全留给了消费方。</figcaption>
+    </figure>
+
+    <p>
+      harness-pi 明确排除 decision/pipe/around 类 hook 的输出进入 recorded 轨（<span class="fileref">session.ts:35-41</span> 注释：
+      decision 能改控制流、pipe 是 plugin-to-plugin 转换链、around 是嵌套语义，三者都跟"只读 flat event 流"不兼容）。
+      这个区分在真实场景里有价值：如果要把 recorded 轨接到审计/重放系统，pi-mono 的 <code>AgentEvent</code> 里混着大量
+      "这轮还没完成、可能被后续 delta 覆盖"的中间态，不加过滤直接落盘会有噪音；harness-pi 从类型层面就先把这两种用途分开了。
+    </p>
+  </div>
+</section>
+
+<!-- ============ 持久化与状态模型对比 ============ -->
+<section id="persistence">
+  <div class="wrap">
+    <p class="sec-tag">PERSISTENCE · 会话状态存成什么形状</p>
+    <h2>线性 append-only 日志 vs 可分支的 session 树</h2>
+    <p>
+      这是本报告里 pi-mono 数据模型明显更丰富的一处。harness-pi 的 <code>SessionStore</code> 是<b>单一线性日志</b>，
+      pi-mono 的 <code>AgentHarness</code> session 是<b>可在任意历史节点 fork 的树</b>。两者服务的场景不同，细节见下。
+    </p>
+
+    <figure>
+      <svg viewBox="0 0 960 460" role="img" aria-label="持久化模型对比">
+        <text x="20" y="20" font-family="var(--mono)" font-size="13" font-weight="700" fill="var(--harness)">harness-pi — 线性 append-only 日志 + 单调 HWM</text>
+
+        <g font-family="var(--mono)" font-size="10" text-anchor="middle">
+          <rect x="100" y="60" width="60" height="40" rx="6" fill="var(--harness-bg)" stroke="var(--harness)"/><text x="130" y="84" fill="oklch(0.32 0.06 262)">e0</text>
+          <rect x="170" y="60" width="60" height="40" rx="6" fill="var(--harness-bg)" stroke="var(--harness)"/><text x="200" y="84" fill="oklch(0.32 0.06 262)">e1</text>
+          <rect x="240" y="60" width="60" height="40" rx="6" fill="var(--harness-bg)" stroke="var(--harness)"/><text x="270" y="84" fill="oklch(0.32 0.06 262)">e2</text>
+          <rect x="310" y="60" width="60" height="40" rx="6" fill="var(--harness-bg)" stroke="var(--harness)"/><text x="340" y="84" fill="oklch(0.32 0.06 262)">e3</text>
+          <rect x="380" y="60" width="60" height="40" rx="6" fill="var(--harness-bg)" stroke="var(--harness)"/><text x="410" y="84" fill="oklch(0.32 0.06 262)">e4</text>
+          <rect x="450" y="60" width="60" height="40" rx="6" fill="oklch(0.98 0.008 262)" stroke="oklch(0.85 0.02 262)" stroke-dasharray="3 3"/><text x="480" y="84" fill="oklch(0.6 0.02 262)">e5</text>
+          <rect x="520" y="60" width="60" height="40" rx="6" fill="oklch(0.98 0.008 262)" stroke="oklch(0.85 0.02 262)" stroke-dasharray="3 3"/><text x="550" y="84" fill="oklch(0.6 0.02 262)">e6</text>
+          <rect x="590" y="60" width="60" height="40" rx="6" fill="oklch(0.98 0.008 262)" stroke="oklch(0.85 0.02 262)" stroke-dasharray="3 3"/><text x="620" y="84" fill="oklch(0.6 0.02 262)">e7</text>
+        </g>
+        <line x1="445" y1="52" x2="445" y2="112" stroke="oklch(0.5 0.13 27)" stroke-width="1.6"/>
+        <text x="445" y="46" font-family="var(--mono)" font-size="10.5" text-anchor="middle" fill="oklch(0.5 0.13 27)">_persistedCount HWM</text>
+        <text x="445" y="126" font-family="var(--mono)" font-size="10" text-anchor="middle" fill="oklch(0.55 0.02 262)">已落盘 ← | → 待落盘</text>
+
+        <text x="20" y="160" font-family="var(--mono)" font-size="10.5" fill="oklch(0.5 0.02 262)">appendEntry 成功一条才 ++；中途失败停在已成功处，下次重试，绝不重复 append（store 不去重）</text>
+        <text x="20" y="180" font-family="var(--mono)" font-size="10.5" fill="oklch(0.5 0.02 262)">strictPersistence：落盘不全的 done → 提级为 reason:"error"，只提级 done，不覆盖 aborted/error/max_turns</text>
+
+        <line x1="20" y1="210" x2="940" y2="210" stroke="var(--line)" stroke-width="1"/>
+
+        <text x="20" y="240" font-family="var(--mono)" font-size="13" font-weight="700" fill="var(--pimono)">pi-mono — 可分支 session 树（SessionTreeEntry，parentId 链）</text>
+
+        <line x1="480" y1="264" x2="480" y2="300" stroke="var(--pimono)" stroke-width="1.6"/>
+        <circle cx="480" cy="264" r="9" fill="var(--pimono)"/>
+        <text x="480" y="252" font-family="var(--mono)" font-size="10.5" text-anchor="middle" fill="var(--pimono)">root</text>
+
+        <circle cx="480" cy="308" r="9" fill="var(--pimono)"/>
+        <line x1="480" y1="308" x2="400" y2="352" stroke="var(--pimono)" stroke-width="1.6"/>
+        <line x1="480" y1="308" x2="640" y2="352" stroke="var(--pimono)" stroke-width="1.6"/>
+
+        <circle cx="400" cy="358" r="9" fill="var(--pimono)"/>
+        <line x1="400" y1="358" x2="330" y2="402" stroke="var(--pimono)" stroke-width="1.6"/>
+        <line x1="400" y1="358" x2="470" y2="402" stroke="var(--pimono)" stroke-width="1.6"/>
+
+        <circle cx="640" cy="358" r="9" fill="oklch(0.6 0.05 322)"/>
+        <text x="700" y="362" font-family="var(--mono)" font-size="10.5" fill="oklch(0.4 0.08 322)">分支 C（另一次 fork 出的对话）</text>
+
+        <circle cx="330" cy="408" r="9" fill="oklch(0.6 0.05 322)"/>
+        <text x="240" y="428" font-family="var(--mono)" font-size="10.5" fill="oklch(0.4 0.08 322)">分支 A（当前对话）</text>
+
+        <circle cx="470" cy="408" r="9" fill="oklch(0.6 0.05 322)"/>
+        <text x="480" y="428" font-family="var(--mono)" font-size="10.5" fill="oklch(0.4 0.08 322)">分支 B（rewind 后新对话）</text>
+      </svg>
+      <figcaption>左：单一时间线，只有"已落盘"和"待落盘"两态。右：任意节点都能 <code>fork()</code> 出新分支，<code>buildContext()</code> 沿 <code>parentId</code> 从叶子回溯到根拼出线性 messages。</figcaption>
+    </figure>
+
+    <p>
+      pi-mono 的 <code>SessionStorage</code>（<code>getLeafId</code>/<code>setLeafId</code>/<code>appendEntry</code>/<code>getPathToRoot</code>/<code>findEntries</code>）
+      支持在历史任意节点开新分支而不用复制之前的全部消息——这是终端交互产品的刚需（<code>/rewind</code>、比较两种续写方向）。
+      compaction、branch summarization 也内置在这一层（<code>harness/compaction/*</code>），通过 <code>session_before_compact</code>
+      等 hook 事件可被外部拦截/自定义，但默认实现就在包内——不像 harness-pi 把 compaction 完全移出内核，
+      变成 <code>@harness-pi/plugins</code> 里独立的 <code>compactOnOverflow</code>/<code>CompactRestartFresh</code>/<code>CompactResumeFromBoundary</code> controller。
+    </p>
+    <p>
+      反过来，harness-pi 这套线性 HWM 模型换来的是<b>一个更强的一致性保证</b>：<code>strictPersistence</code> 模式明确定义了
+      "落盘不全时该怎么对外报告"（提级为 error），这条规则在 pi-mono 的研究里没有找到对等物——
+      <code>SessionStorage.appendEntry</code> 是否具备幂等重试语义，需要看具体 <code>jsonl-storage.ts</code> 实现，
+      在接口/类型层面没有像 <code>strictPersistence</code> 这样被显式建模和文档化。
+    </p>
+  </div>
+</section>
+
+<!-- ============ 全面对比总表 ============ -->
+<section id="comparison-table">
+  <div class="wrap">
+    <p class="sec-tag">LEDGER · 一张表收口机制差异</p>
+    <h2>全面对比总表</h2>
+    <table>
+      <thead><tr><th>维度</th><th class="col-harness">harness-pi</th><th class="col-pimono">pi-mono</th></tr></thead>
+      <tbody>
+        <tr><td>核心扩展抽象</td><td>单一 <code>Hook</code> 接口，4 种方法族</td><td>三套不同抽象：单槽位回调 / <code>on()</code>总线 / Extension</td></tr>
+        <tr><td>扩展点是否贯穿全层</td><td>✅ Controller/Plugin/Kernel 共享同一类型</td><td>❌ 仅 <code>AgentHarness</code>（可选层）有通用注册</td></tr>
+        <tr><td>能否真正拦截</td><td>✅ decision hook 可 deny/modify/abort</td><td>🟡 仅 <code>AgentHarness</code> 的 5/19 种事件可 block/patch；裸 <code>Agent</code> 层不能</td></tr>
+        <tr><td>多 hook 合并策略</td><td>按 4 种形态分别定义（聚合/首个决断赢+非决断累积/链式/嵌套）</td><td>单一策略：最后一个非 undefined 结果覆盖前面</td></tr>
+        <tr><td>失败语义声明</td><td>✅ <code>failClosed</code> + <code>critical</code> 构造期强制校验</td><td>未发现等价机制</td></tr>
+        <tr><td>依赖/冲突声明</td><td>✅ <code>requires</code>/<code>prefers</code>/<code>conflictsWith</code></td><td>未发现等价机制</td></tr>
+        <tr><td>Plugin 间协作面</td><td>禁止互相 import，收窄到 <code>ctx.state</code>（typed）</td><td>无对等约束（同一进程内可自由引用）</td></tr>
+        <tr><td>Tool 并发粒度</td><td>段级屏障（仅连续 safe 段并行，保序）</td><td>批次级二元开关（含 sequential 即整批串行）</td></tr>
+        <tr><td>并发默认值</td><td>保守：默认 unsafe，需显式声明 safe</td><td>乐观：默认 parallel，需显式声明 sequential</td></tr>
+        <tr><td>事件类型系统</td><td>双轨：<code>LiveEvent</code>（可丢） vs <code>SessionEvent</code>（recorded 权威）</td><td>单一 <code>AgentEvent</code>，两条通路推同一份数据</td></tr>
+        <tr><td>持久化模型</td><td>线性 append-only 日志 + <code>_persistedCount</code> HWM</td><td>可分支 session 树（<code>parentId</code> 链，支持任意节点 fork）</td></tr>
+        <tr><td>落盘一致性保证</td><td>✅ <code>strictPersistence</code> 显式定义降级语义</td><td>未在接口层面发现等价保证</td></tr>
+        <tr><td>Compaction 位置</td><td>完全在内核外（<code>@harness-pi/plugins</code> controller）</td><td>内置在 <code>AgentHarness</code>（可经 hook 拦截/自定义）</td></tr>
+        <tr><td>持久化写入设计</td><td>collect-return（hook 只返回，内核负责写）</td><td>未见等价的"防 detached write"设计讨论</td></tr>
+        <tr><td>内核体量</td><td><code>session.ts</code> 为仓库最重文件（4 态 dispatcher 全在内核）</td><td><code>agent-loop.ts</code> 748 行，功能性/无状态，较小</td></tr>
+        <tr><td>心智负担下限</td><td>较高：最简单场景也要理解 4 态 dispatch</td><td>较低：不套 <code>AgentHarness</code> 就只有几个具名回调</td></tr>
+        <tr><td>架构决策文档</td><td><code>docs/00-07</code> 系列专门记录取舍</td><td>无对等文档</td></tr>
+        <tr><td>面向场景</td><td>服务端/批处理 worker，多 session 编排，无人值守</td><td>终端交互式编码助手，单会话为主，强调 rewind/分支 UX</td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<!-- ============ pi-mono 更好的地方 ============ -->
+<section id="pimono-wins">
+  <div class="wrap">
+    <p class="sec-tag">WHERE PI-MONO WINS · 客观地说，这几处它做得更好</p>
+    <h2>pi-mono 有什么设计得比 harness-pi 更好</h2>
+    <p>
+      "harness-pi 的 hook 更强大"不等于"harness-pi 全面更优"。以下三点是 pi-mono 真实占优、且理由能立住的设计。
+    </p>
+
+    <div class="reason-grid">
+      <div class="reason-card">
+        <h4>① Session 树 vs 线性日志——原生支持 rewind / 分支</h4>
+        <p>
+          <code>AgentHarness</code> 的 session 存储是一棵可在任意历史节点 <code>fork()</code> 的树（<code>parentId</code> 链），
+          harness-pi 是单一线性 append-only 日志。想要"从对话中间某一点开一条新的续写、同时保留原来那条"，
+          pi-mono 原生支持，且不需要复制之前的全部消息；harness-pi 要做等价的事，只能靠 <code>forkSession</code> controller
+          整份复制父 session 的内存快照，产生一个全新的、脱离原持久化链条的独立 session。
+        </p>
+        <p class="why"><b>为什么更好：</b>对交互式产品（<code>/rewind</code>、比较两种续写方向、A/B 探索同一个上下文）来说，
+        树模型是原生匹配的数据结构；线性模型要么不支持，要么只能用"整份复制"这种更重的机制模拟。harness-pi 目前不需要这个能力
+        （批处理 worker 场景下极少有人要"回到第 5 轮重新走一条分支"），但如果未来要做交互式产品线，这是需要补的一块。</p>
+      </div>
+
+      <div class="reason-card">
+        <h4>② 分层可选复杂度——最简单的场景不用背 hook 派发的心智负担</h4>
+        <p>
+          pi-mono 把"我只要一个能跑的 LLM+tool 循环"（<code>agentLoop()</code>）和"我要持久化+hook 总线"（<code>AgentHarness</code>）
+          拆成两个独立可选的层。只用最底层的消费者完全不需要学习任何"hook"概念，只要填几个具名回调字段。
+          harness-pi 的 <code>AgentSession</code> 把 4 态 <code>HookDispatcher</code> 焊死在内核里——即便你的插件列表是空的，
+          每一次 turn 依然会走一遍 event/decision/transform/around 四条派发路径。
+        </p>
+        <p class="why"><b>为什么更好：</b>不是所有消费者都需要拦截能力。<code>pi-coding-agent</code> 本身是个跑在生产环境、
+        被大量用户使用的真实产品，证明了"没有通用 hook 系统"这条路径本身就足以支撑一个成熟产品——复杂度应该按需引入，
+        而不是让每个使用者都为最强大的那 20% 场景付学习成本。这是"渐进暴露复杂度"和"统一心智模型"两种设计哲学的真实权衡，
+        pi-mono 选了前者。</p>
+      </div>
+
+      <div class="reason-card">
+        <h4>③ 契约稳定性优先——"不许抛错"比"复杂的失败语义"更好记</h4>
+        <p>
+          <code>AgentLoopConfig</code> 每个回调字段的 TSDoc 都写明 <code>Contract: must not throw or reject</code>。
+          harness-pi 用 <code>failClosed</code>/<code>critical</code>/per-method 默认超时（100/200/500ms）来表达"这个 hook 失败了该怎么办"，
+          规则数量和组合方式明显更多。
+        </p>
+        <p class="why"><b>为什么更好：</b>对单人或小团队维护的项目，"函数不许抛错，出错自己兜底"是一条几乎不会被记错的规则；
+        harness-pi 那套失败语义组合（谁 fail-open、谁 fail-closed、超时多久、critical 校验何时触发）需要写文档、需要新人专门学习。
+        规则越少，越不容易被写错——这也是一种正确的简单性，不能因为"功能更少"就简单认定它更差。</p>
+      </div>
+    </div>
+
+    <p>
+      次要的一点（证据不如上面三条厚，值得未来单独深挖）：pi-mono 的 <code>AgentMessage</code> 是可扩展的消息类型抽象，
+      设计目的是让不同的上层应用往同一条 message 时间线里塞自定义消息种类。harness-pi 的扩展性集中在<b>行为/控制流</b>层面
+      （能不能拦截、能不能改写），没有在<b>数据模型</b>层面提供类似"自定义消息类型"的一等公民机制——如果 harness-pi 的下游应用
+      需要往 transcript 里塞非标准消息种类，目前只能通过 attachment/additionalContext 这类旁路手段。
+    </p>
+  </div>
+</section>
+
+<!-- ============ harness-pi 更好的地方 ============ -->
+<section id="harness-wins">
+  <div class="wrap">
+    <p class="sec-tag">WHERE HARNESS-PI WINS · 这几处是真实工程教训换来的</p>
+    <h2>harness-pi 有什么设计得比 pi-mono 更好</h2>
+    <p>
+      这几条不是"功能更多所以更好"，而是每一条都能指向一个<b>具体会出错的场景</b>，以及为什么现在的机制能堵住它。
+    </p>
+
+    <div class="reason-grid">
+      <div class="reason-card">
+        <h4>① 拦截能力贯穿全层，而不是锁在一个可选层里</h4>
+        <p>
+          pi-mono 唯一能拦截（block/patch）的地方是 <code>AgentHarness</code> 的 19 种事件里的 5 种，
+          而 <code>AgentHarness</code> 本身是可选的——直接用 <code>Agent</code>/<code>agentLoop</code>（大多数嵌入式集成的实际入口）
+          完全没有这个能力，只有具名单槽位回调。harness-pi 的拦截能力在 <code>AgentSession</code> 内核里，
+          任何消费者、任何层级都拿得到同一套 <code>onPreToolUse</code>/<code>onUserPromptSubmit</code>。
+        </p>
+        <p class="why"><b>为什么更好：</b>harness-pi 文档里记的具体场景是 bidding-agent 的 <b>lease 冲突拦截</b>——
+        多个 worker 竞争同一个 lease，必须在 tool 真正执行<b>之前</b>否决掉。这类需求只要消费方选择了"轻量"入口就做不到，
+        等于说"能不能拦截"变成了一个前期架构选型问题，而不是随时可以加上的能力。</p>
+      </div>
+
+      <div class="reason-card">
+        <h4>② 精确的分场景合并语义，而不是"最后写的赢"</h4>
+        <p>
+          pi-mono 的 <code>emitHook</code>：多个 handler 都返回结果时，最后一个非 undefined 的<b>覆盖</b>前面所有的——
+          没有短路、没有优先级、没有冲突告警。harness-pi 对四种形态分别定义合并规则，
+          其中一条特别值得复述：decision hook 的<b>决断字段</b>（<code>decision</code>/<code>continue</code>）首个赢，
+          但<b>非决断字段</b>（<code>additionalContext</code>/<code>systemMessage</code>）不算决断，会照样累积
+          （<span class="fileref">dispatcher.ts:217</span>）。
+        </p>
+        <p class="why"><b>为什么更好：</b>这条规则是刻意设计出来防一个具体 bug 的——如果一个"只是想注入点上下文"的 hook
+        的输出被当成决断值处理，会误屏蔽掉后面本该生效的安全检查的 <code>deny</code>。pi-mono 的"最后非 undefined 赢"规则下，
+        这种误屏蔽是真实会发生的：两个 hook 同时想 patch <code>tool_result.content</code>，后注册的会静默覆盖前一个，没有任何提示。</p>
+      </div>
+
+      <div class="reason-card">
+        <h4>③ 构造期强制校验：安全关键 hook 不许"忘了表态"</h4>
+        <p>
+          <code>assertCriticalDecisionHooks</code> 在 session 构造时检查：任何 <code>critical:true</code> 的 hook
+          必须显式声明 <code>failClosed</code>，否则直接 throw，拒绝构造。pi-mono 的研究没有发现任何等价的
+          "强制显式声明失败语义"机制。
+        </p>
+        <p class="why"><b>为什么更好：</b>这类校验堵的是"写代码时最容易漏掉、出问题时最难排查"的一类 bug——
+        一个本该 fail-closed 的安全检查，因为作者忘了处理超时/异常路径，默默 fail-open 放行了本该被拒绝的请求，
+        而且不会有任何编译期或启动期的提示。把这类错误从"运行时才发现（甚至发现不了）"提前到"构造期直接崩溃"，
+        是一种低成本、高杠杆的正确性投资。</p>
+      </div>
+
+      <div class="reason-card">
+        <h4>④ collect-return：从真实数据损坏事故里改出来的持久化写入模式</h4>
+        <p>
+          harness-pi 的 <code>onAfterFlush</code> 被设计成"hook 只能返回数据，内核负责实际落盘"，而不是给 hook
+          一个可以自己调用的异步写接口。文档记录了这是从<b>真实 bug</b> 重新设计的结果：上一版给 hook 一个 detached 的
+          <code>appendCompactionBoundary</code> 回调，超时 hook 的写操作仍在飞，乱序落在 terminal 之后，
+          resume 时被误当"丢弃之前一切"。
+        </p>
+        <p class="why"><b>为什么更好：</b>这不是纸面上的架构洁癖，是一条从生产事故里长出来的具体设计纪律——
+        "涉及持久化的 hook 接口，绝不能让 hook 自己持有写句柄"。pi-mono 目前没有等价的、被明确记录下来的设计讨论；
+        如果 <code>AgentHarness</code> 未来允许 hook 异步写 session 树，这类竞态是潜在风险点。</p>
+      </div>
+    </div>
+
+    <p>还有三条分量稍轻、但同样有具体场景支撑的差异，合并陈述：</p>
+    <ul>
+      <li>
+        <b>双轨事件系统</b>——把"给 UI 抖动看的中间态"和"给审计/重放用的权威轨"从类型层面分开，
+        recorded 轨天然排除了 decision/pipe/around 类会影响控制流的 hook 输出。pi-mono 的单一 <code>AgentEvent</code>
+        两条通路推同一份数据，想做审计重放的消费方得自己在运行时过滤中间态。
+      </li>
+      <li>
+        <b>段级并发屏障</b>——保留模型撰写的调用顺序，只在 unsafe 调用处切一刀，比"整批只要有一个 sequential 就全降级"
+        的并行度更高（尤其是长批次、少量 unsafe 调用穿插在中间的场景）。代价是实现更复杂，见 <a href="#concurrency">§ Tool 并发对比</a>末尾的默认值反向差异。
+      </li>
+      <li>
+        <b>协作纪律</b>——<code>ctx.state</code> 收窄协作面 + <code>requires</code>/<code>prefers</code>/<code>conflictsWith</code>
+        依赖声明，在构造期就能发现"这个 hook 需要另一个 hook 但没装"这类配置错误。pi-mono 的 <code>AgentHarness.on()</code>
+        没有等价的声明机制，多个 handler 之间的顺序完全依赖 <code>Set</code> 插入顺序这一隐式约定。
+      </li>
+    </ul>
+  </div>
+</section>
+
+<!-- ============ 结语 ============ -->
+<section id="conclusion">
+  <div class="wrap">
+    <p class="sec-tag">CONCLUSION · 设计哲学的本质差异</p>
+    <h2>不是"谁的 hook 更多"，是"扩展性被优化给了谁"</h2>
+    <p>
+      pi-mono 把复杂度控制权交给<b>消费者</b>：想要多简单就多简单（裸 <code>agentLoop</code>），想要多强大就自己往上叠
+      （<code>AgentHarness</code>，再往上 <code>Extension</code>）。这是一种"渐进暴露"的哲学，正确地服务了它的主场景——
+      一个需要被大量第三方以不同深度集成的通用库，不应该强迫每个集成者都先理解一套四态派发引擎。
+    </p>
+    <p>
+      harness-pi 把复杂度前置到<b>内核设计者</b>身上：先想清楚"生产 harness 到底需要哪些精确的拦截/合并/失败语义"，
+      把这些一次性焊进 <code>Hook</code> 接口，换来的是每一个插件作者面对的都是同一套、已经被想清楚边界条件的模型。
+      这是一种"统一心智模型"的哲学，正确地服务了它的主场景——一个自己维护全部插件生态、需要 lease 拦截/审计重放/
+      构造期安全校验这类生产级保证的服务端 worker 运行时。
+    </p>
+    <div class="callout harness">
+      <span class="ct">如果只能记住一句话</span>
+      pi-mono 问的是"<b>我能不能观察到这件事发生了</b>"，答案在裸 <code>Agent</code> 层是"能，但改不了"，
+      在 <code>AgentHarness</code> 层是"能，还能改，但改的时候大家一起抢"。harness-pi 问的是
+      "<b>谁有权决定这件事要不要发生、发生的时候允许被谁以什么顺序改</b>"，并且把这个问题的答案——四种执行语义、
+      失败时怎么办、多个答案冲突时听谁的——都做成了类型系统和构造期校验能检查的东西，而不是留给运行时"随缘"。
+    </div>
+    <p>
+      两条路径都不是"更先进"，是针对不同主场景做的不同押注。harness-pi 现在最值得从 pi-mono 身上补的一课，
+      是<b>会话数据模型不必被迫是线性的</b>——如果未来 harness-pi 要支持任何形式的"探索式多分支"场景
+      （比如 sub-agent 结果比较、同一上下文多个候选续写），线性 <code>SessionStore</code> + 整体复制式 <code>forkSession</code>
+      会是第一个需要重新设计的地方。
+    </p>
+  </div>
+</section>
+
+<!-- ═══════════════════ 第二部分：架构深挖 ═══════════════════ -->
+
+<!-- ============ Ⅱ 导言 ============ -->
+<section id="deep-dive">
+  <div class="wrap">
+    <p class="sec-tag">PART Ⅱ · DEEP DIVE · 从对比到裁决</p>
+    <h2>第二部分：六个议题的架构深挖与裁决</h2>
+    <p>
+      第一部分的结语留下了一个悬而未决的问题："harness-pi 最值得从 pi-mono 身上补的一课是会话数据模型不必被迫线性"——
+      但要不要补、什么时候补、以什么形式补，对比报告本身回答不了。本部分把这个问题连同 roadmap 上挂着的未完成项、
+      迁移前的内核风险一起，拆成 <b>6 个议题、3 路并行深挖</b>：每一路先实读内核与上游源码（结论必须挂到 file:line），
+      再按统一格式产出方案——<b>具体失败场景 → ≥2 个候选设计与权衡 → 立场明确的推荐（或明确"不做，因为 X"）</b>。
+      全程只出方案、不改一行代码。
+    </p>
+    <table>
+      <thead><tr><th style="width:30%">议题</th><th>一句话裁决</th><th style="width:14%">代码动不动</th></tr></thead>
+      <tbody>
+        <tr><td><a href="#dd-persistence">① 持久化：线性 vs 树</a></td><td>数据模型<b>已经是树形</b>，缺的只是"移动 leaf"原语——期权不会过期，不必现在行权；只写演进文档 + 一条禁令。</td><td><span class="badge b-ok">只写文档</span></td></tr>
+        <tr><td><a href="#dd-persistence">② sideQuestion controller</a></td><td>controller 继续 defer；但深挖顺带发现 <code>getCacheSafeParams()</code> 名不副实，这个接缝修正应提前做。</td><td><span class="badge b-warn">修一处接缝</span></td></tr>
+        <tr><td><a href="#dd-state">③ ctx.state 硬化</a></td><td>4 个可指认行号的失败模式实锤；上 branded Slot API + <code>clear()</code> 收权，渐进迁移、运行时零变化。</td><td><span class="badge b-bad">要做（roadmap 挂名项）</span></td></tr>
+        <tr><td><a href="#dd-state">④ 轻量模式 / 分层</a></td><td>消费负担被 examples 证伪、作者负担该由文档治——"轻量模式"已存在，它叫"不挂 hooks 的 AgentSession"。</td><td><span class="badge b-ok">只做文档路标</span></td></tr>
+        <tr><td><a href="#dd-migration">⑤ 迁移内核风险预测</a></td><td>5 个真风险，其中 R1（悬空 toolCall → resume 后 provider 400 死循环）是<b>确定性资损路径</b>；迁移前只做 3 件外科手术，其余进 7 条 spike 清单。</td><td><span class="badge b-bad">3 件小手术</span></td></tr>
+        <tr><td><a href="#dd-seam">⑥ L1 seam 中期策略</a></td><td>"下游别直接 import pi-ai" 的约定已与现实背离（26 处 import 中 8 处冗余 bypass + 2 个真实缺口）；用 lint 把咽喉点从注释变成强制，不做完整 facade。</td><td><span class="badge b-warn">半天收口</span></td></tr>
+      </tbody>
+    </table>
+    <div class="callout harness">
+      <span class="ct">深挖的方法论边界</span>
+      L3 的产品能力面（MCP / web / todo / background bash …）已有 <code>docs/11-coding-agent-product-roadmap.md</code> 全量覆盖，
+      本部分刻意<b>不重复</b>它——6 个议题全部锚定在 L1 消费面与 L2 内核机制层。
+    </div>
+  </div>
+</section>
+
+<!-- ============ Ⅱ 持久化与 sideQuestion ============ -->
+<section id="dd-persistence">
+  <div class="wrap">
+    <p class="sec-tag">DEEP DIVE ① ② · SESSION DATA MODEL</p>
+    <h2>持久化演进与 sideQuestion：先修正一个集体错觉</h2>
+    <p>
+      第一部分把这个议题表述为"线性 log vs 可分支树"。实读代码后这个表述需要修正：
+      <b>harness-pi 的存储数据模型已经是树形的</b>——每条 entry 带 <code>parentId</code>（<span class="fileref">session-store.ts:71</span>）、
+      读取靠从 leaf 沿 <code>parentId</code> 回溯、<code>getPathToLeaf</code> 本就接受任意历史 <code>leafId</code> 参数
+      （<span class="fileref">session-store.ts:80</span>），接口注释里明写"未来可分叉成树"（<span class="fileref">session-store.ts:12</span>）。
+      所以真正的争论不是数据模型之争，而是 <b>API 原语之争：要不要暴露"移动 leaf"</b>。
+    </p>
+
+    <h3>三个真实的坏结果（严重度递增排序反转：第一个今天就存在）</h3>
+    <ul>
+      <li><b>无 rewind，且有一个现存 footgun</b>：<code>resume()</code> 硬编码从当前 leaf 重建（<span class="fileref">session.ts:1107</span>）。
+        如果调用方绕开它、自己用 <code>getPathToLeaf(sessionId, oldLeaf)</code> 重建历史再 <code>continue()</code>，
+        后续 append 仍会挂到<b>当前 leaf</b> 之后——内存历史与落盘 lineage 从此静默错位。协议暴露了"按历史 leaf 读"，
+        内核却没有配套的"按历史 leaf 写"。</li>
+      <li><b>fork 存储放大</b>：<code>store.fork()</code> 的语义是批量复制前缀（<span class="fileref">session-store.ts:85-88</span>）。
+        150-turn（约 1000 条 entry）的父 session 派 8 个探索分支 = Postgres 里多 8000 行纯重复数据。
+        gap-explorer / maker-verifier 这类 fan-out 模式规模一上来就会疼。</li>
+      <li><b>无 checkpoint 重试</b>：leaseQueue 的重试是整 item 从零重跑；turn 40/50 失败的 work item 要重付 40 turn 的 token。</li>
+    </ul>
+    <p>
+      对照修正另一个认知：pi-mono 的分支其实是<b>单活跃分支的 rewind 模型</b>（<code>moveTo(entryId)</code> 把 leaf 指回历史节点），
+      而且它的 JSONL 落盘里 leaf 移动本身就是一条 append-only 的 <code>"leaf"</code> entry、重放时推导——
+      <b>"可变 leaf"完全可以用 append-only 实现</b>，与 harness-pi 的 HWM 哲学不冲突。
+    </p>
+
+    <figure>
+      <svg viewBox="0 0 960 480" role="img" aria-label="持久化演进路径：现状 footgun、候选 B 单叶 rewind、候选 C′ 零拷贝 fork">
+        <defs>
+          <marker id="ddAr" markerWidth="8" markerHeight="8" refX="6.5" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="oklch(0.5 0.08 262)"/></marker>
+          <marker id="ddArBad" markerWidth="8" markerHeight="8" refX="6.5" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="var(--bad)"/></marker>
+          <marker id="ddArOk" markerWidth="8" markerHeight="8" refX="6.5" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="var(--ok)"/></marker>
+        </defs>
+
+        <text x="20" y="24" font-family="var(--mono)" font-size="12.5" font-weight="700" fill="var(--harness)">现状 — entry 本就带 parentId（树形 seam 已留），但只有"沿当前 leaf 写"</text>
+        <g font-family="var(--mono)" font-size="10" text-anchor="middle">
+          <rect x="30" y="42" width="54" height="30" rx="6" fill="var(--harness-bg)" stroke="var(--harness)"/><text x="57" y="61" fill="oklch(0.32 0.06 262)">e0</text>
+          <rect x="100" y="42" width="54" height="30" rx="6" fill="var(--harness-bg)" stroke="var(--harness)"/><text x="127" y="61" fill="oklch(0.32 0.06 262)">e1</text>
+          <rect x="170" y="42" width="54" height="30" rx="6" fill="var(--harness-bg)" stroke="var(--harness)"/><text x="197" y="61" fill="oklch(0.32 0.06 262)">e2</text>
+          <rect x="240" y="42" width="54" height="30" rx="6" fill="var(--harness-bg)" stroke="var(--harness)"/><text x="267" y="61" fill="oklch(0.32 0.06 262)">e3</text>
+          <rect x="310" y="42" width="54" height="30" rx="6" fill="var(--harness-bg)" stroke="var(--harness)"/><text x="337" y="61" fill="oklch(0.32 0.06 262)">e4</text>
+          <rect x="380" y="42" width="54" height="30" rx="6" fill="var(--harness-bg)" stroke="var(--harness)"/><text x="407" y="61" fill="oklch(0.32 0.06 262)">e5</text>
+          <text x="444" y="61" text-anchor="start" fill="oklch(0.45 0.1 262)">← leaf</text>
+        </g>
+        <line x1="197" y1="76" x2="197" y2="100" stroke="var(--bad)" stroke-width="1.4" stroke-dasharray="3 3"/>
+        <text x="30" y="116" font-family="var(--mono)" font-size="10.5" fill="var(--bad)">footgun：getPathToLeaf(id, e2) 读出历史路径后自行 continue() —— 内存历史停在 e2，</text>
+        <text x="30" y="132" font-family="var(--mono)" font-size="10.5" fill="var(--bad)">落盘 append 却仍挂到 e5 之后 → lineage 静默错位。协议给了"按历史 leaf 读"，没给配套的"写"。</text>
+
+        <line x1="20" y1="156" x2="940" y2="156" stroke="var(--line)" stroke-width="1"/>
+
+        <text x="20" y="184" font-family="var(--mono)" font-size="12.5" font-weight="700" fill="var(--ok)">候选 B — BranchableSessionStore：单叶 rewind（setLeaf 可用 append-only 的 "leaf" entry 实现，pi-mono 同款）</text>
+        <g font-family="var(--mono)" font-size="10" text-anchor="middle">
+          <rect x="30" y="202" width="54" height="30" rx="6" fill="var(--harness-bg)" stroke="var(--harness)"/><text x="57" y="221" fill="oklch(0.32 0.06 262)">e0</text>
+          <rect x="100" y="202" width="54" height="30" rx="6" fill="var(--harness-bg)" stroke="var(--harness)"/><text x="127" y="221" fill="oklch(0.32 0.06 262)">e1</text>
+          <rect x="170" y="202" width="54" height="30" rx="6" fill="var(--harness-bg)" stroke="var(--harness)"/><text x="197" y="221" fill="oklch(0.32 0.06 262)">e2</text>
+          <rect x="240" y="202" width="54" height="30" rx="6" fill="oklch(0.98 0.008 262)" stroke="oklch(0.85 0.02 262)" stroke-dasharray="3 3"/><text x="267" y="221" fill="oklch(0.6 0.02 262)">e3</text>
+          <rect x="310" y="202" width="54" height="30" rx="6" fill="oklch(0.98 0.008 262)" stroke="oklch(0.85 0.02 262)" stroke-dasharray="3 3"/><text x="337" y="221" fill="oklch(0.6 0.02 262)">e4</text>
+          <rect x="240" y="254" width="54" height="30" rx="6" fill="var(--ok-bg)" stroke="var(--ok)"/><text x="267" y="273" fill="oklch(0.35 0.08 152)">e5′</text>
+          <rect x="310" y="254" width="54" height="30" rx="6" fill="var(--ok-bg)" stroke="var(--ok)"/><text x="337" y="273" fill="oklch(0.35 0.08 152)">e6′</text>
+          <text x="374" y="273" text-anchor="start" fill="oklch(0.4 0.1 152)">← leaf</text>
+        </g>
+        <path d="M 210 232 Q 220 254 234 266" fill="none" stroke="var(--ok)" stroke-width="1.6" marker-end="url(#ddArOk)"/>
+        <text x="420" y="222" font-family="var(--mono)" font-size="10.5" fill="oklch(0.4 0.08 152)">setLeaf(sessionId, e2) → resume(leafId) → 后续 append 挂对位置</text>
+        <text x="420" y="240" font-family="var(--mono)" font-size="10.5" fill="oklch(0.5 0.02 262)">现有 5 个 store 零改动（feature-detect）；内核改动约 5 行；</text>
+        <text x="420" y="256" font-family="var(--mono)" font-size="10.5" fill="oklch(0.5 0.02 262)">HWM/compaction boundary 天然路径作用域，无交互问题</text>
+        <text x="420" y="282" font-family="var(--mono)" font-size="10.5" font-weight="700" fill="oklch(0.4 0.08 152)">触发条件：第一个真实 rewind / checkpoint-retry 消费者出现</text>
+
+        <line x1="20" y1="308" x2="940" y2="308" stroke="var(--line)" stroke-width="1"/>
+
+        <text x="20" y="336" font-family="var(--mono)" font-size="12.5" font-weight="700" fill="var(--under)">候选 C′ — adapter 级零拷贝 fork：API 一字不动，Postgres 实现改"引用"而非"复制"</text>
+        <g font-family="var(--mono)" font-size="10" text-anchor="middle">
+          <rect x="30" y="354" width="54" height="30" rx="6" fill="var(--harness-bg)" stroke="var(--harness)"/><text x="57" y="373" fill="oklch(0.32 0.06 262)">e0</text>
+          <rect x="100" y="354" width="54" height="30" rx="6" fill="var(--harness-bg)" stroke="var(--harness)"/><text x="127" y="373" fill="oklch(0.32 0.06 262)">…</text>
+          <rect x="170" y="354" width="54" height="30" rx="6" fill="var(--harness-bg)" stroke="var(--harness)"/><text x="197" y="373" fill="oklch(0.32 0.06 262)">e3</text>
+          <rect x="240" y="354" width="54" height="30" rx="6" fill="var(--harness-bg)" stroke="var(--harness)"/><text x="267" y="373" fill="oklch(0.32 0.06 262)">e4</text>
+          <rect x="420" y="354" width="110" height="30" rx="6" fill="var(--under-bg)" stroke="var(--under)" stroke-dasharray="4 3"/><text x="475" y="373" fill="oklch(0.35 0.08 245)">branch-root→e3</text>
+          <rect x="550" y="354" width="54" height="30" rx="6" fill="var(--under-bg)" stroke="var(--under)"/><text x="577" y="373" fill="oklch(0.35 0.08 245)">c0</text>
+          <rect x="620" y="354" width="54" height="30" rx="6" fill="var(--under-bg)" stroke="var(--under)"/><text x="647" y="373" fill="oklch(0.35 0.08 245)">c1</text>
+        </g>
+        <path d="M 420 369 Q 340 340 230 356" fill="none" stroke="var(--under)" stroke-width="1.4" stroke-dasharray="4 3" marker-end="url(#ddAr)"/>
+        <text x="30" y="414" font-family="var(--mono)" font-size="10.5" fill="oklch(0.4 0.06 245)">子 session 只插 1 行引用行，读取走递归 CTE —— 8 分支 × 1000 entry 的复制放大消失</text>
+        <text x="30" y="432" font-family="var(--mono)" font-size="10.5" font-weight="700" fill="oklch(0.4 0.06 245)">触发条件：fork 存储放大被真实规模数据证实（gap-explorer / maker-verifier fan-out）</text>
+        <text x="30" y="462" font-family="var(--mono)" font-size="10.5" fill="oklch(0.5 0.02 262)">明确不做：候选 A（契约破坏性升级为多 leaf 全树）—— 没有任何现有消费者需要多 leaf 并行写，纯投机。</text>
+      </svg>
+      <figcaption>持久化的演进不是"要不要换树"——树形 seam（<code>parentId</code> + <code>getPathToLeaf(leafId)</code> + <code>fork(fromEntryId)</code>）早已留好。候选 B 与 C′ 都是非破坏增量，各自绑定明确触发条件；在触发前动手就是投机设计。</figcaption>
+    </figure>
+
+    <div class="callout ok">
+      <span class="ct">议题 ① 裁决</span>
+      <b>现在不实现 A / B / C′ 任何一个</b>；把 B + C′ 写进设计文档作为既定演进路径并绑定触发条件。
+      唯一近期动作是零成本的：在 <code>session-store.ts</code> / <code>resume()</code> 文档里明令
+      "按历史 <code>leafId</code> 读出的路径<b>不可</b>用于续写"，把 footgun 从"静默数据污染"降级为"文档禁令"。
+      期权不会过期，不必现在行权。
+    </div>
+
+    <h3>议题 ②：sideQuestion——deferred controller 深挖出一个现存缺陷</h3>
+    <p>
+      sideQuestion（<span class="fileref">docs/06 §7.1</span>，唯一未落地的 controller）能找到的最强场景：
+      lark-bot 挂着一个跑到 turn 60、上下文 120k token 的服务端 run，运营在群里问"它现在验证到哪一步了"。
+      逐项排除现有原语——<code>steer()</code> 会把问题注入正式对话（污染历史、改变模型后续行为）；
+      <code>subAgentTool</code> 是模型驱动的，运营触发不了；<code>forkSession</code> 功能上可用但成本上是坏的——
+      而排查"为什么成本坏"时挖出了一个<b>比 sideQuestion 本身更要紧的问题</b>：
+    </p>
+    <div class="callout bad">
+      <span class="ct">现存缺陷：getCacheSafeParams() 与 live 投影不一致</span>
+      autoCompaction 活跃时，父 session 发给 LLM 的是 <code>[boundary.summary, …slice(coveredCount)]</code> 投影
+      （<span class="fileref">session.ts:1287-1296</span>，特意复用同一 summary 对象保 prefix bytes 稳定）；
+      而 <code>getCacheSafeParams()</code> 返回的是<b>全量 <code>_messages</code></b>（<span class="fileref">session.ts:476-486</span>）。
+      fork 出的"cache-safe"子 session 首个请求前缀与父完全不同 → <b>必然 cache miss、全价 120k input</b>。
+      它也不携带 <code>llmOptions</code>——而 pi-ai 的 <code>StreamOptions.sessionId</code> 正是 provider 侧 session 级缓存的钥匙。
+      名字承诺的 cache-safe，在压缩场景下不成立。
+    </div>
+    <p>
+      三个候选设计里，"turn 边界注入 + 回答后回滚 <code>_messages</code>"被直接否决（HWM 依赖 append-only 绝不 splice，
+      回滚会让 <code>_persistedCount</code> 指向不存在的索引）；"内核内联 <code>session.ask()</code>"要绕开 <code>_running</code> 互斥、
+      打穿 live 事件严格配对契约、污染有状态 pipe hook——为未证实的需求往最重的文件里加并发路径，违背内核极简。
+      胜出的是<b>薄 recipe 方案</b>：controller 只是 forkSession 之上约 60 行的组装
+      （无 tools、<code>maxTurns:1</code>、不传 store、不挂 hooks），内核侧唯一要动的是把快照接缝修对：
+    </p>
+    <pre><code><span class="cmt">// 内核侧唯一改动：快照按 live 投影导出，并携带复现 cache key 所需的一切</span>
+getCacheSafeParams(): {
+  systemPrompt: string;
+  forkContextMessages: Message[];   <span class="cmt">// ← _activeBoundary 投影后的 view，且过滤 incomplete toolCalls</span>
+  model: Model&lt;Api&gt;;
+  llmOptions: LlmOptions;           <span class="cmt">// ← 含 sessionId / cacheRetention / providerExtras(thinking)</span>
+}</code></pre>
+    <div class="callout ok">
+      <span class="ct">议题 ② 裁决</span>
+      controller 本体<b>继续 defer</b>（维持 roadmap 判断——"非它不可"的调用方目前只有 lark-bot 一个候选）；
+      但 <code>getCacheSafeParams()</code> 的投影修正<b>提前做</b>。这不是为 sideQuestion 投机：它修正的是现有公开 API 的名不副实
+      （forkSession 用户今天就会在 autoCompaction 场景吃到全价 cache miss），改动小、可测，
+      并顺手把未来 sideQuestion 的全部内核前置条件清零——真需求来时，落地只是 plugins 层 60 行 recipe。
+    </div>
+  </div>
+</section>
+
+<!-- ============ Ⅱ ctx.state 与分层 ============ -->
+<section id="dd-state">
+  <div class="wrap">
+    <p class="sec-tag">DEEP DIVE ③ ④ · EXTENSION SURFACE</p>
+    <h2>ctx.state 硬化与"轻量模式"：一个要做实物，一个要敢说不做</h2>
+    <p>
+      现状盘点（实数）：<code>packages/plugins</code> 导出 21 个 hook 工厂 + toolSearch / skills / defaultSummarize，
+      controllers 侧 12 个模块；<code>ctx.state</code> 物理上是裸 <code>Map&lt;string, unknown&gt;</code>
+      （<span class="fileref">context.ts:126-147</span>），类型层靠 14 个文件各自 <code>declare module</code> 注册 key。
+      跨 plugin 共享 state 的真实案例有<b>三组</b>，不止 deferred 一组：
+      <code>deferred.activated</code>（deferredTools 导出常量，toolSearch / skills 各自 read-modify-write）、
+      <code>cost-tracker.stats</code>（tokenBudget 直接读，配 <code>prefers</code> 声明）、
+      <code>post-compact.pending</code>（autoCompaction 与 compactSummarize <b>两个写者</b>，postCompactFileReread 消费即清）。
+      内核自己也是用户：<code>harness-pi.activeBoundary</code>。
+    </p>
+
+    <h3>四个失败模式（全部可指认行号）</h3>
+    <table>
+      <thead><tr><th style="width:16%">编号</th><th>失败模式</th><th style="width:38%">坏结果</th></tr></thead>
+      <tbody>
+        <tr><td><span class="badge b-warn">F1 类型幽灵</span></td><td>动态 key 完全脱离类型系统：batch-counter 运行期拼 key（<span class="fileref">batch-counter.ts:27</span>），augmentation 只收静态字面量</td><td>只能 <code>as number</code> 强转；任何"每实例一个 key"的 plugin 都掉进同一个洞，registry 方案对此结构性无解</td></tr>
+        <tr><td><span class="badge b-bad">F2 字符串绕过</span></td><td><code>set()</code> 对非字面量 key 全放行：<code>K</code> 推断为 <code>string</code> 时 <code>StateValueFor</code> 退回 <code>unknown</code></td><td>脏写 <code>deferred.activated</code> 后，transformToolsBeforeLlm 对 number 调 <code>.has</code> → TypeError → pipe fail-open 静默跳过 → <b>deferred 工具全量泄漏</b>，零报错定位</td></tr>
+        <tr><td><span class="badge b-bad">F3 clear() 核弹</span></td><td><code>TypedStateMap</code> 公开暴露 <code>clear()</code>（<span class="fileref">hook.ts:343</span>）</td><td>任一 plugin 想"重置自己"误清全锅：内核 activeBoundary 失效 → 投影失效 → 全量历史重发可能直接 overflow；session-log 流句柄丢失后事件静默不落盘。单点全域腐蚀，症状离病因极远</td></tr>
+        <tr><td><span class="badge b-warn">F4 依赖声明短板</span></td><td><code>verifyHookDependencies</code>（<span class="fileref">dispatcher.ts:561-624</span>）只做注册期 warning，不阻塞不排序；<code>prefers</code> 纯文档字段；靶点是 name 字符串而 batch-counter 的 name 是动态的</td><td>50 plugin 时用户手工维护满足所有 <code>requires</code> 偏序的线性顺序，警告只说错了、不帮排；state 层依赖与 hook 层声明间无机器可查的关联</td></tr>
+      </tbody>
+    </table>
+
+    <p>
+      候选方案里，<b>Capability 注入</b>（工厂间显式传句柄绕开 ctx.state）类型最强但代价实质性：破坏三件套现有公共 API（major 语义）、
+      与 per-session state 模型冲突（plugin 把状态放 <code>ctx.state</code> 而非闭包，正是为了 hook 实例跨 session 语义干净）、
+      丢掉"一个 map 看全 session 状态"的可观测性。<b>namespace 视图</b>只治皮毛。胜出的是 <b>branded Slot API</b>：
+    </p>
+    <pre><code><span class="cmt">// core 新增（~50 行）：slot 是值不是字符串——变量传递不丢类型，</span>
+<span class="cmt">// 跨 plugin 共享从"约定同一个字符串"升级为"import 同一个 slot 对象"（pnpm why 可查）</span>
+interface StateSlot&lt;T&gt; {
+  readonly key: string;            <span class="cmt">// 物理 map key 仍是 string（调试/序列化友好，运行时零变化）</span>
+  readonly owner: string;          <span class="cmt">// 诊断归因</span>
+  readonly validate?: (v: unknown) =&gt; v is T;  <span class="cmt">// dev-mode 运行时校验，F2 类脏写在写入点当场抓住</span>
+}
+export function defineSlot&lt;T&gt;(key: string, opts: {...}): StateSlot&lt;T&gt;;
+
+<span class="cmt">// TypedStateMap 加 overload，string 老路保留、标 @deprecated 渐退：</span>
+get&lt;T&gt;(slot: StateSlot&lt;T&gt;): T | undefined;
+set&lt;T&gt;(slot: StateSlot&lt;T&gt;, value: T): void;
+
+<span class="cmt">// deferred-tools.ts 只改一行导出形态：</span>
+export const ACTIVATED_SLOT = defineSlot&lt;Set&lt;string&gt;&gt;("deferred.activated", { owner: "deferredTools" });</code></pre>
+    <p>
+      F1 随之解决（batch-counter 在工厂闭包里 <code>defineSlot&lt;number&gt;(动态key)</code>，删掉强转）；
+      F3 是与之正交的 5 行外科手术（<code>clear()</code> 移出公开面，挪进 kernel internals 通道）；
+      F4 <b>不做自动拓扑排序</b>——注册顺序在这个内核里是<b>语义</b>（decision 短路序 / pipe 变换序 / around 嵌套层次都由它决定），
+      自动重排等于静默改行为，比警告更危险；正确姿势是 <code>missing-required</code> 提供 escalate-to-throw 选项
+      （对齐 <code>assertCriticalDecisionHooks</code> 的 fail-loud 哲学），slot 带 owner 后依赖图靠纯 tooling 生成。
+    </p>
+    <div class="callout ok">
+      <span class="ct">议题 ③ 裁决</span>
+      做 Slot API + <code>clear()</code> 收权 + escalate 选项；不做 capability 注入（留作三件套出现第三个消费者时的定向重构）、
+      不做 namespace、不做拓扑排序。迁移可渐进（物理 key 不变 → 运行时行为零变化，14 个文件分 PR 换），
+      且恰好把 roadmap 原话——"跨 plugin key 仍需更强约束<b>或 slot API</b>"——落成实物。
+    </div>
+
+    <h3>议题 ④：轻量模式——把"认知负担"拆开之后，问题基本消失</h3>
+    <p>
+      "harness-pi 一上来就是四态 dispatch 的心智负担"这个第一部分承认过的短板，拆开看是两个不同的问题：
+      <b>消费负担</b>（挂 plugin 的人）实测被 examples 证伪——example 02 里装配 6 个 plugin 就是一个平铺数组（118 行），
+      bare kernel 67 行，消费者根本不需要理解四形态，挑工厂、传 options 而已。
+      <b>作者负担</b>（写新 hook 的人）是真实的：选形态、知道默认 timeout（100/200/500ms）、理解 <code>failClosed</code> 契约——
+      但这个痛点的本质是<b>文档可发现性 + fail-open 默认值的锋利边</b>，不是"形态太多"；
+      四形态各自对应不可互换的执行语义，砍掉任何一个都是砍能力，不是砍复杂度。
+    </p>
+    <p>
+      还要修正第一部分留下的一个类比：pi-mono 的三层结构并非"给同一用户的渐进披露"，
+      而是<b>三个不同产品面各自演化的结果，层间互不连通</b>——拿它论证"harness-pi 也该分层"是错误类比。
+      preset 工厂（<code>createBasicSession()</code>）则违背三层教义："L2 零 opinion、App 层做 config-driven 装配"，
+      preset 天然属于 App 层——事实上 coding-agent 的装配代码<b>就是</b>这个 preset 的活体。
+    </p>
+    <div class="callout ok">
+      <span class="ct">议题 ④ 裁决</span>
+      只做文档路标（README 三档入门：① 5 分钟 bare kernel 抄 example 01 → ② 挑 4 个常用 plugin 抄 example 02 →
+      ③ 写自己的 hook 才需要读 docs/03 四形态），成本一小时，<b>不写一行代码</b>。
+      "轻量模式"已经存在——它叫"不挂 hooks 的 AgentSession"。简化 facade（两套注册面）是最差选项。
+      preset 冻结为"出现第 2 个外部真实消费者且其装配与 coding-agent 显著趋同"时再评估的期权。
+    </div>
+  </div>
+</section>
+
+<!-- ============ Ⅱ 迁移内核风险 ============ -->
+<section id="dd-migration">
+  <div class="wrap">
+    <p class="sec-tag">DEEP DIVE ⑤ · MIGRATION RISK PREDICTION</p>
+    <h2>bidding-agent 迁移：内核哪里会先裂（预测，非能力清单）</h2>
+    <p>
+      迁移意味着运行形态从"单进程 CLI、人在环、短 session"切换到"长时批处理 worker、真 Postgres、真 DashScope、
+      K 路并发、队列驱动、无人值守重试"。逐条核对内核代码后判定 <b>5 个风险为真</b>——其中 R1 不是概率事件，
+      是<b>已在代码路径上可复现的确定性资损 bug</b>，CLI dogfood 从未暴露它只是因为人会重开会话。
+    </p>
+
+    <h3><span class="badge b-bad">R1 · 高危</span> 悬空 toolCall 落盘 → resume 后 provider 400 → 重试永久失败</h3>
+    <figure>
+      <svg viewBox="0 0 960 290" role="img" aria-label="R1 失败链条：abort 中断 tool batch 后的确定性死循环">
+        <defs>
+          <marker id="r1Ar" markerWidth="8" markerHeight="8" refX="6.5" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="oklch(0.5 0.08 262)"/></marker>
+          <marker id="r1ArBad" markerWidth="8" markerHeight="8" refX="6.5" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="var(--bad)"/></marker>
+        </defs>
+        <g font-family="var(--sans)" font-size="11.5">
+          <rect x="30" y="40" width="280" height="68" rx="10" fill="var(--warn-bg)" stroke="oklch(0.85 0.07 85)"/>
+          <text x="46" y="64" font-weight="700" fill="oklch(0.42 0.1 75)">① abort 落在 tool batch 中间</text>
+          <text x="46" y="82" fill="oklch(0.45 0.05 75)">watchdog / OOM / 进程重启；executeBatch</text>
+          <text x="46" y="97" fill="oklch(0.45 0.05 75)">在屏障处 break，results 只含已完成 call</text>
+
+          <rect x="340" y="40" width="280" height="68" rx="10" fill="var(--warn-bg)" stroke="oklch(0.85 0.07 85)"/>
+          <text x="356" y="64" font-weight="700" fill="oklch(0.42 0.1 75)">② 缺 result 的 call 被直接跳过</text>
+          <text x="356" y="82" fill="oklch(0.45 0.05 75)">_phaseToolBatch 对拿不到 result 的 call</text>
+          <text x="356" y="97" fill="oklch(0.45 0.05 75)">continue —— 不合成占位 toolResult（:1450）</text>
+
+          <rect x="650" y="40" width="280" height="68" rx="10" fill="var(--warn-bg)" stroke="oklch(0.85 0.07 85)"/>
+          <text x="666" y="64" font-weight="700" fill="oklch(0.42 0.1 75)">③ 坏形状历史原样落盘</text>
+          <text x="666" y="82" fill="oklch(0.45 0.05 75)">assistant(stopReason=toolUse) + 部分</text>
+          <text x="666" y="97" fill="oklch(0.45 0.05 75)">toolResult 被 _flushToStore 持久化（:1145）</text>
+
+          <rect x="650" y="170" width="280" height="68" rx="10" fill="var(--bad-bg)" stroke="oklch(0.85 0.06 27)"/>
+          <text x="666" y="194" font-weight="700" fill="var(--bad)">④ LeaseQueue 判定可重试 → resume()</text>
+          <text x="666" y="212" fill="oklch(0.45 0.08 27)">逐字重放、不做形状修复（:1099-1125）</text>
+          <text x="666" y="227" fill="oklch(0.45 0.08 27)">→ 坏历史原样喂给下一次 _phaseLlmCall</text>
+
+          <rect x="340" y="170" width="280" height="68" rx="10" fill="var(--bad-bg)" stroke="oklch(0.85 0.06 27)"/>
+          <text x="356" y="194" font-weight="700" fill="var(--bad)">⑤ provider 400：未配对 tool_call</text>
+          <text x="356" y="212" fill="oklch(0.45 0.08 27)">DashScope 属严格 OpenAI-compatible 实现，</text>
+          <text x="356" y="227" fill="oklch(0.45 0.08 27)">每次 attempt 都在同一条坏历史上炸</text>
+
+          <rect x="30" y="170" width="280" height="68" rx="10" fill="var(--bad-bg)" stroke="var(--bad)" stroke-width="1.6"/>
+          <text x="46" y="194" font-weight="700" fill="var(--bad)">⑥ maxAttempts 耗尽</text>
+          <text x="46" y="212" fill="oklch(0.45 0.08 27)">work item 以 error 终态丢弃 ——</text>
+          <text x="46" y="227" fill="oklch(0.45 0.08 27)">无人值守下的确定性死循环，非概率事件</text>
+        </g>
+        <line x1="310" y1="74" x2="332" y2="74" stroke="oklch(0.5 0.08 262)" stroke-width="1.6" marker-end="url(#r1Ar)"/>
+        <line x1="620" y1="74" x2="642" y2="74" stroke="oklch(0.5 0.08 262)" stroke-width="1.6" marker-end="url(#r1Ar)"/>
+        <line x1="790" y1="108" x2="790" y2="162" stroke="oklch(0.5 0.08 262)" stroke-width="1.6" marker-end="url(#r1Ar)"/>
+        <line x1="650" y1="204" x2="628" y2="204" stroke="var(--bad)" stroke-width="1.6" marker-end="url(#r1ArBad)"/>
+        <line x1="340" y1="204" x2="318" y2="204" stroke="var(--bad)" stroke-width="1.6" marker-end="url(#r1ArBad)"/>
+        <path d="M 480 170 Q 560 130 648 166" fill="none" stroke="var(--bad)" stroke-width="1.4" stroke-dasharray="4 3" marker-end="url(#r1ArBad)"/>
+        <text x="500" y="139" font-family="var(--mono)" font-size="10.5" fill="var(--bad)">立即重试（无退避）→ 回到 ④</text>
+      </svg>
+      <figcaption>①→③ 是 abort/崩溃路径上的正常行为叠加出的坏状态；④⑤ 的循环由 R3（无退避重试）加速。人在环的 CLI 里这条链从不完整出现——无人值守批处理里它是确定性的。</figcaption>
+    </figure>
+    <div class="callout ok">
+      <span class="ct">R1 最小加固（建议迁移前做）</span>
+      在 <code>resume()</code> 重放层（信任边界已在此）做一次对话不变量修复：扫尾部 assistant 的 toolCall，
+      为无配对者合成 <code>isError: true</code> 的占位 toolResult（"interrupted before completion"）。
+      不放 <code>transformMessagesBeforeLlm</code> 插件的理由：pipe 只改发给 LLM 的视图，坏历史仍在 store 里、每次 resume 都要重修；
+      在 resume 修一次即固化。fake model + abort mid-batch + MemorySessionStore 可完全复现，单测不需要真实环境。
+    </div>
+
+    <h3>R2–R5：真风险，但只有两个值得迁移前动手</h3>
+    <table>
+      <thead><tr><th style="width:20%">风险</th><th>机理</th><th style="width:32%">迁移前动作</th></tr></thead>
+      <tbody>
+        <tr>
+          <td><span class="badge b-bad">R2 · 已发生</span><br>Usage 字段漂移</td>
+          <td><code>_accumulatedUsage</code> 逐字段手写累加，注释自己警告"上游加字段会静默漏算"（<span class="fileref">session.ts:934-940</span>）——核对结果：<b>上游已经加了</b>（0.80.x 的 <code>reasoning</code> / <code>cacheWrite1h</code>，本仓库锁 0.74.2 没有），升级后 tokenBudget/costTracker 对 reasoning 开销全盲</td>
+          <td><b>做</b>：一行级类型 pin——<code>Record&lt;Exclude&lt;keyof Usage,"cost"&gt;, 0&gt; satisfies {…}</code> 完备性断言，上游加字段即编译失败</td>
+        </tr>
+        <tr>
+          <td><span class="badge b-bad">R3 · 真</span><br>限流 × 无退避</td>
+          <td>#53 把 error-stopReason 提级为 <code>reason:"error"</code>（正确），但 LeaseQueue 重试<b>无任何 backoff</b>、WorkPool 只有 per-pool 并发帽——K 个 worker 同时撞 DashScope 限流 → 同时立即重试 → 限流窗口被自己顶死</td>
+          <td><b>做</b>：LeaseQueue 加 per-attempt 指数退避选项（十几行）。全局 QPS 闸等 spike 证明单 pool 帽不够再说</td>
+        </tr>
+        <tr>
+          <td><span class="badge b-warn">R4 · 真</span><br>估算漂移 × 文案依赖</td>
+          <td>主动 compaction 靠 token 估算 + 用户自报的 <code>contextWindow</code>（<span class="fileref">llm-model.ts:88</span>）；反应式兜底靠 errorMessage regex（#82 已知测不了）。复合场景：估算低估 + 文案漂移 → overflow 被当普通 error → 接 R3 循环烧钱</td>
+          <td><b>不改内核</b>：spike 量化"估算 vs 每 turn 真实 <code>usage.input</code>"漂移率；超阈值就用真实 usage 做校准因子（纯插件层）。<code>isContextOverflow</code> 可注入已是足够逃生口</td>
+        </tr>
+        <tr>
+          <td><span class="badge b-warn">R5 · 低概率</span><br>双 resume 无 fencing</td>
+          <td>store 串行契约是进程内的；PG 的 <code>UNIQUE(session_id, seq)</code> 是"炸出来"不是"协调掉"——at-least-once 队列下两个 worker resume 同一 session，一侧 append 全部失败、best-effort 下<b>静默丢一侧工作</b></td>
+          <td><b>不预修</b>（fencing token 是 vNext 级）；spike 必测 double-resume 行为；队列驱动的生产部署 <code>strictPersistence</code> 应默认开</td>
+        </tr>
+      </tbody>
+    </table>
+    <p>
+      判定为伪/低优先的候选也值得记录：<code>strictPersistence</code> 在 PG 抖动下的语义核对无误（只提级 done、瞬时错误重试成功不误判），
+      真实问题只是逐条 await 的写放大——量级问题，等 spike 实测延迟占比；usage 在 lifecycle-restart 下重叠累加是已文档化的 controller 层语义，
+      对账走 metrics sink，不是缺陷。
+    </p>
+
+    <h3>迁移 spike 验证清单：压不到这 7 条就不算验证了内核</h3>
+    <table>
+      <thead><tr><th style="width:6%">#</th><th>压什么</th><th style="width:38%">通过标准</th></tr></thead>
+      <tbody>
+        <tr><td>1</td><td>watchdog abort 落在 tool batch 中间 → resume → continue</td><td>provider 不 400（R1 修复生效）</td></tr>
+        <tr><td>2</td><td>人为触发 DashScope 限流（并发拉满）</td><td>无立即重试风暴；attempt 间有退避；无 overflow 误判</td></tr>
+        <tr><td>3</td><td>长 session 跑到真实 overflow</td><td>主动 compaction 先于 provider 报错触发；量化估算漂移 %</td></tr>
+        <tr><td>4</td><td>同 sessionId 双 worker 并发 resume</td><td>一侧 fail-loud（strict 下终态 error），无脏写、无静默丢失</td></tr>
+        <tr><td>5</td><td>PG 断连 30s 窗口再恢复</td><td>HWM 续传不重不漏；内存积压有界；strict/best-effort 终态符合文档</td></tr>
+        <tr><td>6</td><td><code>RunSummary.usage</code> vs provider 控制台账单对账（含一次 lifecycle-restart）</td><td>偏差可解释（重叠累加语义），metrics sink 口径正确</td></tr>
+        <tr><td>7</td><td>watchdog 超时 vs policy-deny 混合出现</td><td>lifecycle-restart 只重试 <code>watchdog:</code> 前缀（<span class="fileref">session.ts:217-219</span> 契约成立）</td></tr>
+      </tbody>
+    </table>
+    <div class="callout ok">
+      <span class="ct">议题 ⑤ 裁决</span>
+      迁移前只做三件外科手术：<b>R1 resume 修复</b>（唯一资损级）、<b>R2 类型 pin</b>（一行级）、<b>R3 退避</b>(十几行)。
+      R4 / R5 与其余全部进 spike 清单拿真实证据——这与 roadmap "不要现在全量替换"的立场一致，
+      且把"真实迁移证据"从口号变成 7 条可判定的验收项。
+    </div>
+  </div>
+</section>
+
+<!-- ============ Ⅱ L1 seam ============ -->
+<section id="dd-seam">
+  <div class="wrap">
+    <p class="sec-tag">DEEP DIVE ⑥ · L1 SEAM STRATEGY</p>
+    <h2>L1 seam：约定已与现实背离，用 lint 把咽喉点变成强制</h2>
+    <p>
+      CLAUDE.md 写着"下游别直接 import <code>@earendil-works/pi-ai</code>"。grep 全仓非测试代码的审计结果：26 处 import，
+      归类后<b>约定当前已与现实背离，且无任何机制 enforce</b>：
+    </p>
+    <table>
+      <thead><tr><th style="width:22%">类别</th><th>位置</th><th style="width:34%">判定</th></tr></thead>
+      <tbody>
+        <tr><td>core 10 文件</td><td>session / hook / types / dispatcher / …</td><td><span class="badge b-ok">seam 本体</span> 合法</td></tr>
+        <tr><td>plugins 8 文件</td><td>trim-history、auto-compaction、permission-gate 等的 type-only <code>Message</code>/<code>ToolCall</code>/<code>Tool</code></td><td><span class="badge b-warn">纯冗余 bypass</span> core 的 index <b>已 re-export 全部这些名字</b>，改 import 来源即可，零新 API</td></tr>
+        <tr><td>coding-agent compaction.ts</td><td><b>value</b> import <code>complete</code> + <code>ProviderStreamOptions</code></td><td><span class="badge b-bad">真实缺口 #1</span> 带外 LLM 调用（summarizer）绕开 seam 直连 pi-ai 调用约定</td></tr>
+        <tr><td>coding-agent agent/config、lark-bot agent</td><td><b>value</b> import <code>getModels</code>/<code>getProviders</code>/<code>getEnvApiKey</code>/<code>calculateCost</code></td><td><span class="badge b-bad">真实缺口 #2</span> 模型目录 / env 密钥 / 成本计算无 seam，两个 app 各自直连</td></tr>
+        <tr><td>scripts（d0-smoke、cache-ab）</td><td><code>Type</code></td><td><span class="badge b-ok">合理豁免</span> 冒烟脚本本来就是测 provider 真实行为</td></tr>
+      </tbody>
+    </table>
+    <p>
+      上游 churn 实测（deepen 后 1044 commits 可见）：<b>371 个 commit 在近 4 个月内触及 <code>packages/ai</code></b>（约 3 个/天），
+      期间发布多个 release；本仓库锁在 0.74.2（0.x caret 事实锁定），已落后 6 个 minor。但性质上绝大多数是 additive——
+      <code>Usage</code> 加 2 字段、<code>StreamOptions</code> 加 8 个可选字段、API 改名走兼容层。
+      <b>结论：频率高、破坏性中低；最大威胁不是编译爆炸，而是 R2 那类 additive 导致的静默语义漂移。</b>
+      seam 的价值在升级日集中兑现；fork 期权维持不动、现在不 fork 的判断继续成立。
+    </p>
+    <p>
+      候选方案：<b>B（完整 facade）</b>——core re-export pi-ai 全公共面、下游零 pi-ai 依赖——被否决：core 出口面爆炸、
+      上游每个新能力都要等 core 发版（re-export treadmill）、peerDep 版本错配复杂化，而对以 additive 为主的 churn 边际防护收益低。
+      <b>C（维持现状）</b>零成本但文档约定继续空转，bypass 只会增多（lark-bot 已是第二个例证）。胜出的是 <b>A（定向收口）</b>：
+    </p>
+    <ul>
+      <li>ESLint <code>no-restricted-imports</code> 在 core 之外禁 <code>@earendil-works/pi-ai</code>（scripts 目录豁免）——核心不是新抽象，是把"单一咽喉点"从注释约定变成 lint 强制；</li>
+      <li>plugins 8 处冗余 import 机械改从 <code>@harness-pi/core</code> 拿；</li>
+      <li>core 新增 <code>completeText(model, messages, llmOptions)</code> 薄封装收口带外调用；catalog 四函数<b>纯 re-export 不包装</b>——目标是咽喉点化，不是抽象化；</li>
+      <li>seam 文档补一页"升级 playbook"：bump 版本 → 跑 Usage 类型 pin（爆则补字段语义）→ 跑 pi compatibility tests → 跑 d0-smoke。</li>
+    </ul>
+    <div class="callout ok">
+      <span class="ct">议题 ⑥ 裁决</span>
+      做 A，半天工作量：lint 边界 + 8 处冗余收口 + 两个小 seam + 升级 playbook。
+      371 commits/4 个月的 churn 里真正打穿过 seam 的只有 Usage 字段这一类语义漂移——防它靠类型 pin 和 playbook，不靠全量 facade。
+    </div>
+  </div>
+</section>
+
+<!-- ============ Ⅱ 总裁决 ============ -->
+<section id="dd-verdict">
+  <div class="wrap">
+    <p class="sec-tag">VERDICT · 跨议题综合与取舍</p>
+    <h2>总裁决：未来 2–3 个月只做三件事</h2>
+    <p>
+      六个议题放到一起排序，逻辑只有一条：<b>确定性资损 &gt; 现存 API 名不副实 &gt; roadmap 挂名未完成项 &gt; 证据工程 &gt; 一切投机设计</b>。
+      按这条线收敛出三个工作包：
+    </p>
+    <div class="reason-grid">
+      <div class="reason-card">
+        <h4>1 · 内核信实性修复包</h4>
+        <p>R1 悬空 toolCall 的 <code>resume()</code> 修复 + <code>getCacheSafeParams()</code> 投影修正 + R2 Usage 类型 pin。</p>
+        <p class="why"><b>为什么第一：</b>三者共同点是"现有 API 的承诺与实际行为不一致"——R1 是确定性资损路径，另两个是名不副实的公开接口。全部纯本地可测（fake model + MemoryStore 复现），十行级外科手术，不引入任何新概念。</p>
+      </div>
+      <div class="reason-card">
+        <h4>2 · ctx.state 硬化</h4>
+        <p><code>clear()</code> 收权（5 行 PR 先行）→ <code>defineSlot</code> Slot API → 三组跨 plugin key 迁移 → 其余 11 个私有 key 顺手渐进。</p>
+        <p class="why"><b>为什么第二：</b>roadmap 挂名的未完成项、四个可指认行号的失败模式、修复路径渐进且运行时零行为变化——它直接服务"迁移前把内核面收干净"的主线，且 F2/F3 类故障一旦在批处理环境发生，症状离病因极远，几乎不可调试。</p>
+      </div>
+      <div class="reason-card">
+        <h4>3 · 迁移证据工程</h4>
+        <p>L1 seam 定向收口（lint + 冗余 import + R3 退避，合计约一天）作为前置，然后执行 7 条 spike 验证清单。</p>
+        <p class="why"><b>为什么第三：</b>这是真正 gate 迁移决策的东西——把 roadmap 里"真实迁移证据"从口号变成 7 条可判定验收项。前两个工作包扫清的正是清单第 1、6 条的确定性障碍；升级 pi-ai 到 0.80.x 顺带走一次新 playbook。</p>
+      </div>
+    </div>
+
+    <div class="callout warn">
+      <span class="ct">同样重要：明确不做清单</span>
+      <b>不实现</b>分支持久化（B/C′ 只写进设计文档并绑定触发条件——seam 已在，期权不过期）；
+      <b>继续 defer</b> sideQuestion controller 本体（真需求来时只是 60 行 recipe）；
+      <b>不做</b> preset / 简化 facade / "轻量模式"（只做一小时的文档路标）；
+      <b>不做</b> pi-ai 完整 re-export facade（定向收口足够）；
+      <b>不做</b> hook 自动拓扑排序（注册顺序是语义，重排即改行为）；
+      <b>不做</b> capability 注入重构（留作定向期权）。每一条"不做"都和"做"一样有明确理由与触发条件。
+    </div>
+
+    <p>
+      回到第一部分结语留下的那一课——"会话数据模型不必被迫线性"。深挖之后这一课的正确读法变了：
+      不是"去抄 pi-mono 的树"，而是<b>确认自己的树形 seam 早已留好，然后把行权条件写清楚、把今天就存在的 footgun 用文档封掉</b>。
+      借鉴的最高形式不是照搬对方的结构，而是借对方的存在，验证自己哪些期权已经免费持有、哪些承诺还没有兑现。
+      harness-pi 下一阶段的主题不是"补机制"，而是<b>让已有机制的每一个承诺都名副其实</b>——这正是三个工作包的公约数。
+    </p>
+  </div>
+</section>
+
+<footer>
+  <div class="wrap">
+    <p>
+      harness-pi 侧研究范围：<code>packages/core/src</code>（hook.ts / dispatcher.ts / session.ts / tool-executor.ts）、
+      <code>packages/plugins/src</code>（watchdog / repeated-call-guard / token-budget / controllers/lifecycle-restart 等）、
+      <code>docs/00-01-03</code> 架构与 hook 系统文档。
+    </p>
+    <p>
+      pi-mono 侧研究范围：<code>git clone https://github.com/earendil-works/pi-mono</code>（depth=1 快照）的
+      <code>packages/agent/src</code>（agent-loop.ts / agent.ts / types.ts / harness/*）与 <code>packages/coding-agent/src/core/extensions</code>。
+    </p>
+    <p>
+      第二部分研究方式：3 路并行深挖 sub-agent（会话数据模型与 sideQuestion / ctx.state 硬化与分层 / 迁移风险与 L1 seam），
+      每路强制"先实读源码（结论挂 file:line）→ 具体失败场景 → ≥2 候选与权衡 → 立场明确的推荐"，全程只出方案不改代码；
+      跨议题优先级与"三个工作包 / 不做清单"为主线综合。L1 seam 的 churn 数据基于对 pi-mono 上游 git 历史的 deepen 实测。
+    </p>
+    <p style="color:var(--ink-soft); margin-top:18px;">
+      备注：harness-pi 文档内部分处引用上游为 <code>github.com/badlogic/pi-mono</code>（Mario Zechner 个人账号），
+      而 <code>package.json</code> 实际依赖的发布组织是 <code>@earendil-works</code>；两者应为同一项目的组织迁移/镜像关系。
+      本报告以 harness-pi 实际依赖的 <code>earendil-works/pi-mono</code> 仓库快照为准。行号引用基于当次克隆/读取时的快照，
+      上游持续演进，引用前请以各自仓库实时内容为准。
+    </p>
+  </div>
+</footer>
+
+</body>
+</html>
