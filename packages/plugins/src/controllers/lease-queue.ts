@@ -29,10 +29,21 @@ export interface QueueLease {
 
 export type LeaseStatus = "done" | "error" | "conflict" | "skipped";
 
+export interface LeaseQueueAttemptBackoffOptions {
+  /** attempt 1 失败后、进入 attempt 2 前等待的毫秒数。 */
+  initialDelayMs: number;
+  /** 每次失败后乘上的指数因子。默认 2。 */
+  factor?: number;
+  /** 单次等待上限（ms）。 */
+  maxDelayMs?: number;
+}
+
 export interface LeaseQueueOptions<I extends QueueItem> {
   items: I[];
   concurrency: number;
   maxAttempts?: number;
+  /** opt-in:失败 attempt 之间做 per-item 指数退避。不传时保持立即重试。 */
+  attemptBackoff?: LeaseQueueAttemptBackoffOptions;
   /**
    * 给某个 item + lease 创建 session + prompt。
    * `ctx.releaseLease` 让 worker 主动放回（如 watchdog 触发时把 item 标 error 而非 done）。
@@ -61,11 +72,25 @@ export interface LeaseQueueResult {
 }
 
 const DEFAULT_MAX_ATTEMPTS = 1;
+const DEFAULT_ATTEMPT_BACKOFF_FACTOR = 2;
 
 export class LeaseQueue<I extends QueueItem> {
   constructor(private readonly opts: LeaseQueueOptions<I>) {
     if (opts.concurrency <= 0) {
       throw new Error("LeaseQueue: concurrency must be > 0");
+    }
+    if (opts.attemptBackoff) {
+      const { initialDelayMs, factor, maxDelayMs } = opts.attemptBackoff;
+      if (!Number.isFinite(initialDelayMs) || initialDelayMs < 0) {
+        throw new Error("LeaseQueue: attemptBackoff.initialDelayMs must be >= 0");
+      }
+      const backoffFactor = factor ?? DEFAULT_ATTEMPT_BACKOFF_FACTOR;
+      if (!Number.isFinite(backoffFactor) || backoffFactor < 1) {
+        throw new Error("LeaseQueue: attemptBackoff.factor must be >= 1");
+      }
+      if (maxDelayMs !== undefined && (!Number.isFinite(maxDelayMs) || maxDelayMs < 0)) {
+        throw new Error("LeaseQueue: attemptBackoff.maxDelayMs must be >= 0");
+      }
     }
   }
 
@@ -170,7 +195,9 @@ export class LeaseQueue<I extends QueueItem> {
 
         if (status !== "done" && attempt < maxAttempts) {
           // retry：塞到队尾让其他 item 先跑（避免同 worker 立刻又拿到同一 item）
+          const shouldContinue = await this._waitBeforeRetry(attempt, signal);
           pending.push(item);
+          if (!shouldContinue) break;
           continue;
         }
         attempts.delete(item.id);
@@ -178,12 +205,46 @@ export class LeaseQueue<I extends QueueItem> {
       } catch (err) {
         const error = err instanceof Error ? err : new Error(String(err));
         if (attempt < maxAttempts) {
+          const shouldContinue = await this._waitBeforeRetry(attempt, signal);
           pending.push(item);
+          if (!shouldContinue) break;
           continue;
         }
         attempts.delete(item.id);
         finalizeItem(item, "error", undefined, error);
       }
     }
+  }
+
+  private _attemptBackoffDelayMs(attempt: number): number {
+    const backoff = this.opts.attemptBackoff;
+    if (!backoff) return 0;
+    const factor = backoff.factor ?? DEFAULT_ATTEMPT_BACKOFF_FACTOR;
+    const delay = backoff.initialDelayMs * factor ** (attempt - 1);
+    return backoff.maxDelayMs === undefined
+      ? delay
+      : Math.min(delay, backoff.maxDelayMs);
+  }
+
+  private async _waitBeforeRetry(
+    attempt: number,
+    signal: AbortSignal | undefined,
+  ): Promise<boolean> {
+    if (signal?.aborted) return false;
+    const delay = this._attemptBackoffDelayMs(attempt);
+    if (delay <= 0) return !signal?.aborted;
+    await new Promise<void>((resolve) => {
+      if (signal?.aborted) return resolve();
+      const onAbort = (): void => {
+        clearTimeout(t);
+        resolve();
+      };
+      const t = setTimeout(() => {
+        signal?.removeEventListener("abort", onAbort);
+        resolve();
+      }, delay);
+      signal?.addEventListener("abort", onAbort, { once: true });
+    });
+    return !signal?.aborted;
   }
 }

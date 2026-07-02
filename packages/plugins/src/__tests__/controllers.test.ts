@@ -532,6 +532,69 @@ describe("LeaseQueue", () => {
     expect(attempts.get("bad")).toBe(2);
   });
 
+  it("attemptBackoff delays retry attempts exponentially when opted in", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(0);
+    try {
+      const attemptTimes: number[] = [];
+      const queue = new LeaseQueue<Item>({
+        items: [{ id: "x" }],
+        concurrency: 1,
+        maxAttempts: 3,
+        attemptBackoff: { initialDelayMs: 100, factor: 3 },
+        workerFactory: async () => {
+          attemptTimes.push(Date.now());
+          throw new Error("retry me");
+        },
+      });
+
+      const run = queue.start();
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(attemptTimes).toEqual([0]);
+
+      await vi.advanceTimersByTimeAsync(99);
+      expect(attemptTimes).toEqual([0]);
+
+      await vi.advanceTimersByTimeAsync(1);
+      expect(attemptTimes).toEqual([0, 100]);
+
+      await vi.advanceTimersByTimeAsync(299);
+      expect(attemptTimes).toEqual([0, 100]);
+
+      await vi.advanceTimersByTimeAsync(1);
+      const res = await run;
+      expect(attemptTimes).toEqual([0, 100, 400]);
+      expect(res.failed).toBe(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("abort during attemptBackoff wakes the retry wait and skips the item promptly", async () => {
+    const ac = new AbortController();
+    let attempts = 0;
+    const queue = new LeaseQueue<Item>({
+      items: [{ id: "x" }],
+      concurrency: 1,
+      maxAttempts: 2,
+      attemptBackoff: { initialDelayMs: 5_000 },
+      workerFactory: async () => {
+        attempts++;
+        throw new Error("retry me");
+      },
+    });
+
+    const t0 = Date.now();
+    setTimeout(() => ac.abort(), 50);
+    const res = await queue.start(ac.signal);
+
+    expect(Date.now() - t0).toBeLessThan(1_000);
+    expect(attempts).toBe(1);
+    expect(res.failed).toBe(0);
+    expect(res.skipped).toBe(1);
+  });
+
   it("onItemComplete receives error for thrown workerFactory", async () => {
     const errSeen: Error[] = [];
     const queue = new LeaseQueue<Item>({
