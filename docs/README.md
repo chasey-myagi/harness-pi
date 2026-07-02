@@ -20,6 +20,7 @@
 | 11 | [coding-agent-product-roadmap](11-coding-agent-product-roadmap.md) | coding-agent 产品化差距：MCP、web、todo、sub-agent 管理、git/checkpoint、LSP 等能力面 | 规划 dogfood app 的人 |
 | 12 | [agent-loop-development-workflow](12-agent-loop-development-workflow.md) | 如何用 surface-neutral maker-verifier loop 来开发 harness-pi 本身 | 设计 agent-driven 开发流程的人 |
 | 13 | [architecture-deep-dive-verdicts](13-architecture-deep-dive-verdicts.md) | L1/L2 六议题架构深挖裁决：三工作包、不做清单、迁移 spike 7 条验证清单（完整论证见 [对比报告 HTML](harness-pi-vs-pi-mono-hooks.html)） | 决定下一阶段内核投入的人 |
+| 14 | [production-coding-agent-architecture](14-production-coding-agent-architecture.md) | 生产级 coding-agent 架构：headless 硬化、装配地基、安全纵深（沙箱/信任门）、交付形态（RPC 第四态）——回答"凭什么敢让它无人值守改代码"（能力面见 11） | 把 coding-agent 推向生产的人 |
 
 ## Agent workflow
 

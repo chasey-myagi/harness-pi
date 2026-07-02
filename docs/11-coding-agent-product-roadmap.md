@@ -2,6 +2,7 @@
 
 > **状态**：Design — 把 `apps/coding-agent` 从 "dogfood / harness 参考实现" 推向 "可媲美 Claude Code / Codex 的后端·CLI coding agent" 的总纲。
 > **配套**：本文是总纲；每个能力（Capability/plugin）另有一份独立设计文档，见 §7 与 `docs/caps/`。
+> **姊妹篇**：本文回答"缺哪些**能力**"；[14-production-coding-agent-architecture](14-production-coding-agent-architecture.md) 回答"怎么把能力**硬化成敢上生产的东西**"（headless 防护反转、装配地基、安全纵深、RPC 交付形态）。两文互不重复：能力优先级看本文，结构与防护看 14。
 > **前置**：先读 `00-overview` / `01-architecture` / `03-hook-system` / `05-plugins` / `06-controllers`。
 
 ---
