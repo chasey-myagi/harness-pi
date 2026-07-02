@@ -340,7 +340,6 @@ export interface TypedStateMap {
   delete<K extends string>(key: K): boolean;
 
   readonly size: number;
-  clear(): void;
 }
 
 /**

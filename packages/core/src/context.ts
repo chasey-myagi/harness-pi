@@ -138,9 +138,6 @@ class StateMapImpl implements TypedStateMap {
   delete<K extends string>(key: K): boolean {
     return this._m.delete(key);
   }
-  clear(): void {
-    this._m.clear();
-  }
   get size(): number {
     return this._m.size;
   }

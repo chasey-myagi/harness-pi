@@ -81,7 +81,7 @@ describe("Phase 1: TypedStateMap", () => {
     fake.teardown();
   });
 
-  it("state has/delete/clear/size work as expected", async () => {
+  it("state has/delete/size work as expected", async () => {
     const observations: Array<string | number | boolean> = [];
     const probe: Hook = {
       name: "probe",
@@ -94,8 +94,6 @@ describe("Phase 1: TypedStateMap", () => {
         ctx.state.set("phase1-test.counter", 5);
         ctx.state.set("phase1-test.label", "x");
         observations.push(ctx.state.size);
-        ctx.state.clear();
-        observations.push(ctx.state.size);
       },
     };
     const fake = createFakeModel([
@@ -107,7 +105,7 @@ describe("Phase 1: TypedStateMap", () => {
       hooks: [probe],
     });
     await session.run("go");
-    expect(observations).toEqual([true, 1, false, 2, 0]);
+    expect(observations).toEqual([true, 1, false, 2]);
     fake.teardown();
   });
 });
