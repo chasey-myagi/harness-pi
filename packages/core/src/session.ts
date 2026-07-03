@@ -25,6 +25,12 @@ import {
   type StopReason,
 } from "@earendil-works/pi-ai";
 
+type AccumulatedUsageKey = "input" | "output" | "cacheRead" | "cacheWrite" | "totalTokens";
+type AssertNoExtraUsageKeys<T extends never> = T;
+type _AccumulatedUsageCoversAllUsageKeys = AssertNoExtraUsageKeys<
+  Exclude<keyof Usage, "cost" | AccumulatedUsageKey>
+>;
+
 /**
  * Phase 3：streaming consumer 看到的事件类型。每个事件对应一个 EVENT-category hook。
  *
