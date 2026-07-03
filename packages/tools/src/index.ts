@@ -83,6 +83,20 @@ export interface BashExecOptions {
 }
 
 export interface BashOperations {
+  /**
+   * **唯一安全咽喉点。** bash tool 的全部命令执行都经此单点——它是把 OS 级沙箱
+   * （macOS seatbelt / Linux bwrap+seccomp+landlock / 容器）接进来的**唯一接缝**。
+   *
+   * 默认实现 `defaultExec` 是**裸 host shell**（`spawn(command, { shell:true })`），
+   * **不是沙箱**：`cd /`、绝对路径、`rm -rf ~`、`curl … | sh` 都能跑；read/edit/write 的
+   * cwd 约束对 bash **无效**。默认的 `safeShellEnv()` 只从 env 剔除密钥，**不挡**文件破坏
+   * 与网络外联——它是最后一道，不是唯一一道。
+   *
+   * 因此：**默认 `defaultExec` 仅供 trusted 环境**（本地开发、已在容器/worktree 里的 CI）。
+   * **生产 / headless / 跑在不可信输入上时，必须经此 `operations.exec` 注入沙箱化 exec。**
+   * `permissionGate` 的字符串级审批是筛子不是墙（`bash("python -c ...")` 即绕过），只降低
+   * 审批噪音，不作为安全边界。设计见 `docs/14-production-coding-agent-architecture.md` §3.3。
+   */
   exec(
     command: string,
     cwd: string,
@@ -222,6 +236,9 @@ export function createReadTool(
     name: "read",
     label: "read",
     description: `Read the contents of a file. Supports text files and images (jpg, png, gif, webp). For text files, output is truncated to ${DEFAULT_MAX_LINES} lines or ${DEFAULT_MAX_BYTES / 1024}KB.`,
+    isReadOnly: true,
+    isDestructive: false,
+    isOpenWorld: false,
     parameters: Type.Object({
       path: Type.String({ description: "Path to the file to read (relative or absolute)" }),
       offset: Type.Optional(Type.Number({ description: "Line number to start reading from (1-indexed)" })),
@@ -283,6 +300,9 @@ export function createBashTool(
     name: "bash",
     label: "bash",
     description: `Execute a bash command in the current working directory. Returns stdout and stderr. Output is truncated to last ${DEFAULT_MAX_LINES} lines or ${DEFAULT_MAX_BYTES / 1024}KB. Timeout is in seconds.`,
+    isReadOnly: false,
+    isDestructive: true,
+    isOpenWorld: true,
     parameters: Type.Object({
       command: Type.String({ description: "Bash command to execute" }),
       timeout: Type.Optional(Type.Number({ description: "Timeout in seconds (optional)" })),
@@ -357,6 +377,9 @@ export function createEditTool(
     name: "edit",
     label: "edit",
     description: "Replace a unique text range in an existing file.",
+    isReadOnly: false,
+    isDestructive: true,
+    isOpenWorld: false,
     parameters: Type.Object({
       path: Type.String({ description: "File path to edit" }),
       oldText: Type.String({ description: "Existing text to replace" }),
@@ -411,6 +434,9 @@ export function createWriteTool(
     name: "write",
     label: "write",
     description: "Write a complete file to disk, creating parent directories as needed.",
+    isReadOnly: false,
+    isDestructive: true,
+    isOpenWorld: false,
     parameters: Type.Object({
       path: Type.String({ description: "File path to write" }),
       content: Type.String({ description: "Complete file content" }),
@@ -449,6 +475,9 @@ export function createGrepTool(
     name: "grep",
     label: "grep",
     description: `Search file contents for a pattern. Returns matching lines with file paths and line numbers. Output is truncated to ${options.defaultLimit ?? 100} matches or ${DEFAULT_MAX_BYTES / 1024}KB.`,
+    isReadOnly: true,
+    isDestructive: false,
+    isOpenWorld: false,
     parameters: Type.Object({
       pattern: Type.String({ description: "Search pattern (regex or literal string)" }),
       path: Type.Optional(Type.String({ description: "Directory or file to search (default: current directory)" })),
@@ -531,6 +560,9 @@ export function createFindTool(
     name: "find",
     label: "find",
     description: `Search for files by glob pattern. Returns matching file paths relative to the workspace cwd. Output is truncated to ${options.defaultLimit ?? 1_000} results or ${DEFAULT_MAX_BYTES / 1024}KB.`,
+    isReadOnly: true,
+    isDestructive: false,
+    isOpenWorld: false,
     parameters: Type.Object({
       pattern: Type.String({ description: "Glob pattern to match files" }),
       path: Type.Optional(Type.String({ description: "Directory to search in (default: current directory)" })),
@@ -591,6 +623,9 @@ export function createLsTool(
     name: "ls",
     label: "ls",
     description: `List directory contents. Returns entries sorted alphabetically, with '/' suffix for directories. Output is truncated to ${options.defaultLimit ?? 500} entries or ${DEFAULT_MAX_BYTES / 1024}KB.`,
+    isReadOnly: true,
+    isDestructive: false,
+    isOpenWorld: false,
     parameters: Type.Object({
       path: Type.Optional(Type.String({ description: "Directory to list (default: current directory)" })),
       limit: Type.Optional(Type.Number({ description: "Maximum number of entries to return" })),

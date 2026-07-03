@@ -293,6 +293,7 @@ roadmap 已列 `sideQuestion` controller + `subAgent` tool factory。给 Hybrid 
 3. **编排层放哪个 package**（#8）：升级现有 `controllers` vs 新建 `@harness-pi/orchestration`。倾向前者（少一个包，复用 lease/workPool 测试），但若 API 形态差异大就独立。
 4. **「作者=用户」的耦合风险**：每个 Phase 都要能独立验收、能回退；Phase 0/1 用独立 worktree spike，不动 bidding 主线，直到 parity 证明够用。
 5. **不要为通用性过度设计**：第二个真实下游还不存在（roadmap v0.1 gate 未勾）。除 §3 列的内核项外，#14 这类 controller/tool 候选「触发条件 = bidding spike 证明需要」，否则留在 application 侧。
+6. **内核级迁移风险预测（2026-07 深挖，见 [13 §5](13-architecture-deep-dive-verdicts.md)）**：R1 悬空 toolCall → resume 后 provider 400 死循环（确定性资损，迁移前必修）、R2 pi-ai `Usage` 字段漂移（上游 0.80.x 已加 `reasoning`，需类型 pin）、R3 限流 × 无退避重试、R4 compaction 估算漂移 × 文案依赖（spike 量化）、R5 跨进程双 resume 无 fencing（spike 必测）。spike 必压的 7 条内核验证清单也在 13 §5——压不到就不算验证了内核。
 
 ---
 

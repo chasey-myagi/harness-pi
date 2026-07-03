@@ -735,6 +735,8 @@ Fork 一个 lightweight agent **共享父 session 的 prompt cache**，回答一
 
 **v0 不实现，但这里写下完整设计**，目的是确保 [02-kernel `AgentSession`](02-kernel.md) 暴露的接口够支撑未来 fork——v0 提前关死接缝就很难补救。
 
+> **2026-07 深挖裁决（[13 §2](13-architecture-deep-dive-verdicts.md)）**：本体继续 defer（"非它不可"的调用方目前只有 lark-bot 一个候选）；但下面 §7.1.1 依赖的 `getCacheSafeParams()` 存在现存缺陷——autoCompaction 活跃时返回全量 `_messages` 而非 boundary 投影、且不携带 `llmOptions`（含 pi-ai `StreamOptions.sessionId`），fork 出的子 session 必然 cache miss。该接缝修正提前做；修好后本节落地只是 forkSession 之上约 60 行 recipe。另注意 §7.1.3 的 `skipCacheWrite` 在 pi-ai 无等价物（只有 `cacheRetention`），落地前需向上游确认。
+
 #### 7.1.1 核心机制：`CacheSafeParams`
 
 ```ts

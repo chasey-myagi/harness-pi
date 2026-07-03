@@ -318,6 +318,32 @@ export interface HookStateRegistry {
 
 type RegistryKey = keyof HookStateRegistry & string;
 
+declare const STATE_SLOT_BRAND: unique symbol;
+
+/**
+ * Branded ctx.state slot. The physical map key stays a string; the slot carries
+ * the value type so dynamic key variables no longer escape the type system.
+ */
+export interface StateSlot<T> {
+  readonly key: string;
+  /** Diagnostics owner, typically the plugin or controller name. */
+  readonly owner: string;
+  /** Optional dev-mode guard for catching dirty writes at the state boundary. */
+  readonly validate?: (v: unknown) => v is T;
+  readonly [STATE_SLOT_BRAND]: T;
+}
+
+export function defineSlot<T>(
+  key: string,
+  opts: { owner: string; validate?: (v: unknown) => v is T },
+): StateSlot<T> {
+  const slot =
+    opts.validate === undefined
+      ? { key, owner: opts.owner }
+      : { key, owner: opts.owner, validate: opts.validate };
+  return Object.freeze(slot) as StateSlot<T>;
+}
+
 /**
  * 已注册 key K 对应的值类型；未注册 key 回退 `unknown`。用单个 conditional type 而不是
  * overload，避免 TS 在字面类型匹配时退到 string fallback。
@@ -334,13 +360,20 @@ export type StateValueFor<K extends string> = K extends RegistryKey
  * 物理上是同一个 Map<string, unknown>，TypedStateMap 是它的 typed view。
  */
 export interface TypedStateMap {
+  get<T>(slot: StateSlot<T>): T | undefined;
+  /** @deprecated Prefer `defineSlot(...)` for new shared state keys. */
   get<K extends string>(key: K): StateValueFor<K> | undefined;
+  set<T>(slot: StateSlot<T>, value: T): void;
+  /** @deprecated Prefer `defineSlot(...)` for new shared state keys. */
   set<K extends string>(key: K, value: StateValueFor<K>): void;
+  has<T>(slot: StateSlot<T>): boolean;
+  /** @deprecated Prefer `defineSlot(...)` for new shared state keys. */
   has<K extends string>(key: K): boolean;
+  delete<T>(slot: StateSlot<T>): boolean;
+  /** @deprecated Prefer `defineSlot(...)` for new shared state keys. */
   delete<K extends string>(key: K): boolean;
 
   readonly size: number;
-  clear(): void;
 }
 
 /**

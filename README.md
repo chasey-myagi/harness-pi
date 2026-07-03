@@ -31,7 +31,7 @@
 ## 哲学
 
 1. **Kernel 极简**。`@harness-pi/core` 只做两件事：跑 pi-ai 的 LLM-tool 循环 + 派发 hook。无 metric、无 watchdog、无 pool、无 compaction 策略——内核只 fire `onContextOverflow` / `onContinuationCheck` / `onAfterFlush` 等观测点，策略全在插件/控制器。
-2. **一切皆 hook**。watchdog、metrics、trim/auto/micro-compaction、tool output buffer、log、empty-run guard、lease decision、permission gate、token/cost/tool-stats、turn-end guard、deferred-tools/skills——全部是 hook 实例，全部在 `@harness-pi/plugins` 里（20 个 `Hook` 工厂 + `toolSearch`/`skills` 工具工厂，详见 [docs/05-plugins](docs/05-plugins.md)）。
+2. **一切皆 hook**。watchdog、metrics、trim/auto/micro-compaction、tool output buffer、log、empty-run guard、lease decision、permission gate、token/cost/tool-stats、turn-end guard、deferred-tools/skills——全部是 hook 实例，全部在 `@harness-pi/plugins` 里（具体导出计数以 [docs/05-plugins](docs/05-plugins.md) 和 `packages/plugins/src/index.ts` 为准）。
 3. **基础 coding tools 是一等包**。服务端 agent 也需要 read/grep/bash 这类工具；它们不该由每个消费者重写。
 4. **Plugin ≠ Controller ≠ Adapter**。
    - Plugin：钩 loop 事件（装饰器形态）
@@ -83,7 +83,7 @@ pnpm --filter @harness-pi/coding-agent start -- --cwd . --model dashscope:qwen-p
 - 默认 log 目录是 `.harness-pi/logs`；`--metrics-file path.ndjson` 可写 metrics。
 - 默认对 session log 里的高危 tool args 脱敏（`write` 内容、`edit` 文本、`bash` 命令仅记长度，不落原文，避免密钥/源码静默写进 `.harness-pi/logs`）；`--log-args full` 记原始 args（仅本地调试）；`--log-args none` 完全不记 args；`--no-log` 关闭整个 session log。
 - **`.harness-pi/` 落盘与 gitignore**：session log 已默认脱敏（见上），但 **resume 存储**（`.harness-pi/sessions/*.jsonl`，TUI / `--resume` 用）为了能正确**重放续跑**保存**完整原文**消息历史（含 `write` 内容、`bash` 命令等），**不脱敏**。启动时若检测到当前仓库未把 `.harness-pi/` 加入 `.gitignore`，会打印一条告警——请务必把 `.harness-pi/` 加入 `.gitignore`，以免敏感内容被误提交。
-- **安全边界**：`bash` 是 host shell，不是 sandbox。full mode 只应在你明确允许修改的 workspace 里运行。
+- **安全边界**：`bash` 是 host shell，不是 sandbox。full mode 只应在你明确允许修改的 workspace 里运行。`bash` tool 的 `BashOperations.exec`（`packages/tools`）是**唯一安全咽喉点**——把 OS 级沙箱接进来的唯一接缝。默认 `defaultExec` 仅供 trusted 环境；**生产 / headless / 跑在不可信输入上时，必须经 `operations.exec` 注入沙箱化 exec**（`permissionGate` 的字符串审批是筛子不是墙，只降噪不设边界）。设计见 [docs/14 §3.3](docs/14-production-coding-agent-architecture.md)。
 
 ## Layout
 

@@ -1,5 +1,5 @@
 /**
- * ForkSession —— 从父 session 拷贝当前 messages snapshot，跑一个独立子 session。
+ * ForkSession —— 从父 session 拷贝当前 cache-safe messages view，跑一个独立子 session。
  *
  * 跟 LifecycleRestart 的区别：lifecycle 是同一逻辑 session 跨 worker 的状态续传；
  * fork 是同时刻派生 N 个**独立探索**子 session（"我有 3 个候选方案，平行 try 一遍"）。
@@ -7,7 +7,7 @@
  * 跟 WorkPool 的区别：WorkPool 是不同 work item 的横向并行；fork 是同一 item 的纵向探索。
  *
  * 设计要点：
- *   - 子 session 拿父 session 的 `snapshot().messages` 作为 initialMessages
+ *   - 子 session 拿父 session 的 `getCacheSafeParams().forkContextMessages` 作为 initialMessages
  *   - 父 session **不暂停**——fork 是 read-only snapshot；父子并行没问题
  *   - 父子可挂不同 hooks / tools / system prompt；只共享 messages 历史
  *   - 子完成后 summary + final messages 返回；caller 决定如何 merge（不自动 merge）
@@ -15,8 +15,13 @@
  * 借鉴 Claude Code `forkedAgent` + `CacheSafeParams`（[08-claude-code-lessons](docs/08-claude-code-lessons.md) §4.1）。
  */
 
-import { filterIncompleteToolCalls } from "@harness-pi/core";
 import type { AgentSession, Message, RunSummary } from "@harness-pi/core";
+
+type CacheSafeParams = ReturnType<AgentSession["getCacheSafeParams"]>;
+type ForkSessionFactory = (
+  initialMessages: Message[],
+  cacheParams: CacheSafeParams,
+) => AgentSession;
 
 export interface ForkOptions {
   /** 给子 session 单独发的 prompt。如果不传，用 `continue()` 跑（直接从历史接着算）。 */
@@ -33,7 +38,7 @@ export interface ForkResult {
 }
 
 /**
- * 从父 session 的当前 snapshot 派生一个子 session 并跑它。子 session 由 factory 构造
+ * 从父 session 的当前 cache-safe view 派生一个子 session 并跑它。子 session 由 factory 构造
  * （让 caller 决定挂什么 hooks / tools / model）。
  *
  * @param parent 父 session（不会被修改 / 暂停）
@@ -51,14 +56,13 @@ export interface ForkResult {
  */
 export async function forkSession(
   parent: AgentSession,
-  factory: (initialMessages: Message[]) => AgentSession,
+  factory: ForkSessionFactory,
   opts: ForkOptions = {},
 ): Promise<ForkResult> {
-  // 拷贝 snapshot —— 父 session 不会被 child 影响（initialMessages 是 [...父messages] copy）。
-  // 过滤悬挂的 tool 调用：父若在 tool batch 中途被 fork，snapshot 会含「无 result 的 toolCall」，
-  // 直接当子 initialMessages 喂 pi-ai 会 400。filterIncompleteToolCalls 也始终返回 copy。
-  const snapshot = parent.snapshot();
-  const child = factory(filterIncompleteToolCalls(snapshot.messages));
+  // 拷贝 cache-safe view —— 父 session 不会被 child 影响。
+  // getCacheSafeParams 会按 live boundary 投影并过滤悬挂 toolCall，保持 fork 的 cache 前缀合法且稳定。
+  const cacheParams = parent.getCacheSafeParams();
+  const child = factory([...cacheParams.forkContextMessages], cacheParams);
 
   // M4：防 self-fork。factory 必须返回新的 AgentSession 实例，否则 child.run() 会
   // 直接 mutate 父，破坏 fork 语义。
@@ -87,7 +91,7 @@ export async function forkSession(
 export async function forkSessionAll(
   parent: AgentSession,
   forks: Array<{
-    factory: (initialMessages: Message[]) => AgentSession;
+    factory: ForkSessionFactory;
     opts?: ForkOptions;
   }>,
 ): Promise<
