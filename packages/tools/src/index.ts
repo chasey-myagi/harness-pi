@@ -83,6 +83,20 @@ export interface BashExecOptions {
 }
 
 export interface BashOperations {
+  /**
+   * **唯一安全咽喉点。** bash tool 的全部命令执行都经此单点——它是把 OS 级沙箱
+   * （macOS seatbelt / Linux bwrap+seccomp+landlock / 容器）接进来的**唯一接缝**。
+   *
+   * 默认实现 `defaultExec` 是**裸 host shell**（`spawn(command, { shell:true })`），
+   * **不是沙箱**：`cd /`、绝对路径、`rm -rf ~`、`curl … | sh` 都能跑；read/edit/write 的
+   * cwd 约束对 bash **无效**。默认的 `safeShellEnv()` 只从 env 剔除密钥，**不挡**文件破坏
+   * 与网络外联——它是最后一道，不是唯一一道。
+   *
+   * 因此：**默认 `defaultExec` 仅供 trusted 环境**（本地开发、已在容器/worktree 里的 CI）。
+   * **生产 / headless / 跑在不可信输入上时，必须经此 `operations.exec` 注入沙箱化 exec。**
+   * `permissionGate` 的字符串级审批是筛子不是墙（`bash("python -c ...")` 即绕过），只降低
+   * 审批噪音，不作为安全边界。设计见 `docs/14-production-coding-agent-architecture.md` §3.3。
+   */
   exec(
     command: string,
     cwd: string,
