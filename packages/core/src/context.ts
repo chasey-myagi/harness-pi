@@ -21,6 +21,7 @@ import type {
   OnSubagentEndInput,
   OnSubagentStartInput,
   SessionConfigView,
+  StateSlot,
   StateValueFor,
   TypedStateMap,
 } from "./hook.js";
@@ -119,6 +120,18 @@ function defaultLogSink(
   fn(line);
 }
 
+function physicalStateKey(key: string | StateSlot<unknown>): string {
+  return typeof key === "string" ? key : key.key;
+}
+
+function assertSlotValue<T>(slot: StateSlot<T>, value: T): void {
+  if (process.env.NODE_ENV === "production" || !slot.validate) return;
+  if (slot.validate(value)) return;
+  throw new Error(
+    `ctx.state slot validation failed: owner="${slot.owner}" key="${slot.key}"`,
+  );
+}
+
 /**
  * TypedStateMap 的薄壳实现。物理仍是 Map<string, unknown>，conditional type 让 caller
  * 在已注册 key 上拿到正确推断。命名 class 而不是 object literal，stack trace 友好。
@@ -126,17 +139,28 @@ function defaultLogSink(
 class StateMapImpl implements TypedStateMap {
   private readonly _m = new Map<string, unknown>();
 
-  get<K extends string>(key: K): StateValueFor<K> | undefined {
-    return this._m.get(key) as StateValueFor<K> | undefined;
+  get<T>(slot: StateSlot<T>): T | undefined;
+  get<K extends string>(key: K): StateValueFor<K> | undefined;
+  get(key: string | StateSlot<unknown>): unknown {
+    return this._m.get(physicalStateKey(key));
   }
-  set<K extends string>(key: K, value: StateValueFor<K>): void {
-    this._m.set(key, value);
+  set<T>(slot: StateSlot<T>, value: T): void;
+  set<K extends string>(key: K, value: StateValueFor<K>): void;
+  set(key: string | StateSlot<unknown>, value: unknown): void {
+    if (typeof key !== "string") {
+      assertSlotValue(key, value);
+    }
+    this._m.set(physicalStateKey(key), value);
   }
-  has<K extends string>(key: K): boolean {
-    return this._m.has(key);
+  has<T>(slot: StateSlot<T>): boolean;
+  has<K extends string>(key: K): boolean;
+  has(key: string | StateSlot<unknown>): boolean {
+    return this._m.has(physicalStateKey(key));
   }
-  delete<K extends string>(key: K): boolean {
-    return this._m.delete(key);
+  delete<T>(slot: StateSlot<T>): boolean;
+  delete<K extends string>(key: K): boolean;
+  delete(key: string | StateSlot<unknown>): boolean {
+    return this._m.delete(physicalStateKey(key));
   }
   clear(): void {
     this._m.clear();
