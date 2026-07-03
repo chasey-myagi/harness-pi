@@ -128,7 +128,10 @@ import type {
  */
 export const ACTIVE_BOUNDARY_KEY = "harness-pi.activeBoundary" as const;
 import { ToolExecutor, findToolByName } from "./tool-executor.js";
-import { createAttachmentMessage } from "./types.js";
+import {
+  createAttachmentMessage,
+  filterIncompleteToolCalls,
+} from "./types.js";
 import type { HarnessTool } from "./types.js";
 import type { SessionStore } from "./session-store.js";
 import { defaultIsContextOverflow } from "./context-overflow.js";
@@ -483,11 +486,19 @@ export class AgentSession {
     systemPrompt: string;
     forkContextMessages: Message[];
     model: Model<Api>;
+    llmOptions: LlmOptions;
   } {
+    const projectedMessages: Message[] = this._activeBoundary !== null
+      ? [
+          this._activeBoundary.summary,
+          ...this._messages.slice(this._activeBoundary.coveredCount),
+        ]
+      : [...this._messages];
     return {
       systemPrompt: this.systemPrompt,
-      forkContextMessages: [...this._messages],
+      forkContextMessages: filterIncompleteToolCalls(projectedMessages),
       model: this.model,
+      llmOptions: { ...this._llmOptions },
     };
   }
 
