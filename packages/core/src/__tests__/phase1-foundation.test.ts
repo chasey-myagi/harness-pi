@@ -7,13 +7,14 @@
 import { describe, it, expect, vi } from "vitest";
 import {
   AgentSession,
+  defineSlot,
   type Hook,
   type HookContext,
   type LogLevel,
   type HarnessTool,
   Type,
 } from "../index.js";
-import { createFakeModel } from "../testing.js";
+import { createFakeModel, createTestContext } from "../testing.js";
 
 /* ──────────────── Phase 1.1 state typing ──────────────── */
 
@@ -25,7 +26,96 @@ declare module "../hook.js" {
   }
 }
 
+type IsAny<T> = 0 extends (1 & T) ? true : false;
+type AssertFalse<T extends false> = T;
+
+function assertSlotTyping(ctx: HookContext): void {
+  const slot = defineSlot<{ count: number }>("phase1-test.slot.typed", {
+    owner: "phase1-test",
+  });
+  const value = ctx.state.get(slot);
+  type Value = typeof value;
+  const _notAny: AssertFalse<IsAny<Value>> = false;
+  const _typed: { count: number } | undefined = value;
+  ctx.state.set(slot, { count: 1 });
+  if (false) {
+    // @ts-expect-error slot writes must match the slot value type.
+    ctx.state.set(slot, "wrong");
+    // @ts-expect-error plain objects cannot impersonate branded StateSlot values.
+    ctx.state.get({ key: "phase1-test.slot.typed", owner: "phase1-test" });
+  }
+  void _notAny;
+  void _typed;
+}
+
 describe("Phase 1: TypedStateMap", () => {
+  it("StateSlot keys are typed and round-trip through ctx.state", () => {
+    const slot = defineSlot<{ count: number }>("phase1-test.slot.counter", {
+      owner: "phase1-test",
+    });
+    const { ctx } = createTestContext();
+
+    const before = ctx.state.get(slot);
+    const typedBefore: { count: number } | undefined = before;
+    expect(typedBefore).toBeUndefined();
+
+    ctx.state.set(slot, { count: 2 });
+    expect(ctx.state.get(slot)).toEqual({ count: 2 });
+    expect(ctx.state.has(slot)).toBe(true);
+    expect(ctx.state.size).toBe(1);
+  });
+
+  it("StateSlot owner is diagnostic only; identical physical keys share one map entry", () => {
+    const ownerA = defineSlot<string>("phase1-test.slot.shared", {
+      owner: "owner-a",
+    });
+    const ownerB = defineSlot<string>("phase1-test.slot.shared", {
+      owner: "owner-b",
+    });
+    const { ctx } = createTestContext();
+
+    ctx.state.set(ownerA, "from-a");
+    expect(ctx.state.get(ownerB)).toBe("from-a");
+    ctx.state.set(ownerB, "from-b");
+    expect(ctx.state.get(ownerA)).toBe("from-b");
+    expect(ctx.state.size).toBe(1);
+  });
+
+  it("StateSlot validate catches dirty writes in dev mode and reports owner + key", () => {
+    const prevEnv = process.env.NODE_ENV;
+    process.env.NODE_ENV = "development";
+    try {
+      const slot = defineSlot<number>("phase1-test.slot.validated", {
+        owner: "validator-owner",
+        validate: (v): v is number => typeof v === "number",
+      });
+      const { ctx } = createTestContext();
+
+      expect(() => {
+        ctx.state.set(slot, "dirty" as unknown as number);
+      }).toThrow(/validator-owner.*phase1-test\.slot\.validated/);
+      expect(ctx.state.has(slot)).toBe(false);
+    } finally {
+      if (prevEnv === undefined) {
+        delete process.env.NODE_ENV;
+      } else {
+        process.env.NODE_ENV = prevEnv;
+      }
+    }
+  });
+
+  it("legacy string-key path still works beside StateSlot overloads", () => {
+    const { ctx } = createTestContext();
+    const dynamicKey: string = "phase1-test.dynamic-string";
+
+    ctx.state.set("phase1-test.counter", 7);
+    ctx.state.set(dynamicKey, { still: "unknown" });
+
+    expect(ctx.state.get("phase1-test.counter")).toBe(7);
+    expect(ctx.state.get(dynamicKey)).toEqual({ still: "unknown" });
+    expect(ctx.state.delete(dynamicKey)).toBe(true);
+  });
+
   it("registered keys are typed; get returns T | undefined without `as`", async () => {
     let observed: number | undefined;
     let observedLabel: string | undefined;

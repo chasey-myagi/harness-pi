@@ -24,6 +24,7 @@ export type {
   ErrorInput,
   // ─── Phase 1: state typing / structured log / config view ───
   HookStateRegistry,
+  StateSlot,
   TypedStateMap,
   HookLogger,
   LogLevel,
@@ -31,6 +32,7 @@ export type {
   // ─── Live boundary（autoCompaction → カーネル連携）───
   ActiveBoundary,
 } from "./hook.js";
+export { defineSlot } from "./hook.js";
 
 // ─────────── Dispatcher (advanced; plugin authors usually don't need) ───────────
 export {
