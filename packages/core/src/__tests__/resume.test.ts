@@ -3,6 +3,7 @@ import { AgentSession } from "../session.js";
 import { MemorySessionStore } from "../session-store.js";
 import { createFakeModel } from "../testing.js";
 import { createUserMessage } from "../types.js";
+import type { Message } from "@earendil-works/pi-ai";
 import type { HarnessTool } from "../types.js";
 
 // NOTE: only valid for string-content messages (all fakes here use string content).
@@ -28,6 +29,32 @@ class FlakyOnceStore extends MemorySessionStore {
     if (this.calls === this.failAtCall) throw new Error("transient store blip");
     return super.appendEntry(sessionId, entry);
   }
+}
+
+async function persistedMessages(store: MemorySessionStore, sessionId: string): Promise<Message[]> {
+  const messages: Message[] = [];
+  for (const node of await store.getPathToLeaf(sessionId)) {
+    if (node.entry.kind === "message") messages.push(node.entry.message);
+  }
+  return messages;
+}
+
+function unpairedToolCallIds(messages: ReadonlyArray<Message>): string[] {
+  const resultIds = new Set<string>();
+  for (const message of messages) {
+    if (message.role === "toolResult") resultIds.add(message.toolCallId);
+  }
+
+  const unpaired: string[] = [];
+  for (const message of messages) {
+    if (message.role !== "assistant") continue;
+    for (const block of message.content) {
+      if (block.type === "toolCall" && !resultIds.has(block.id)) {
+        unpaired.push(block.id);
+      }
+    }
+  }
+  return unpaired;
 }
 
 describe("SessionStore resume", () => {
@@ -140,6 +167,85 @@ describe("SessionStore resume", () => {
     const fake2 = createFakeModel([{ content: [{ type: "text", text: "z" }] }]);
     const resumed = await AgentSession.resume(store, session.id, { model: fake2, tools: [noopTool] });
     expect(resumed.messages.map((m) => m.role)).toEqual(["user", "assistant", "toolResult", "assistant"]);
+    fake.teardown();
+    fake2.teardown();
+  });
+
+  it("repairs a persisted dangling toolCall after a mid-batch abort before continuing", async () => {
+    const store = new MemorySessionStore();
+    const abortingTool: HarnessTool = {
+      name: "aborter",
+      description: "aborts mid-batch",
+      parameters: { type: "object", properties: {} } as never,
+      isConcurrencySafe: () => false,
+      async execute(_args, ctx) {
+        ctx.abort("manual mid-batch abort");
+        return {
+          content: [{ type: "text", text: "aborted" }],
+          isError: true,
+        };
+      },
+    };
+    const skippedTool: HarnessTool = {
+      name: "skipped",
+      description: "skipped after abort",
+      parameters: { type: "object", properties: {} } as never,
+      isConcurrencySafe: () => true,
+      async execute() {
+        return { content: [{ type: "text", text: "should not run" }] };
+      },
+    };
+    const fake = createFakeModel([
+      {
+        content: [
+          { type: "toolCall", id: "tc-abort", name: "aborter", arguments: {} },
+          { type: "toolCall", id: "tc-skipped", name: "skipped", arguments: {} },
+        ],
+      },
+    ]);
+    const session = new AgentSession({
+      model: fake,
+      tools: [abortingTool, skippedTool],
+      store,
+      consoleSink: () => {},
+    });
+
+    const aborted = await session.run("go");
+    expect(aborted.reason).toBe("aborted");
+
+    const beforeResume = await persistedMessages(store, session.id);
+    expect(unpairedToolCallIds(beforeResume)).toEqual(["tc-skipped"]);
+    expect(
+      beforeResume.some(
+        (message) => message.role === "toolResult" && message.toolCallId === "tc-skipped",
+      ),
+    ).toBe(false);
+
+    const fake2 = createFakeModel([{ content: [{ type: "text", text: "after resume" }] }]);
+    const resumed = await AgentSession.resume(store, session.id, {
+      model: fake2,
+      tools: [abortingTool, skippedTool],
+      consoleSink: () => {},
+    });
+
+    const afterResume = await persistedMessages(store, session.id);
+    expect(unpairedToolCallIds(afterResume)).toEqual([]);
+    const synthesized = afterResume.find(
+      (message) => message.role === "toolResult" && message.toolCallId === "tc-skipped",
+    );
+    expect(synthesized?.role).toBe("toolResult");
+    if (synthesized?.role === "toolResult") {
+      expect(synthesized.isError).toBe(true);
+      expect(synthesized.content).toEqual([
+        { type: "text", text: "interrupted before completion (synthesized on resume)" },
+      ]);
+    }
+    expect(unpairedToolCallIds(resumed.messages)).toEqual([]);
+
+    const continued = await resumed.continue();
+    expect(continued.reason).toBe("done");
+    const sentMessages = fake2.getCalls()[0]?.messages ?? [];
+    expect(unpairedToolCallIds(sentMessages)).toEqual([]);
     fake.teardown();
     fake2.teardown();
   });

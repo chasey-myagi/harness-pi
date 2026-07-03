@@ -1097,8 +1097,8 @@ export class AgentSession {
    * 用 summary 接续**（这正是 SessionStore 故意不裁剪、把裁剪留给 resume 的那部分，见 session-store.ts）；
    * `terminal` entry 忽略（仅元数据）。重建出的 messages 标记为「已持久化」，续跑只 append 新消息。
    *
-   * **信任边界**：这是不可信落盘数据进入内核的唯一入口。本方法**信任 store 返回的 `Message` 形状合法**
-   * （schema 校验是 adapter 的职责）；形状坏的 message 会在下一次 `_phaseLlmCall` 喂给 pi-ai 时才炸。
+   * **信任边界**：这是不可信落盘数据进入内核的唯一入口。本方法**信任 store 返回的 `Message` schema 合法**
+   * （schema 校验是 adapter 的职责），但会修复尾部 assistant/toolResult 配对不变量。
    * **引用不可变**：重建直接复用 store 返回的 `Message`/`summary` 引用塞进新 session 的 messages —— 依赖
    * hooks/pipes **不原地 mutate** message 对象（与 SessionStore 的不可变契约一致，见 session-store.ts:SessionEntry）。
    */
@@ -1120,6 +1120,43 @@ export class AgentSession {
         msgs.push(entry.summary);
       }
       // terminal: 忽略
+    }
+    let trailingAssistantIndex = -1;
+    for (let i = msgs.length - 1; i >= 0; i--) {
+      if (msgs[i]?.role === "assistant") {
+        trailingAssistantIndex = i;
+        break;
+      }
+    }
+    const trailingAssistant = msgs[trailingAssistantIndex];
+    if (trailingAssistant?.role === "assistant") {
+      const resolved = new Set<string>();
+      for (let i = trailingAssistantIndex + 1; i < msgs.length; i++) {
+        const message = msgs[i];
+        if (message?.role === "toolResult") resolved.add(message.toolCallId);
+      }
+      for (const block of trailingAssistant.content) {
+        if (block.type !== "toolCall" || resolved.has(block.id)) continue;
+        const toolResult: ToolResultMessage = {
+          role: "toolResult",
+          toolCallId: block.id,
+          toolName: block.name,
+          content: [
+            {
+              type: "text",
+              text: "interrupted before completion (synthesized on resume)",
+            },
+          ],
+          isError: true,
+          timestamp: Date.now(),
+        };
+        await store.appendEntry(sessionId, {
+          kind: "message",
+          message: toolResult,
+        });
+        msgs.push(toolResult);
+        resolved.add(block.id);
+      }
     }
     return new AgentSession({
       ...opts,
