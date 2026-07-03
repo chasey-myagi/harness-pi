@@ -31,6 +31,11 @@ export interface HarnessTool extends Tool {
    */
   aliases?: string[];
 
+  /** Declarative safety metadata for permission gates and capability classifiers. */
+  isReadOnly?: boolean;
+  isDestructive?: boolean;
+  isOpenWorld?: boolean;
+
   /**
    * 标记本工具的某次调用是否可以跟同 turn 其他 concurrency-safe 工具**并行执行**。
    * 默认 `false`（保守）。借鉴 Claude Code Tool.ts:402 的 `isConcurrencySafe`。
