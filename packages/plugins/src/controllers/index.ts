@@ -14,6 +14,7 @@ export type {
 
 export { LeaseQueue } from "./lease-queue.js";
 export type {
+  LeaseQueueAttemptBackoffOptions,
   LeaseQueueOptions,
   LeaseQueueResult,
   QueueItem,
