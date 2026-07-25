@@ -343,6 +343,12 @@ describe("扫描器本身有判别力", () => {
       ["function f({ x } = globalThis) —— Parameter 出口", ["process"]],
       ["globalThis!.x —— unwrap 的 NonNullExpression 分支", ["Buffer"]],
       ["globalThis[`x`] —— 元素访问的模板字面量形态", ["process"]],
+      // ↓ 第六轮 review 补：常量集里这几项此前零标本，删掉它们命中集合分毫不变
+      ["裸 global —— FORBIDDEN_GLOBALS 里的 global", ["global"]],
+      ["(window as T).x —— GLOBAL_OBJECTS 里的 window", ["process"]],
+      ["(self as T).x —— GLOBAL_OBJECTS 里的 self", ["Buffer"]],
+      // global 同属两个集合：它自己命中一次，它上面的属性名再命中一次
+      ["(global as T).x —— global 同属两个集合", ["global", "process"]],
     ];
     const expected = FORMS.flatMap(([, hits]) => hits).sort();
     const found = corpusScan("globals.ts").globals.map((h) => h.what).sort();
@@ -442,8 +448,9 @@ describe("构建产物", () => {
 
   it("产物中 0 处 __tests__ 落点", () => {
     // `__typecheck__` **会**出现在 dist，这是有意的：断言必须挂在 build 主路径上。
-    // `import type` 被完全擦除，所以 `.d.ts` 字面就是 `export {};`，`.js` 是注释加 10 个
-    // 死变量（每条断言一个）。两者都由 files 挡在 tarball 外。
+    // `import type` 被完全擦除，所以 `.d.ts` 字面就是 `export {};`，`.js` 是注释加
+    // 一批死变量（每条断言一个，不写条数：这个数字已经漂过两次）。
+    // 两者都由 files 挡在 tarball 外。
     const leaked = collectDistFiles(DIST)
       .map((f) => relative(PKG_ROOT, f))
       .filter((f) => f.includes("__tests__"));

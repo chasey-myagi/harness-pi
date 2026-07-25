@@ -28,30 +28,36 @@
  *
  * ## 抓不住的盲区（每条都实测过，不许假装覆盖了）
  *
- * 下面说的「抓不住」指的是**双向可赋值断言**这一层。文件末尾的**键集断言**补上了其中两条的
- * 一部分，边界写在那一节的注释里——这里逐条标明现状：
+ * 下面说的「抓不住」指的是**整个断言体系**（双向可赋值 + 键集 + arm 层键集）。
+ * 台账只剩两条——**它曾经有四条，另外两条经实测证明是「漏写」不是「限制」，已补上断言**：
  *
- * 1. **新增可选字段** —— 双向可赋值两个方向都过。键集断言接管了其中一部分：
- *    - 7 个具名类型的顶层 + `Usage["cost"]` + `ToolExecResult.content` 的两个变体：**已钉**。
- *    - `SessionEvent` / `LiveEvent` 各 arm 里的匿名内联对象：**未钉，且钉不住**——
- *      `keyof` 作用在 union 上得到的是各成员键的**交集**（实测 `keyof MirrorSessionEvent`
- *      只有 `"type"`）。这一条才是真正的 `keyof` 固有限制。
- *
- *    > **第五轮的教训，留个记号**：早先这里写的是「未钉 = arm 内匿名对象」，把
- *    > `ToolExecResult.content` 这类**具名类型内部嵌套的匿名对象**漏在了二分的缝里，
- *    > 还顺手把它归到了「`keyof` 的固有限制」名下。三门 review 同时抓到：那不是限制，
- *    > 是**漏写断言**——`Extract<...[number], {type:"image"}>` 之后 `keyof` 完全可用。
- *    > 把漏洞讲成边界，比不写边界更坏。现已补上断言。
- * 2. **镜像多出 core 没有的可选字段** —— 与第 1 条同款分层：已钉的那些由
- *    `MirrorOnlyKeys<..., never>` 挡住，arm 内匿名对象仍然钉不住。
- * 3. **core 新增的 arm 复用既有 discriminant，且结构上是某个既有镜像 arm 的子类型** ——
+ * 1. **core 新增的 arm 复用既有 discriminant，且结构上是某个既有镜像 arm 的子类型** ——
  *    典型形态是「同 `type` 值、多几个必填字段」的兄弟 arm。实测：给 core 并上
  *    `{ type: "error"; phase: ...; message: string; code: number }` 后两个方向都 `EXIT=0`。
- *    这是上表第一行那个限定词的来源。**键集断言帮不上忙**（arm 层）。
- * 4. **`readonly` 修饰符漂移** —— `{ readonly x: number }` 与 `{ x: number }` 互相可赋值，
- *    整层加/去 `readonly` 两个方向都过（实测 `EXIT=0`）。`keyof` 看不见修饰符，键集断言也帮不上忙。
+ *    这是上表第一行那个限定词的来源。
+ *    **arm 层键集断言也帮不上忙**：`Extract<C, {type:"error"}>` 拿到的是两个 arm 的 union，
+ *    `keyof` 作用在 union 上得到**交集**，恰好等于原 arm 的键集，`Exclude` 为空。
+ * 2. **`readonly` 修饰符漂移** —— `{ readonly x: number }` 与 `{ x: number }` 互相可赋值，
+ *    整层加/去 `readonly` 两个方向都过（实测 `EXIT=0`）。`keyof` 看不见修饰符。
  *
- * 剩下的这些只能靠 `session.ts:49-50` 与 `:74-75` 已有的 exhaustive-switch 纪律 + code review 兜住。
+ * ## 曾经写错两次的同一件事，必须留记号
+ *
+ * 「新增可选字段」与「镜像多出可选字段」曾经是台账第 1、2 条，理由都写成
+ * 「`keyof` 的固有限制」。**两次都是假的，而且是同一个失败模式连续两轮：**
+ *
+ * - **第五轮**：说「未钉 = 事件轨各 arm 里的匿名内联对象」，把 `ToolExecResult.content`
+ *   这类具名类型内部嵌套的匿名对象漏在二分的缝里。三门 review 同时实测证伪。
+ *   补断言后定下判据：**能用 `Extract` / 索引访问拎成具体类型的层，必须写断言。**
+ * - **第六轮**：判据是对的，但同一轮的文字转身宣称事件轨 arm「拎不出统一形状」——
+ *   而 `typecheck-fixtures/03`、`04`、`06` 四处**自己就在用**
+ *   `Extract<MirrorSessionEvent, {type:"turn-start"}>`。三门 review 又一次同时抓到。
+ *   现已用 `ArmKeyDrift` 这条 mapped type 机器枚举全部 arm 钉死。
+ *
+ * 教训不是「再仔细一点」，而是：**声称某处「钉不住」之前，先试着把它拎出来钉一遍。**
+ * 拎得动就是漏写，拎不动才是限制。上面剩下的两条都做过这个动作。
+ *
+ * 剩下这两条只能靠 `session.ts:49-50` 与 `:74-75` 已有的 exhaustive-switch 纪律
+ * + code review 兜住。
  *
  * 附带一条**字段级**盲区：`ToolCall.arguments` 在内核侧是 `Record<string, any>`，`any`
  * 与任何类型双向可赋值，该字段的形状不受本断言保护。详见 `core-mirror.ts` 文件头。
@@ -123,19 +129,23 @@ const _toolCallMirrorToCore: PiToolCall = null as unknown as MirrorToolCall;
  * 附带收益：它**关掉了盲区 1 与盲区 2 在这些类型顶层的那一半**——core 新增一个可选字段时
  * `Exclude<keyof Core, keyof Mirror>` 会多出一项，编译失败；双向可赋值断言对此完全无感。
  *
- * **覆盖边界（不要过度声称）**：`keyof` 只看顶层，所以每一层要么显式写一条断言，要么就是裸的。
+ * **判据（第五轮定下、第六轮补上执行）**：一个匿名内联对象是「钉不住」还是「没钉」，
+ * 看**能不能用 `Extract` / 索引访问把它拎成一个具体类型**。能拎出来的就必须写断言，
+ * 不许算进盲区台账。
  *
- *   - **已钉**：7 个具名类型的顶层、`Usage["cost"]`、以及 `ToolExecResult.content` 的
- *     text / image 两个变体。
- *   - **未钉且钉不住**：`SessionEvent` / `LiveEvent` 各 arm 里的匿名内联对象。
- *     `keyof` 作用在 union 上得到的是各成员键的**交集**，没有 `Extract` 的抓手把某个 arm
- *     单独拎出来钉——这一条是 `keyof` 的固有限制，`typecheck-fixtures/06-blind-spots/`
- *     记的就是这一层。
+ * **判据的用法（第六轮补的，因为第六轮正是栽在这一步）**：不要靠读代码判断「能不能拎」——
+ * **直接试着拎一遍**。第六轮那句「事件轨 arm 拎不出统一形状」就是读出来的，
+ * 而 `typecheck-fixtures/03`、`04`、`06` 里现成的
+ * `Extract<MirrorSessionEvent, {type:"turn-start"}>` 只隔了几行。
  *
- * **判据（第五轮定下的）**：一个匿名内联对象是「钉不住」还是「没钉」，看**能不能用
- * `Extract` / 索引访问把它拎成一个具体类型**。能拎出来的就必须写断言，不许算进盲区台账。
- * `ToolExecResult.content` 的变体能拎（`Extract<...[number], {type:"image"}>`），
- * 所以它是漏写；事件轨的 arm 拎不出统一形状，才是真限制。
+ * **当前状态**：
+ *
+ *   - **具名类型顶层**：`CoreOnlyKeys` / `MirrorOnlyKeys` 逐个钉死（下面那批 `_omit*` / `_noExtra*`）。
+ *   - **具名类型内部嵌套的匿名对象**：`Usage["cost"]`、`ToolExecResult.content` 的
+ *     text / image 两变体，同样逐个钉死。
+ *   - **事件轨各 arm**：由 `ArmKeyDrift` 这条 mapped type **机器枚举**钉死，不手写清单。
+ *   - **仍然钉不住**：只剩文件头台账那两条（兄弟 arm 复用 discriminant、`readonly` 漂移），
+ *     两条都做过「试着拎一遍」并失败。
  */
 /** core 有、镜像没有的键。 */
 type CoreOnlyKeys<Core, Mirror> = Exclude<keyof Core, keyof Mirror>;
@@ -155,7 +165,13 @@ type MirrorOnlyKeys<Core, Mirror> = Exclude<keyof Mirror, keyof Core>;
  *
  * 也就是说这个真空通道只对一部分断言开着，但那一部分足够。所以下面每一条都不是自证的——
  * `contract-drift.test.ts` 的「键集断言的类型实参不得被架空」那条静态检查逐条枚举它们的
- * 实参文本，把整条通道堵死，不去分辨哪些恰好被 `tsc` 兜住了。
+ * 实参文本，不去分辨哪些恰好被 `tsc` 兜住了。
+ *
+ * **那条检查的覆盖边界（别说成「整条通道堵死」）**：它匹配的是**字面量** `any`。
+ * 经类型别名间接引入的 `any`（`type Sneaky = any; SameKeys<CoreOnlyKeys<A,B>, Sneaky>`）
+ * 实测 `EXIT=0` 且正则完全看不见——纯文本判据够不着一层间接。要堵它需要类型信息，
+ * 成本远高于收益（这个包里没有任何类型别名指向 `any`，而且新增一个会在 code review 里
+ * 相当显眼）。如实记着，不假装堵住了。
  */
 type SameKeys<A, B> = [A] extends [B] ? ([B] extends [A] ? true : never) : never;
 
@@ -228,6 +244,41 @@ const _noExtraToolContentImage: SameKeys<
   MirrorOnlyKeys<CoreToolContentImage, MirrorToolContentImage>,
   never
 > = true;
+
+/* ── 事件轨各 arm 的键集：机器枚举，不手写 ── */
+
+/**
+ * 第六轮 review 三门同时抓到的洞——**和第五轮是同一个失败模式，只是上移了一层**。
+ *
+ * 第五轮定下的判据是「能用 `Extract` / 索引访问拎成具体类型的层，必须写断言」。
+ * 然后同一轮的文字转身宣称事件轨 arm「拎不出统一形状，这是 `keyof` 的固有限制」。
+ * **那是假的**：两条 union 都以 `type` 字面量判别，
+ * `Extract<CoreSessionEvent, { type: "turn-start" }>` 就是抓手——
+ * 而 `typecheck-fixtures/03`、`04`、`06` 四处**自己就在用这个写法**，
+ * 相隔几行自相矛盾。实测：给 core 的 turn-start arm 加 `hostLatencyMs?: number`，
+ * 双向可赋值两向 `EXIT=0`，逐 arm 键集立刻报 TS2322。
+ *
+ * 修法不是手写 14 条断言——那又是一份手维护清单。用 mapped type 让 TypeScript
+ * **自己枚举** `C["type"] | M["type"]` 的每个成员：加 arm、删 arm 都自动跟上。
+ * 这才符合本包「手维护的清单必须由机器钉住」的论点。
+ *
+ * 结果类型是**发生漂移的 arm 名字的 union**（无漂移时是 `never`），
+ * 所以诊断会直接说出是哪个 arm：`Type '"turn-start"' is not assignable to type 'never'`。
+ */
+type ArmKeyDrift<C extends { type: string }, M extends { type: string }> = {
+  [T in C["type"] | M["type"]]: [
+    | Exclude<keyof Extract<C, { type: T }>, keyof Extract<M, { type: T }>>
+    | Exclude<keyof Extract<M, { type: T }>, keyof Extract<C, { type: T }>>,
+  ] extends [never]
+    ? never
+    : T;
+}[C["type"] | M["type"]];
+
+const _armDriftSessionEvent: never = null as unknown as ArmKeyDrift<
+  CoreSessionEvent,
+  MirrorSessionEvent
+>;
+const _armDriftLiveEvent: never = null as unknown as ArmKeyDrift<CoreLiveEvent, MirrorLiveEvent>;
 
 /*
  * **这里刻意没有一排 `void _x;`。** 早先版本有 26 行，纯仪式：本仓没有 eslint / biome，

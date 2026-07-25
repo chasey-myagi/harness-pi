@@ -41,3 +41,13 @@ export const viaNonNull = globalThis!.Buffer;
 // 元素访问的**模板字面量**形态：`isStringLiteral` 对它为假，修复前零命中。
 export const viaTemplateKey = globalThis[`process`];
 export { fromNested, fromArrayElement };
+
+// ── 第六轮 review 补：常量集里这几项此前零标本，把它们从集合里删掉命中集合分毫不变 ──
+
+// `FORBIDDEN_GLOBALS` 里的 `global`（node 的 CommonJS 全局对象）。
+export const bareGlobal = global;
+// `GLOBAL_OBJECTS` 里 `globalThis` 之外的三个。注意 `global` 同时属于两个集合，
+// 所以下面那行会命中两次（`global` 自己 + 它上面的 `process`）。
+export const viaWindow = (window as unknown as { process: unknown }).process;
+export const viaSelf = (self as unknown as { Buffer: unknown }).Buffer;
+export const viaGlobalObj = (global as unknown as { process: unknown }).process;

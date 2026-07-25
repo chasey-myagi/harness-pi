@@ -150,7 +150,7 @@ describe("注入式变异：断言此刻真的在约束镜像", () => {
   it("镜像删掉一个**可选**字段 → 键集断言报错（双向断言看不见这种）", () => {
     // 这条专门证明键集断言的增量价值：`isError?: boolean` 是可选字段，删掉它之后
     // 双向可赋值断言两个方向都仍然通过（这正是盲区 1）；只有
-    // `OmittedKeys<CoreToolExecResult, MirrorToolExecResult>` 会多出一项而失败。
+    // `CoreOnlyKeys<CoreToolExecResult, MirrorToolExecResult>` 会多出一项而失败。
     const r = compileContractCopy((src) => src.replace("  isError?: boolean;\n", ""));
     expectExitedWithDiagnostics(r, "删可选字段后键集断言应当失败");
     expect(r.output).toContain(ASSERT_REL);
@@ -163,8 +163,9 @@ describe("注入式变异：断言此刻真的在约束镜像", () => {
   });
 
   it("镜像**多出**一个可选字段 → 键集断言报错（覆盖 MirrorOnlyKeys 那一半）", () => {
-    // 上一条打的是 `CoreOnlyKeys` 半边。`MirrorOnlyKeys` 那 12 条此前**零变异覆盖**，
+    // 上一条打的是 `CoreOnlyKeys` 半边，`MirrorOnlyKeys` 那一半此前**零变异覆盖**、
     // 全靠推理——第五轮 review 抓到。这条补上：给镜像加一个 core 没有的可选字段。
+    // （不写条数：这类手维护计数在本包已经漂过四次。）
     const r = compileContractCopy((src) =>
       src.replace("  isError?: boolean;\n", "  isError?: boolean;\n  ghostExtra?: string;\n"),
     );
@@ -189,6 +190,25 @@ describe("注入式变异：断言此刻真的在约束镜像", () => {
     expectExitedWithDiagnostics(r, "content 变体多出可选字段后键集断言应当失败");
     expect(r.output).toContain(ASSERT_REL);
     expect(r.output).toContain("Type 'true' is not assignable to type 'never'");
+  });
+
+  it("事件轨某个 arm 新增可选字段 → arm 层键集断言报错，且诊断说得出是哪个 arm", () => {
+    // 第六轮 review 三门同时抓到：这一层曾被写成「拎不出统一形状、是 keyof 的固有限制」，
+    // 实测是假的——每个 arm 都有唯一 discriminant，`Extract` 就是抓手。
+    // 补的是 `ArmKeyDrift` 这条 mapped type（机器枚举全部 arm，不手写清单）。
+    const r = compileContractCopy((src) =>
+      src.replace(
+        '  | { type: "turn-start"; turnIdx: number }',
+        '  | { type: "turn-start"; turnIdx: number; hostLatencyMs?: number }',
+      ),
+    );
+    expectExitedWithDiagnostics(r, "arm 新增可选字段后 arm 层键集断言应当失败");
+    expect(r.output).toContain(ASSERT_REL);
+    // 断言诊断**点名了那个 arm**——这是 ArmKeyDrift 把结果做成「漂移 arm 名字的 union」
+    // 而不是 boolean 的原因。只断言「报错了」的话，随便哪条断言塌掉都能让这条假通过。
+    expect(r.output, "诊断必须点名漂移的 arm，否则定位不了").toContain(
+      `Type '"turn-start"' is not assignable to type 'never'`,
+    );
   });
 });
 
@@ -406,12 +426,55 @@ describe("断言的静态完整性", () => {
       );
       // 两个实参都不许出现 any——那会让整条断言真空成立。
       for (const [pos, arg] of [["第一", lhs], ["第二", rhs]] as const) {
+        // 覆盖边界：只匹配**字面量** `any`。经类型别名间接引入的（`type Sneaky = any`）
+        // 纯文本判据够不着，assert 文件头如实记着这一点。
         expect(
           /\bany\b/.test(arg),
           `${a.name} 的${pos}个实参含 any，会让 SameKeys 真空成立：${arg}`,
         ).toBe(false);
       }
     }
+  });
+
+  it("每个镜像 interface 都必须配一对键集断言（名单由机器推导，不手维护）", () => {
+    // 上一条只枚举**已存在**的断言——删掉 `_omitRunSummary` 之类任意几条，它照样全绿。
+    // 这条把名单反过来推：从 `core-mirror.ts` 的 AST 读出所有导出的 interface，
+    // 要求每个都有配对的 `_omit*` / `_noExtra*`。新增一个镜像 interface 却忘了写断言，
+    // 这条会红——而且不引入任何手维护的数字。
+    //
+    // 只管 `interface`：`MirrorStopReason` 是字符串 union、`MirrorSessionEvent` /
+    // `MirrorLiveEvent` 是 arm union（由 `ArmKeyDrift` 覆盖），对它们做顶层 `keyof` 没有意义。
+    const mirrorSource = readFileSync(join(PKG_ROOT, "src", "contract", "core-mirror.ts"), "utf8");
+    const mirrorSf = ts.createSourceFile(
+      "core-mirror.ts",
+      mirrorSource,
+      ts.ScriptTarget.ES2022,
+      true,
+      ts.ScriptKind.TS,
+    );
+    const exportedInterfaces: string[] = [];
+    mirrorSf.forEachChild((node) => {
+      if (
+        ts.isInterfaceDeclaration(node) &&
+        node.modifiers?.some((m) => m.kind === ts.SyntaxKind.ExportKeyword)
+      ) {
+        exportedInterfaces.push(node.name.text);
+      }
+    });
+    expect(exportedInterfaces.length, "一个导出的 interface 都没找到——AST 判据可能写错了").toBeGreaterThan(0);
+
+    const assertText = source;
+    const missing: string[] = [];
+    for (const name of exportedInterfaces) {
+      // `MirrorToolExecResult` → `_omitToolExecResult` / `_noExtraToolExecResult`
+      const bare = name.replace(/^Mirror/, "");
+      for (const prefix of ["_omit", "_noExtra"]) {
+        if (!new RegExp(`\\b${prefix}${bare}\\b`).test(assertText)) {
+          missing.push(`${prefix}${bare}（对应 ${name}）`);
+        }
+      }
+    }
+    expect(missing, "有镜像 interface 缺键集断言").toEqual([]);
   });
 });
 

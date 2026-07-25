@@ -15,13 +15,13 @@ GH-153
 - [ ] `SP153-T2` 两个 tsconfig：`tsconfig.json`（只 `exclude` `__tests__`，断言留在主路径上）与 `tsconfig.browser.json`（`types: []` + 额外 `exclude` `__typecheck__`）。Owner: agent. Done when: 两份配置各自可独立 `tsc -p` 运行。Verify: `pnpm --filter @harness-pi/transcript typecheck`.
 - [ ] `SP153-T3` 必填闭包镜像 `src/contract/core-mirror.ts`，文件头带 12 项省略字段清单。Owner: agent. Done when: `SessionEvent` 8 arm 与 `LiveEvent` 6 arm 及其类型闭包全部镜像完成。Verify: `pnpm --filter @harness-pi/transcript exec tsc -p . --noEmit`.
 - [ ] `SP153-T4` 透传水位类型 `src/contract/watermark.ts`（`{seq, epoch}` + 快照信封）。Owner: agent. Done when: 类型存在且注释写明语义与发号权归 GH-154、本包不自造 seq。Verify: `grep -q 'GH-154\|#154' packages/transcript/src/contract/watermark.ts`.
-- [ ] `SP153-T5` 断言文件 `src/contract/__typecheck__/core-mirror.assert.ts` 两层：(a) 双向可赋值——两条事件轨各两向、外加 pi-ai 三个叶子类型各两向；(b) 键集钉死——凡能用 `Extract` / 索引访问拎成具体类型的层，`CoreOnlyKeys` 精确等于省略清单、`MirrorOnlyKeys` 等于 `never`（当前含 7 个具名类型顶层、`Usage["cost"]`、`ToolExecResult.content` 两变体）。文件头写明四种盲区、声明为实测台账，并写明键集层的覆盖边界与「拎得出来就必须写断言」的判据。Owner: agent. Done when: 断言随 `tsc -p .` 一起被编译且通过。Verify: `pnpm --filter @harness-pi/transcript test -- "断言的静态完整性"`.
+- [ ] `SP153-T5` 断言文件 `src/contract/__typecheck__/core-mirror.assert.ts` 两层：(a) 双向可赋值——两条事件轨各两向、外加 pi-ai 三个叶子类型各两向；(b) 键集钉死——凡能用 `Extract` / 索引访问拎成具体类型的层，`CoreOnlyKeys` 精确等于省略清单、`MirrorOnlyKeys` 等于 `never`（当前含 7 个具名类型顶层、`Usage["cost"]`、`ToolExecResult.content` 两变体）。另加 `ArmKeyDrift` mapped type 机器枚举两条事件轨的每个 arm。文件头写明**两条**实测盲区（兄弟 arm / `readonly`），并写明「拎得出来就必须写断言」的判据及其用法（先真的拎一遍，别靠读代码判断）。Owner: agent. Done when: 断言随 `tsc -p .` 一起被编译且通过。Verify: `pnpm --filter @harness-pi/transcript test -- "断言的静态完整性"`.
 - [ ] `SP153-T6` `typecheck` 脚本两段 `&&` 串联，并在 PR 描述中记录相对其余 4 包的三处有意偏离。Owner: agent. Done when: 脚本依次跑完两个 tsconfig 且以 `&&` 串联。Verify: `pnpm --filter @harness-pi/transcript test -- "typecheck 脚本以 && 串联两段"`.
 - [ ] `SP153-T7` 七个 `typecheck-fixtures/`：01-05 期望非零退出（四种漂移 + node 全局探针），06-07 期望零退出（盲区台账 / 公开出口面）。fixture 05 必须 `extends` 真正的 `tsconfig.browser.json`。Owner: agent. Done when: 七个 fixture 各自退出码符合预期。Verify: `pnpm --filter @harness-pi/transcript test -- fixture`.
 - [ ] `SP153-T8` `typecheck-fixtures/scanner-corpus/` 标本语料：说明符各形态（静态 / `export *` / `import=require` / `import()` 类型位 / 模板字面量 / `require()` / 内置子路径 / 相对）、两种三斜线指令、全局访问各形态（裸 / `globalThis.x` / `globalThis["x"]` / cast / 括号 / 简写属性 / 宿主全局解构）、同名属性的负向对照、`.mts`/`.cts`/`.tsx` 扩展名。Owner: agent. Done when: 扫描器命中集合与预期**精确相等**，且负向对照不被误报。Verify: `pnpm --filter @harness-pi/transcript test -- "扫描器本身有判别力"`.
 - [ ] `SP153-T9` `src/__tests__/contract-drift.test.ts`：注入式变异（复制 contract 树 → 制造真实漂移 → 连同真实断言一起编译 → 断言非零退出且报错落在断言文件上）、fixture 表、断言静态完整性、browser 门 `--listFiles`。Owner: agent. Done when: `@ts-nocheck` 与「别名改指镜像自己」两种绕过都会让测试变红。Verify: `pnpm --filter @harness-pi/transcript test -- 注入式变异`.
 - [ ] `SP153-T10` `src/__tests__/import-graph.test.ts`：runtime 图 allowlist（只准相对说明符）+ 全局标识符 + 三斜线指令扫描、包元数据、构建产物（含 dist 非空守卫与断言空壳检查）。Owner: agent. Done when: 四类断言全部覆盖且各有正向对照。Verify: `pnpm --filter @harness-pi/transcript build && pnpm --filter @harness-pi/transcript test -- import-graph`.
-- [ ] `SP153-T11` 提交 `pnpm-lock.yaml` 的 `packages/transcript` importer 条目，并把变异测试临时目录加进 `.gitignore`。Owner: agent. Done when: lockfile 含该 importer 且 `.mutation-tmp/` 已忽略。Verify: `pnpm install --frozen-lockfile && git check-ignore -q .mutation-tmp/`.
+- [ ] `SP153-T11` 提交 `pnpm-lock.yaml` 的 `packages/transcript` importer 条目，并把变异测试临时目录加进 `.gitignore`。Owner: agent. Done when: lockfile 含该 importer，且 `.mutation-tmp/`（变异测试临时目录）与 `.probe*/`（review 期间 agent 建的实验目录）都已忽略。Verify: `pnpm install --frozen-lockfile && git check-ignore -q .mutation-tmp/`.
 - [ ] `SP153-T12` 逐条变异验证每个守门人：人为制造失效 → 确认对应测试变红 → 还原。Owner: agent. Done when: tech.md「变异验证记录」列出的每一条都被抓。Verify: 见 `specs/GH153/tech.md` 的变异验证记录段。
 - [ ] `SP153-T13` 全量绿 + 工作流合同校验。Owner: agent. Done when: 全仓 build/typecheck/test 与 spec 校验均通过。Verify: `pnpm -r build && pnpm -r typecheck && pnpm -r test && python3 checks/check_workflow.py --repo . --spec-dir specs/GH153`.
 - [ ] `SP153-T14` 过 review-gate 三门后提 PR 回 `dev`。Owner: human. Done when: `/test-review` -> `/code-review` -> `/linus-review` 三门 PASS 且 owner 批准。Verify: `python3 checks/review_gate.py --repo . --evidence <evidence.json>`.
@@ -64,6 +64,11 @@ Not run, with reason: 真 Postgres 集成测试未在本地跑（需 `POSTGRES_T
   把 `ToolExecResult.content` 这类**具名类型内部嵌套的匿名对象**漏在缝里，还把「漏写断言」讲成
   「`keyof` 的固有限制」——实测 `Extract<...[number], {type:"image"}>` 之后 `keyof` 完全可用。
   据此定下判据：**能用 `Extract` / 索引访问拎成具体类型的层，必须写断言，不许算进盲区台账**。
+  **R9**（第六轮，三门又一次同时抓到）：**同一个失败模式上移了一层**——判据 R8 是对的，
+  但同一轮的文字转身宣称事件轨 arm「拎不出统一形状」，而 fixture 03/04/06 自己就在用
+  `Extract<MirrorSessionEvent, {type:"turn-start"}>`。盲区台账因此从 4 条缩到 2 条
+  （只剩兄弟 arm 与 `readonly`），arm 层用 `ArmKeyDrift` 机器枚举钉死。
+  **据此补一条纪律（不变量 15）：声称某处钉不住之前，先真的试着把它拎出来钉一遍。**
   逐条依据见 issue 正文「AC 修订记录」。
 - 注入式变异测试会在包根创建 `.mutation-tmp/`（已进 `.gitignore`，`afterAll` 清理）。它比任何静态检查都强：
   静态检查挡的是「断言长得不对」，注入式变异证明的是「断言此刻真的在约束镜像」。

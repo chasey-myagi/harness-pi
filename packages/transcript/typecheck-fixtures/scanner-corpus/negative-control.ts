@@ -28,3 +28,9 @@ const { nested: { process: plainFromNested } } = plainNested;
 const { list: [{ Buffer: plainFromArrayElement }] } = plainNested;
 export function plainFromParam({ process: p } = assigned): unknown { return p; }
 export { plainFromNested, plainFromArrayElement };
+
+// ── 与 GLOBAL_OBJECTS 标本对应的负向对照：源对象**不是**宿主全局，必须不被误报 ──
+// 少了这条，把 isHostGlobalObject 写成恒 true 也能让正向那几条通过。
+declare const notAHostGlobal: { process: string; Buffer: number };
+export const notViaHostGlobal = (notAHostGlobal as unknown as { process: unknown }).process;
+export const notViaHostGlobalElem = notAHostGlobal["Buffer"];

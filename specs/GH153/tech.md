@@ -110,18 +110,24 @@ const _omitToolExecResult: SameKeys<
 
 **覆盖边界（不许过度声称）**：`keyof` 只看顶层，所以**每一层要么显式写一条断言，要么就是裸的**。
 
-| | 状态 |
-| --- | --- |
-| 7 个具名类型的顶层键集 + `Usage["cost"]` + `ToolExecResult.content` 的 text / image 两变体 | ✅ 已钉 |
-| `SessionEvent` / `LiveEvent` 各 arm 里的匿名内联对象 | ❌ **钉不住**——`keyof` 作用在 union 上得到各成员键的交集（实测 `keyof MirrorSessionEvent` 只有 `"type"`），没有 `Extract` 抓手。fixture 06 记的就是这一层 |
-| `readonly` 修饰符漂移 | ❌ **钉不住**——`keyof` 看不见修饰符 |
+| | 状态 | 手段 |
+| --- | --- | --- |
+| 具名类型的顶层键集 | ✅ 已钉 | 逐个 `_omit*` / `_noExtra*`，且**名单由机器推导**（测试从 `core-mirror.ts` 的 AST 读出所有导出 interface，要求每个都有配对断言） |
+| `Usage["cost"]`、`ToolExecResult.content` 的 text / image 变体 | ✅ 已钉 | 同上，索引访问 + `Extract` 拎出来 |
+| `SessionEvent` / `LiveEvent` 的**每一个 arm** | ✅ 已钉 | `ArmKeyDrift` mapped type，让 TS 自己枚举 `C["type"] \| M["type"]`；诊断点名漂移的 arm |
+| 兄弟 arm 复用既有 discriminant | ❌ **钉不住** | `Extract<C,{type:"error"}>` 拿到两个 arm 的 union，`keyof` 得交集，`Exclude` 为空 |
+| `readonly` 修饰符漂移 | ❌ **钉不住** | `keyof` 看不见修饰符 |
 
-> **第五轮的教训**：早先这张表把「未钉」写成「各 arm 里的匿名内联对象」，
-> 于是 `ToolExecResult.content` 这类**具名类型内部嵌套的匿名对象**掉进了二分的缝里，
-> 还被顺手归到「`keyof` 的固有限制」名下。三门 review 同时实测证伪：那不是限制，是**漏写**——
-> `Extract<CoreToolExecResult["content"][number], {type:"image"}>` 之后 `keyof` 完全可用。
-> **判据（据此定下）**：一个匿名内联对象是「钉不住」还是「没钉」，看能不能用 `Extract` /
-> 索引访问把它拎成具体类型。能拎出来的必须写断言，不许算进盲区台账。
+> **同一个失败模式连续栽了两轮，必须记住。**
+> **第五轮**：这张表把「未钉」写成「各 arm 里的匿名内联对象」，于是
+> `ToolExecResult.content` 这类具名类型内部嵌套的匿名对象掉进二分的缝里，
+> 还被归到「`keyof` 的固有限制」名下。三门 review 同时实测证伪。
+> **判据据此定下**：能用 `Extract` / 索引访问拎成具体类型的层，必须写断言。
+> **第六轮**：判据是对的，但同一轮的文字转身宣称事件轨 arm「拎不出统一形状」——
+> 而 fixture 03/04/06 自己就在用 `Extract<MirrorSessionEvent, {type:"turn-start"}>`。
+> 三门 review 又一次同时抓到。
+> **教训不是「再仔细一点」，是：声称某处钉不住之前，先真的试着把它拎出来钉一遍。**
+> 拎得动就是漏写，拎不动才是限制——上面那两条 ❌ 都做过这个动作。
 
 **两段串联的 `typecheck`（相对其余 4 包的唯一脚本偏离）**
 
@@ -178,7 +184,7 @@ fixture 05 **必须 `extends` 真配置**，不能手抄 `lib` / `types`。抄�
 | P14 具名类型顶层键集钉死（省略清单不再是手维护散文） | `__typecheck__/core-mirror.assert.ts` 的 `SameKeys<OmittedKeys<…>>` / `SameKeys<ExtraKeys<…>, never>` | **注入式变异第 5 条**：在副本镜像上删掉 `ToolExecResult.isError?` 这个**可选**字段 → 断言 `tsc` 非零退出，且诊断文本含 `Type 'true' is not assignable to type 'never'`（这句只可能来自 `SameKeys`，因此证明是键集层抓的，不是别的层顺手抓的）。另有对照实验：同一变异下只留 4 条双向断言时 `tsc` **零退出、零诊断** |
 
 **变异验证记录**——每条都实跑过（人为制造该失效 → 确认对应测试变红 → 还原）。
-**列表而不是计数**：计数是手维护的，前两轮 review 各抓到它漂过一次。
+**列表而不是计数**：计数是手维护的，前后已被 review 抓到漂过四次。
 
 - 掏空断言（留注释删声明）
 - 断言加 `// @ts-nocheck`（静态检查与注入式变异各抓一次）
@@ -193,7 +199,14 @@ fixture 05 **必须 `extends` 真配置**，不能手抄 `lib` / `types`。抄�
 - `MirrorLiveEvent` 换成 `any`
 - `files` 去掉 `!**/__typecheck__/**`（`npm pack` 实测抓）
 - fixture 03 失去漂移（验合并 project 的逐条文件锚点）
-- 镜像删掉一个**可选**字段（验键集断言——双向断言对这种完全无感）
+- 镜像删掉一个**可选**字段（验键集断言的 `CoreOnlyKeys` 半边——双向断言对这种完全无感）
+- 镜像**多出**一个可选字段（验 `MirrorOnlyKeys` 半边）
+- `ToolExecResult.content` 变体新增可选字段（第五轮补，修复前实测 `EXIT=0`）
+- 事件轨某个 arm 新增可选字段（第六轮补，修复前实测 `EXIT=0`；断言诊断点名那个 arm）
+- 删掉任意一条键集断言（验完整性检查——名单由 `core-mirror.ts` 的 AST 推导）
+- 键集断言的类型实参写成字面量 `any`（验反真空静态检查）
+- 扫描器 `bindingSourceIsHostGlobal` 退化成单层（验嵌套 / 数组 / 参数三个出口的标本）
+- `GLOBAL_OBJECTS` 砍成只剩 `globalThis` / `FORBIDDEN_GLOBALS` 去掉 `global`（第六轮补，两项此前零标本）
 
 ## 数据流
 

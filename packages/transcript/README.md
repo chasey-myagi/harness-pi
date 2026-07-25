@@ -60,16 +60,21 @@ tsc -p . --noEmit && tsc -p tsconfig.browser.json
 键集断言把那张表写成了类型。
 
 **覆盖边界的判据**：一个类型只要能用 `Extract` / 索引访问**拎成具体类型**，就必须写键集断言，
-不许算进盲区台账。据此已钉：7 个具名类型的顶层、`Usage["cost"]`、`ToolExecResult.content` 的
-text / image 两变体。真正钉不住的只有事件轨各 arm 里的匿名内联对象（`keyof` 作用在 union 上
-得到各成员键的交集，`keyof MirrorSessionEvent` 实测只有 `"type"`），以及 `readonly` 修饰符。
+不许算进盲区台账。据此已钉：具名类型顶层、`Usage["cost"]`、`ToolExecResult.content` 的
+text / image 两变体，以及**事件轨的每一个 arm**——最后这层用一条 mapped type（`ArmKeyDrift`）
+让 TypeScript 自己枚举 `C["type"] | M["type"]`，加 arm 删 arm 都自动跟上，不是手写清单。
+诊断会直接点名漂移的 arm：`Type '"turn-start"' is not assignable to type 'never'`。
 
-> 第五轮 review 三门同时抓到：早先这里写「只到具名类型顶层」，把 `ToolExecResult.content`
-> 漏在缝里，还把漏写讲成了 `keyof` 的固有限制。把漏洞讲成边界，比不写边界更坏。
+> **同一个失败模式连续栽了两轮，记在这里。** 第五轮：写「只到具名类型顶层」，
+> 把 `ToolExecResult.content` 漏在缝里。第六轮：判据改对了，却转身宣称事件轨 arm
+> 「拎不出统一形状」——而 fixture 03/04/06 自己就在用 `Extract<MirrorSessionEvent, {type:"turn-start"}>`。
+> 两次都是三门 review 同时实测证伪。
+> **教训不是「再仔细一点」，是：声称某处钉不住之前，先真的试着把它拎出来钉一遍。**
 
-**已实测的盲区台账**在 `core-mirror.assert.ts` 文件头——包括「复用既有 discriminant 的
-兄弟 arm 两个方向都抓不住」这一条，它是上表第一行必须带限定词的原因。那份清单是实测台账，
-不是穷举证明。
+**已实测的盲区台账**在 `core-mirror.assert.ts` 文件头，**只剩两条**：复用既有 discriminant 的
+兄弟 arm、`readonly` 修饰符漂移。台账曾经有四条，另外两条经实测证明是「漏写」不是「限制」，
+已补上断言——那两条曾让 fixture 06 变成一条**认证假话的通过测试**。
+那份清单是实测台账，不是穷举证明。
 
 ## 发布前置
 
