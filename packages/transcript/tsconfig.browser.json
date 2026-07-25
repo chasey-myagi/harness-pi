@@ -1,0 +1,10 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "lib": ["ES2022", "DOM"],
+    "types": [],
+    "noEmit": true
+  },
+  "//": "browser 门只看**将来会被打进浏览器包的那部分**，所以额外排除 __typecheck__（它 import 内核，是构建期产物）。`types: []` 只关闭「自动包含 @types/*」，拦不住 .d.ts 里显式的 /// <reference types=\"node\" />——vite 的 dist/node/index.d.ts 就带这一行，因此 exclude 掉 __tests__ 是这道门有判别力的前提，由 contract-drift.test.ts 的 --listFiles 断言钉住。",
+  "exclude": ["src/**/__tests__/**", "src/**/__typecheck__/**"]
+}
