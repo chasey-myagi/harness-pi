@@ -1,4 +1,4 @@
-import { afterAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { spawnSync } from "node:child_process";
 import { cpSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -132,13 +132,32 @@ describe("注入式变异：断言此刻真的在约束镜像", () => {
     expect(r.output).toContain(ASSERT_REL);
     expect(r.output).toContain("LiveEvent");
   });
+
+  it("镜像删掉一个**可选**字段 → 键集断言报错（双向断言看不见这种）", () => {
+    // 这条专门证明键集断言的增量价值：`isError?: boolean` 是可选字段，删掉它之后
+    // 双向可赋值断言两个方向都仍然通过（这正是盲区 1）；只有
+    // `OmittedKeys<CoreToolExecResult, MirrorToolExecResult>` 会多出一项而失败。
+    const r = compileContractCopy((src) => src.replace("  isError?: boolean;\n", ""));
+    expectExitedWithDiagnostics(r, "删可选字段后键集断言应当失败");
+    expect(r.output).toContain(ASSERT_REL);
+    // 区分两层断言：可赋值断言失败长成 `Type 'X' is not assignable to type 'Y'`（带类型名），
+    // 键集断言失败长成 `Type 'true' is not assignable to type 'never'`。断言后者，
+    // 才证明是键集这一层抓住的。
+    expect(r.output, "必须是键集断言报的错，不是可赋值断言").toContain(
+      "Type 'true' is not assignable to type 'never'",
+    );
+  });
 });
 
 /* ──────────────────── 正向对照 ──────────────────── */
 
 describe("正向对照", () => {
-  it("runtime 图 + 断言在 build 配置下编译通过", () => {
-    expectCleanCompile(runTsc(".", ["--noEmit"]), "主 tsconfig 应当编译干净");
+  it("runtime 图 + 断言在 build 配置下编译通过，且断言确实在 program 里", () => {
+    // 正向锚点与 browser 门那条对称：光「编译干净」的话，给 tsconfig.json 的 exclude
+    // 加上 `src/**/__typecheck__/**` 也照样干净——断言从此不被编译而无人报警。
+    const r = runTsc(".", ["--noEmit", "--listFiles"]);
+    expectCleanCompile(r, "主 tsconfig 应当编译干净");
+    expect(r.output, "断言文件必须在 build program 内").toContain(ASSERT_REL);
   });
 
   // browser 门的「编译通过」与「program 内容」合并成一次 spawn，见下面
@@ -176,7 +195,12 @@ const DRIFT_ANCHORS: Array<{ file: string; what: string; types: [string, string]
 ];
 
 describe("四种漂移反例", () => {
-  const run = runTsc(join("typecheck-fixtures", "tsconfig.drift.json"));
+  // 惰性求值：写在 describe 体里会在**收集阶段**执行，那次 spawn 落在任何 per-test
+  // timeout 之外——tsc 挂死会表现为整个文件无限期卡住，而不是一条超时失败。
+  let run: TscRun;
+  beforeAll(() => {
+    run = runTsc(join("typecheck-fixtures", "tsconfig.drift.json"));
+  });
 
   it("整个 program 因诊断而失败", () => {
     expectExitedWithDiagnostics(run, "四个漂移 fixture 应当报错");
@@ -189,8 +213,10 @@ describe("四种漂移反例", () => {
       .split("\n")
       .find((l) => l.includes(file) && l.includes("error TS2322"));
     expect(line, `期望 ${file} 上有一条 TS2322\n${run.output}`).toBeDefined();
+    // 断言落在**这一行**上，不是合并输出里——否则 fixture 01 要的 'SessionEvent'
+    // 会被 fixture 02 的诊断满足，「断言失败方向」这句话就不成立。
     for (const t of types) {
-      expect(run.output).toContain(t);
+      expect(line).toContain(t);
     }
   });
 });

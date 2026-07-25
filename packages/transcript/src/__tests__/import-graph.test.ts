@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { spawnSync } from "node:child_process";
 import { existsSync, readFileSync, readdirSync } from "node:fs";
-import { dirname, join, relative } from "node:path";
+import { basename, dirname, join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 import ts from "typescript";
 
@@ -52,6 +52,33 @@ interface Hit {
   file: string;
   line: number;
   what: string;
+}
+
+/**
+ * 解构的源对象是不是宿主全局：`const { process } = globalThis as any` 里那个 `globalThis`。
+ * 沿 BindingElement → BindingPattern → VariableDeclaration / Parameter 上溯取 initializer，
+ * 嵌套解构（`const { a: { process } } = globalThis`）也能一路走到最外层。
+ */
+function bindingSourceIsHostGlobal(
+  element: ts.BindingElement,
+  isHostGlobal: (expr: ts.Expression) => boolean,
+): boolean {
+  let cursor: ts.Node = element;
+  while (cursor.parent) {
+    const parent: ts.Node = cursor.parent;
+    if (ts.isVariableDeclaration(parent) || ts.isParameter(parent)) {
+      return parent.initializer !== undefined && isHostGlobal(parent.initializer);
+    }
+    if (
+      !ts.isBindingElement(parent) &&
+      !ts.isObjectBindingPattern(parent) &&
+      !ts.isArrayBindingPattern(parent)
+    ) {
+      return false;
+    }
+    cursor = parent;
+  }
+  return false;
 }
 
 interface ScanResult {
@@ -133,18 +160,31 @@ function scan(file: string, kind: ts.ScriptKind = ts.ScriptKind.TS): ScanResult 
         isHostGlobalObject(parent.expression);
       // `foo.process` / `{ process: 1 }` / `interface X { process: string }` 里的
       // `process` 只是同名属性，不算引用了全局——除非那个 `foo` 是宿主全局对象。
-      // 「这个标识符处在**某个声明的名字位**上吗」——结构性判据，不是 kind 清单。
-      // 早先版本枚举了 PropertyAccess / PropertyAssignment / PropertySignature /
-      // QualifiedName 四种，随手就漏了 TypeAlias / Method / EnumMember / BindingElement…
-      // 而每漏一种就是一次假红（把无辜的同名属性报成 node 全局）。
-      // 名字位的判据统一成「parent.name / parent.propertyName / QualifiedName.right 指向自己」，
-      // 覆盖所有带名字的声明，将来 TS 加新 kind 也不用跟。
+      //
+      // 判据是「结构性名字位 + 两条外科式例外」，**名字位不等于惰性**：
+      //
+      //   a. `{ process }`（ShorthandPropertyAssignment）：`.name` 承载的是**值引用**，
+      //      不是声明名，它是一次真实的全局读取。
+      //   b. `const { process } = globalThis as any`：解构的 `.name` / `.propertyName`
+      //      同时是「被读的属性」。源对象是宿主全局时是一次全局读取，而且经 cast 之后
+      //      browser 门也放行（类型是 unknown / any），两道门一起溜过去。
+      //
+      // 演化史值得留着：最初枚举 kind（PropertyAccess / PropertyAssignment /
+      // PropertySignature / QualifiedName），漏了 TypeAlias / Method / EnumMember 等，
+      // 每漏一种是一次**假红**；改成「有 .name 就算名字位」后又变成**假绿**，把上面
+      // 两种真阳性吞了。所以这里不再宣称「所有 kind 都不用跟」——那句话是假的。
+      const isShorthandValueRef =
+        ts.isShorthandPropertyAssignment(parent) && parent.name === node;
+      const isHostGlobalDestructure =
+        ts.isBindingElement(parent) && bindingSourceIsHostGlobal(parent, isHostGlobalObject);
       const named = parent as ts.Node & {
         name?: ts.Node;
         propertyName?: ts.Node;
       };
       const isInertPropertyName =
         !viaHostGlobal &&
+        !isShorthandValueRef &&
+        !isHostGlobalDestructure &&
         (named.name === node ||
           named.propertyName === node ||
           (ts.isQualifiedName(parent) && parent.right === node));
@@ -226,7 +266,7 @@ describe("扫描器本身有判别力", () => {
   const corpusScan = (name: string): ScanResult => scan(join(CORPUS, name));
 
   it("收集器认得 .ts / .mts / .cts / .tsx", () => {
-    const names = collectFiles(CORPUS, { excludeDirs: false }).map((f) => f.split("/").pop());
+    const names = collectFiles(CORPUS, { excludeDirs: false }).map((f) => basename(f));
     expect(names).toEqual(
       expect.arrayContaining([
         "ext-probe.cts",
@@ -276,14 +316,20 @@ describe("扫描器本身有判别力", () => {
     ]);
   });
 
-  it("标识符扫描：裸全局、globalThis.x、globalThis[\"x\"]、经 cast / 括号包裹 都看得见", () => {
+  it("标识符扫描：裸全局 / globalThis.x / globalThis[\"x\"] / cast / 括号 / 简写属性 / 宿主全局解构 七种形态", () => {
     const found = corpusScan("globals.ts").globals.map((h) => h.what).sort();
     // 裸 ×2、globalThis.x ×1、globalThis["x"] ×1、(globalThis as T).x ×1、(globalThis).x ×1、
-    // __dirname、__filename
-    expect(found).toEqual(["Buffer", "Buffer", "Buffer", "__dirname", "__filename", "process", "process", "process"].sort());
+    // 简写属性 ×2、从 cast 后的宿主全局解构 ×2、__dirname、__filename
+    expect(found).toEqual(
+      [
+        "Buffer", "Buffer", "Buffer", "Buffer", "Buffer",
+        "process", "process", "process", "process", "process",
+        "__dirname", "__filename",
+      ].sort(),
+    );
   });
 
-  it("负向对照：同名属性 / 字段 / 索引类型不被误报", () => {
+  it("负向对照：同名属性 / 方法 / 成员 / 从普通对象解构 都不被误报", () => {
     // 少了这条，把 isInertPropertyName 写成恒 false 也能让上一条通过。
     expect(corpusScan("negative-control.ts").globals).toEqual([]);
   });
@@ -307,6 +353,8 @@ describe("包元数据", () => {
   it("dependencies 为空——内核与 pi-ai 只能是 devDependencies", () => {
     expect(Object.keys(pkg.dependencies ?? {})).toEqual([]);
     expect(Object.keys(pkg.devDependencies ?? {})).toContain("@harness-pi/core");
+    // 断言文件现在真的 import 了 pi-ai（键集钉死用到它的叶子类型），这条不再是摆设。
+    expect(Object.keys(pkg.devDependencies ?? {})).toContain("@earendil-works/pi-ai");
   });
 
   it("day-1 是 private（npm 发布押后；见 specs/GH153/product.md 发布说明）", () => {

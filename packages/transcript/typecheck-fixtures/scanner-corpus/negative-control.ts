@@ -16,3 +16,8 @@ export interface WithMethods { process(e: string): void }
 export class Projector { process(_e: string): void {} Buffer = 0 }
 export enum Kind { process = "process", Buffer = "buffer" }
 export const { process: renamed } = assigned;
+
+// 从**非**宿主全局解构：`assigned` 是普通对象，这两条必须**不**被误报。
+const { process: fromPlainRenamed } = assigned;
+const { Buffer: fromPlainShorthand } = assigned;
+export { fromPlainRenamed, fromPlainShorthand };

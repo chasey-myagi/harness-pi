@@ -13,8 +13,9 @@ fine `LiveEvent`（经 `session.on()`）两条轨归一成可渲染状态，让�
 1. **不 import 内核**。`dependencies` 为空；`@harness-pi/core` 与 `@earendil-works/pi-ai`
    只出现在 `devDependencies`，且只被断言目录使用。包要能原样跑在浏览器里。
 2. **镜像与内核靠编译期绑住**。`src/contract/core-mirror.ts` 是内核事件的**必填闭包镜像**，
-   由 `src/contract/__typecheck__/core-mirror.assert.ts` 的**双向** assignability 断言钉住。
-   形状漂移 → 构建失败，而不是运行时的空白区域。
+   由 `src/contract/__typecheck__/core-mirror.assert.ts` 钉住，**两层**：
+   **双向 assignability 断言**管结构，**键集断言**（`SameKeys<Exclude<keyof Core, keyof Mirror>, …>`）
+   管「省了哪些、多了哪些」。形状漂移 → 构建失败，而不是运行时的空白区域。
 3. **水位只透传**。`{seq, epoch}` 的语义、发号权、补帧协议全部归 #154；本包不自造 `seq`。
 
 ## 为什么 `typecheck` 多一段
@@ -52,6 +53,13 @@ tsc -p . --noEmit && tsc -p tsconfig.browser.json
 
 另有 `typecheck-fixtures/scanner-corpus/`：给 import 扫描器的标本语料，不被编译。测试断言扫描器
 在它上面的命中集合**精确等于**预期，并配同名属性不被误报的负向对照。
+
+**为什么要第二层（键集断言）**：双向可赋值断言对**可选**字段完全无感——core 新增一个可选字段、
+或镜像多出一个，两个方向都过（实测 `EXIT=0`、零诊断）。而 `core-mirror.ts` 文件头那张「被省略的
+可选字段」表原本是**手维护清单**，与本包「手维护的清单必须由机器钉住」的整个论点自相矛盾。
+键集断言把那张表写成了类型。**它只到具名类型顶层**：`keyof` 作用在 union 上得到的是各成员键的
+交集（`keyof MirrorSessionEvent` 实测只有 `"type"`），所以 arm 内的匿名内联对象钉不住，
+`readonly` 修饰符也钉不住。
 
 **已实测的盲区台账**在 `core-mirror.assert.ts` 文件头——包括「复用既有 discriminant 的
 兄弟 arm 两个方向都抓不住」这一条，它是上表第一行必须带限定词的原因。那份清单是实测台账，

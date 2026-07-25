@@ -44,7 +44,7 @@ packages/transcript/
       index.ts
       core-mirror.ts                     # 必填闭包镜像
       watermark.ts                       # {seq, epoch} 透传水位 + 快照信封
-      __typecheck__/core-mirror.assert.ts # 4 条双向断言
+      __typecheck__/core-mirror.assert.ts # 双向可赋值断言 + 键集钉死
     __tests__/
       contract-drift.test.ts             # 注入式变异 + fixture 子进程 tsc
       import-graph.test.ts               # runtime 图扫描 + dist 产物扫描
@@ -80,7 +80,38 @@ const _sessionEventCoreToMirror: MirrorSessionEvent = null as unknown as CoreSes
 const _sessionEventMirrorToCore: CoreSessionEvent = null as unknown as MirrorSessionEvent;
 ```
 
-`SessionEvent` 与 `LiveEvent` 各两条，共 4 条。
+`SessionEvent` 与 `LiveEvent` 各两条；pi-ai 三个叶子类型各两条（拓扑上冗余，为的是让 pi-ai 的版本漂移
+直接报在自己头上，而不是伪装成一条 `SessionEvent` 的错）。
+
+**键集钉死：把上面那张省略表从散文变成断言**
+
+上面那张「被省略的可选字段」表原本是**手维护清单**——而本包的整个论点就是「手维护的清单必须由机器钉住」，
+同一个包不该有两套标准。所以每个具名类型的顶层键集也写成断言：
+
+```ts
+type OmittedKeys<Core, Mirror> = Exclude<keyof Core, keyof Mirror>;
+type ExtraKeys<Core, Mirror> = Exclude<keyof Mirror, keyof Core>;
+/** 双向 extends：多一个少一个都不行 */
+type SameKeys<A, B> = [A] extends [B] ? ([B] extends [A] ? true : never) : never;
+
+const _omitToolExecResult: SameKeys<
+  OmittedKeys<CoreToolExecResult, MirrorToolExecResult>,
+  "details" | "newMessages"
+> = true;
+```
+
+它**关掉了盲区 1 与盲区 2 在具名类型顶层的那一半**：core 新增可选字段、或镜像多出可选字段，
+双向可赋值断言对此**完全无感**（实测两个方向都 `EXIT=0`），键集断言会让 `Exclude` 多出一项、
+编译失败。
+
+**覆盖边界（不许过度声称）**：`keyof` 只看顶层，且作用在 union 上得到的是各成员键的**交集**
+（实测 `keyof MirrorSessionEvent` 只有 `"type"`）。所以：
+
+| | 已钉 | 未钉 |
+| --- | --- | --- |
+| 8 个具名类型的顶层键集（含 `Usage["cost"]` 那一层） | ✅ | |
+| `SessionEvent` / `LiveEvent` 各 arm 里的**匿名内联对象** | | ❌ 仍是盲区，fixture 06 记的就是这一层 |
+| `readonly` 修饰符漂移 | | ❌ `keyof` 看不见修饰符 |
 
 **两段串联的 `typecheck`（相对其余 4 包的唯一脚本偏离）**
 
@@ -129,17 +160,30 @@ fixture 05 **必须 `extends` 真配置**，不能手抄 `lib` / `types`。抄�
 | P6 core 新增必填字段 → 失败 | 同上 | fixture 03 |
 | P7 core 删除字段 → 失败 | 同上 | fixture 04 |
 | P8 断言不可被绕过 | `__typecheck__` 留在主路径 + `package.json` 的 `typecheck` | **注入式变异**（决定性）：复制 `src/contract/` → 在副本镜像上制造真实漂移 → 连同真实断言文件一起编译 → 断言非零退出且报错落在断言文件上。它一并堵死 `@ts-nocheck`、逐条 `@ts-ignore`、别名改指镜像自己。外加静态检查（无抑制指令、确实从内核 import）与脚本形态断言（`&&` 串联两段） |
-| P9 四种盲区如实记录、且声明为实测台账 | `core-mirror.assert.ts` 文件头 + fixture 06 | fixture 06（期望**零**退出，台账的可执行形态）+「盲区台账关键词未丢失」 |
+| P9 盲区如实记录、且声明为实测台账 | `core-mirror.assert.ts` 文件头 + fixture 06 | fixture 06（期望**零**退出，台账的可执行形态）。**刻意没有文本断言**：台账是一件「盲区变得抓得住就该更新」的东西，给它装 `toContain` 绊网只会让每次正常措辞调整都变红，且失败信息什么都不告诉人。台账被整段删掉时 fixture 06 会红。 |
 | P10 browser 门有判别力 | `tsconfig.browser.json` | fixture 05（`extends` 真配置）+ `--listFiles` 断言（正向锚点 `core-mirror.ts` 在 program 内、无 `@types/node` / `vitest` / `__tests__` / `__typecheck__`） |
 | P11 dist 缺失/半成品都失败 | — | `import-graph.test.ts`「dist/ 存在且不为空」 |
 | P12 公开出口面不断链 | `src/index.ts` / `src/contract/index.ts` 的 `export type *` | fixture 07（期望**零**退出） |
 | P13 扫描器每条分支有正向对照 | `typecheck-fixtures/scanner-corpus/` | 「扫描器本身有判别力」——命中集合**精确匹配**，外加同名属性不误报的负向对照 |
+| P14 具名类型顶层键集钉死（省略清单不再是手维护散文） | `__typecheck__/core-mirror.assert.ts` 的 `SameKeys<OmittedKeys<…>>` / `SameKeys<ExtraKeys<…>, never>` | **注入式变异第 5 条**：在副本镜像上删掉 `ToolExecResult.isError?` 这个**可选**字段 → 断言 `tsc` 非零退出，且诊断文本含 `Type 'true' is not assignable to type 'never'`（这句只可能来自 `SameKeys`，因此证明是键集层抓的，不是别的层顺手抓的）。另有对照实验：同一变异下只留 4 条双向断言时 `tsc` **零退出、零诊断** |
 
-**变异验证记录**（每条都实跑过：人为制造该失效 → 确认对应测试变红 → 还原）：
-掏空断言、`typecheck` 退回单段、browser 门 `types: ["node"]`、browser 门 `exclude: []`、
-runtime 图混入 `import ts from "typescript"`、`dist/` 清空、断言加 `// @ts-nocheck`（静态检查与
-注入式变异各抓一次）、别名改指镜像自己、`src/index.ts` 改成 `export {}`、`typecheck` 的 `&&` 换成 `;`、
-拆掉扫描器的 `ImportEquals` 分支——十二条全部被抓。
+**变异验证记录**——每条都实跑过（人为制造该失效 → 确认对应测试变红 → 还原）。
+**列表而不是计数**：计数是手维护的，前两轮 review 各抓到它漂过一次。
+
+- 掏空断言（留注释删声明）
+- 断言加 `// @ts-nocheck`（静态检查与注入式变异各抓一次）
+- 把 `CoreSessionEvent` 别名改指镜像自己
+- `typecheck` 退回单段形式 / 把 `&&` 换成 `;`
+- browser 门 `types: ["node"]` / `exclude: []`
+- runtime 图混入 `import ts from "typescript"`
+- `dist/` 清空（半成品 build）
+- `src/index.ts` 改成 `export {}`
+- 拆掉扫描器的 `ImportEquals` 分支
+- 拆掉 shorthand 例外 / 拆掉宿主全局解构例外 / 把解构例外做过头（负向对照抓）
+- `MirrorLiveEvent` 换成 `any`
+- `files` 去掉 `!**/__typecheck__/**`（`npm pack` 实测抓）
+- fixture 03 失去漂移（验合并 project 的逐条文件锚点）
+- 镜像删掉一个**可选**字段（验键集断言——双向断言对这种完全无感）
 
 ## 数据流
 
@@ -213,10 +257,13 @@ runtime 图混入 `import ts from "typescript"`、`dist/` 清空、断言加 `//
 
 ## 测试计划
 
-- [ ] Unit tests: `contract-drift.test.ts`（注入式变异 3 条、正向对照 2 条、fixture 7 个
-      —— 01-05 期望非零退出、06-07 期望零退出、断言静态完整性 3 条、browser 门与脚本形态 2 条、
-      台账关键词 7 条）；`import-graph.test.ts`（runtime 图 allowlist 扫描、扫描器标本语料的
-      精确命中匹配 + 负向对照、包元数据、构建产物）。
+- [ ] Unit tests: `contract-drift.test.ts` —— 注入式变异（对照组 + 删 arm + 删深层必填字段 +
+      改坏 LiveEvent arm + 删可选字段验键集断言）、主 tsconfig 与 browser 门的正向对照（各带
+      `--listFiles` 锚点）、fixture 01-05（期望非零退出）与 06-07（期望零退出）、断言的静态完整性
+      （无抑制指令 / 确实从内核 import / 声明齐全）、`typecheck` 脚本形态。
+      `import-graph.test.ts` —— runtime 图 allowlist 扫描、扫描器标本语料的精确命中匹配 + 负向对照、
+      包元数据、构建产物（含 `npm pack --dry-run` 实测 tarball）。
+      **刻意不写条数**：手维护的计数是本包最容易漂的东西，前两轮 review 各抓到一次。
 - [ ] Integration tests: 无（本包此刻无运行时行为）。
 - [ ] Manual verification: `pnpm -r build && pnpm -r typecheck && pnpm -r test` 全绿；
       `python3 checks/check_workflow.py --repo . --spec-dir specs/GH153` 通过。

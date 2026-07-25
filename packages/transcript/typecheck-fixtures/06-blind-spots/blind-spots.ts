@@ -12,13 +12,19 @@ import type { SessionEvent as CoreSessionEvent } from "@harness-pi/core";
 
 import type { MirrorSessionEvent, MirrorUsage } from "../../src/contract/core-mirror.js";
 
-/* ── 盲区 1：闭包内任意层级新增可选字段 ── */
-// 注意落点是 `Usage.cost`，闭包的第三层——盲区不只在 arm 层。
-type DeepOptionalDrift = Omit<MirrorUsage, "cost"> & {
-  cost: MirrorUsage["cost"] & { discount?: number };
+/* ── 盲区 1：**arm 内匿名对象**新增可选字段 ── */
+// 注意落点：`SessionEvent` / `LiveEvent` 各 arm 里的匿名内联对象。具名类型（Usage /
+// AssistantMessage / RunSummary / ToolExecResult 等 8 个）的顶层键集**已被 core-mirror.assert.ts
+// 的键集断言钉死**，那一层不再是盲区；arm 内匿名对象钉不住，因为 `keyof` 作用在 union 上
+// 得到的是各成员键的**交集**（实测 `keyof MirrorSessionEvent` 只有 `"type"`）。
+type TurnStartArmOptional = Extract<MirrorSessionEvent, { type: "turn-start" }> & {
+  hostLatencyMs?: number;
 };
-const _deepOptionalCoreToMirror: MirrorUsage = null as unknown as DeepOptionalDrift;
-const _deepOptionalMirrorToCore: DeepOptionalDrift = null as unknown as MirrorUsage;
+type MirrorWithArmOptional =
+  | Exclude<MirrorSessionEvent, { type: "turn-start" }>
+  | TurnStartArmOptional;
+const _armOptionalCoreToMirror: MirrorWithArmOptional = null as unknown as CoreSessionEvent;
+const _armOptionalMirrorToCore: CoreSessionEvent = null as unknown as MirrorWithArmOptional;
 
 /* ── 盲区 2：镜像多出一个 core 没有的可选字段 ── */
 type TurnStartArm = Extract<MirrorSessionEvent, { type: "turn-start" }>;
@@ -44,8 +50,8 @@ type ReadonlyDrift = { readonly [K in keyof MirrorUsage]: MirrorUsage[K] };
 const _readonlyCoreToMirror: ReadonlyDrift = null as unknown as MirrorUsage;
 const _readonlyMirrorToCore: MirrorUsage = null as unknown as ReadonlyDrift;
 
-void _deepOptionalCoreToMirror;
-void _deepOptionalMirrorToCore;
+void _armOptionalCoreToMirror;
+void _armOptionalMirrorToCore;
 void _extraOptionalCoreToMirror;
 void _extraOptionalMirrorToCore;
 void _siblingCoreToMirror;
