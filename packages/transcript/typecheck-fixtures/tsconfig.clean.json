@@ -1,0 +1,12 @@
+{
+  "extends": "../../../tsconfig.base.json",
+  "compilerOptions": {
+    "noEmit": true
+  },
+  "//": "期望**零**退出的 fixture：06 是盲区台账的可执行形态，07 是公开出口面（源码与 dist 两条路径各一份）。",
+  "include": [
+    "06-blind-spots/blind-spots.ts",
+    "07-public-surface/surface.ts",
+    "07-public-surface/surface-dist.ts"
+  ]
+}

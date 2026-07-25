@@ -1,0 +1,46 @@
+{
+  "name": "@harness-pi/transcript",
+  "version": "0.5.0",
+  "private": true,
+  "description": "Browser-safe transcript projection contract for harness-pi. Mirrors the kernel SessionEvent / LiveEvent tracks behind a bidirectional compile-time assertion.",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/chasey-myagi/harness-pi.git",
+    "directory": "packages/transcript"
+  },
+  "homepage": "https://github.com/chasey-myagi/harness-pi/tree/main/packages/transcript#readme",
+  "bugs": "https://github.com/chasey-myagi/harness-pi/issues",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist",
+    "src",
+    "README.md",
+    "!**/__tests__/**",
+    "!**/__typecheck__/**",
+    "!**/*.test.*"
+  ],
+  "scripts": {
+    "prepublishOnly": "pnpm run build",
+    "build": "tsc -p .",
+    "typecheck": "tsc -p . --noEmit && tsc -p tsconfig.browser.json",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-ai": "^0.74.2",
+    "@harness-pi/core": "workspace:*",
+    "@types/node": "^22.0.0",
+    "typescript": "^5.6.0",
+    "vitest": "^2.1.0"
+  }
+}

@@ -1,0 +1,8 @@
+{
+  "extends": "../../tsconfig.browser.json",
+  "compilerOptions": {
+    "rootDir": "."
+  },
+  "//": "必须 extends 真正的 tsconfig.browser.json，不能手抄一份 lib/types 副本——副本只能证明「ES2022+DOM+types:[] 拒绝 node 全局」这个 TypeScript 自身的事实，对本仓配置零判别力，真配置被改坏时这条守门人纹丝不动。继承之后，把 browser 门的 types 放宽（如 types: [\"node\"]）会让本 fixture 变成零退出、测试变红。注意 exclude 对本 fixture 不起作用（program 里只有 probe.ts），exclude 那一半由 contract-drift.test.ts 的 --listFiles 断言钉住。",
+  "include": ["./probe.ts"]
+}
