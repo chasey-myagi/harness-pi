@@ -100,22 +100,32 @@ tsc -p . --noEmit && tsc -p tsconfig.typecheck.json && tsc -p tsconfig.browser.j
 | 02 | `MSessionEvent \| {type:"ghost-arm"; whatever:string}` | `Mirror → Core` |
 | 03 | `Omit<TurnEndArm, "toolResultsCount">` | `Mirror → Core` |
 | 04 | `TurnStartArm & {ghostField:string}` | `Core → Mirror` |
-| 05 | `process.env` + `Buffer.from()`，browser 配置 | 编译失败（证明 browser 门有判别力） |
+| 05 | `process.env` + `Buffer.from()`，`extends` 真正的 `tsconfig.browser.json` | 编译失败（证明 browser 门有判别力） |
+
+fixture 05 **必须 `extends` 真配置**，不能手抄 `lib` / `types`。抄副本的话，把
+`tsconfig.browser.json` 的 `types` 放宽或 `exclude` 改坏时探针纹丝不动——守门人守的是它自己。
+`exclude` 那一半探针管不到（它的 program 里只有 `probe.ts`），由 `--listFiles` 断言补上。
 
 ## Product-to-Test Mapping
 
 | Product invariant | Implementation area | Verification |
 | --- | --- | --- |
-| P1 runtime 图无 node/跨包说明符 | `src/**` | `import-graph.test.ts` |
-| P2 `dependencies` 为空 | `package.json` | `import-graph.test.ts` |
-| P3 `dist/` 0 处 core 引用 | `tsconfig.json` 的 `exclude` | `import-graph.test.ts`（读 `dist/`，缺失则**失败**而非跳过） |
-| P4 core 新增 arm → 失败 | `__typecheck__/core-mirror.assert.ts` | fixture 01 + `contract-drift.test.ts` |
+| P1 runtime 图只用相对说明符 + 无 node 全局 + 无三斜线 reference | `src/**` | `import-graph.test.ts`「runtime 图 browser-safe」+「扫描器本身有判别力」两个 describe |
+| P2 `dependencies` 为空 | `package.json` | `import-graph.test.ts`「包元数据」 |
+| P3 `dist/` 无非相对说明符 / 无 reference 指令 / 无断言与测试落点 | `tsconfig.json` 的 `exclude` | `import-graph.test.ts`「构建产物」（AST 判定，非文本包含） |
+| P4 core 新增**新 discriminant** arm → 失败 | `__typecheck__/core-mirror.assert.ts` | fixture 01 |
 | P5 镜像多出 arm → 失败 | 同上 | fixture 02 |
 | P6 core 新增必填字段 → 失败 | 同上 | fixture 03 |
 | P7 core 删除字段 → 失败 | 同上 | fixture 04 |
-| P8 断言不允许「存在但不被编译」 | `package.json` 的三段 `typecheck` | fixture 01-04 全部经由与 `tsconfig.typecheck.json` 同源的配置运行 |
-| P9 两种盲区如实记录 | `core-mirror.assert.ts` 文件头 | `contract-drift.test.ts` 断言文件头含盲区说明 |
-| P10 browser 门有判别力 | `tsconfig.browser.json` | fixture 05 |
+| P8 五条失效路径各有测试变红 | `package.json` 三段 `typecheck`、`tsconfig.typecheck.json` 的 `exclude: []` | `contract-drift.test.ts`「双向断言真的挂在 typecheck 上」（`--listFiles` + 脚本内容断言）与「断言声明齐全」（AST 解析 4 条断言） |
+| P9 四种盲区如实记录、且声明为实测台账 | `core-mirror.assert.ts` 文件头 | `contract-drift.test.ts`「断言文件如实记录盲区」 |
+| P10 browser 门有判别力 | `tsconfig.browser.json` | fixture 05（`extends` 真配置）+「browser program 不含 node 类型」的 `--listFiles` 断言 |
+| P11 dist 缺失/半成品都失败 | — | `import-graph.test.ts`「dist/ 存在且不为空」 |
+
+**变异验证记录**（每条都实跑过：人为制造该失效 → 确认对应测试变红 → 还原）：
+掏空断言、`typecheck` 退回单段、删 `tsconfig.typecheck.json` 的 `exclude: []`、
+browser 门 `types: ["node"]`、browser 门 `exclude: []`、runtime 图混入
+`import ts from "typescript"`、`dist/` 清空——七条全部被抓。
 
 ## 数据流
 
@@ -137,8 +147,11 @@ tsc -p . --noEmit && tsc -p tsconfig.typecheck.json && tsc -p tsconfig.browser.j
   **不动**根 `tsconfig.base.json`、`pnpm-workspace.yaml`（glob 已覆盖 `packages/*`）、任何 workflow 文件。
 - Why existing project choices are insufficient: 其余 4 包 build 与 typecheck 共用同一个 tsconfig 且无
   `exclude`；本包必须 `exclude` 断言目录（否则 devDep 泄漏进 `dist`），因而必须补第二段 typecheck，
-  否则断言不被编译。这是**有意偏离**，理由写进 PR 描述。
-- `workspace:^` 而非其余包的 `workspace:*`：`*` 在 `pnpm pack` 时被替换成精确版本，会逼着 5 个包每次一起重发。
+  否则断言不被编译。这是**唯二的有意偏离**（另一处是 `tsconfig.json` 的 `exclude` 本身），理由写进 PR 描述。
+- 依赖协议**沿用房规 `workspace:*`**。曾短暂改成 `workspace:^`，理由是「`*` 在 `pnpm pack` 时被替换成
+  精确版本，会逼着 5 个包每次一起重发」——但本包是 `private: true`，且 `@harness-pi/core` 是它的
+  **devDependency**，永远不会被 pack 或 publish，那条替换行为对它不可能发生。偏离房规而理由用不上，
+  正是 cargo cult 的形状，已改回。摘掉 `private` 时再连同其余 4 包一起讨论。
 
 ## 风险
 

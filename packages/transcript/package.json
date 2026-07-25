@@ -18,7 +18,8 @@
     ".": {
       "types": "./dist/index.d.ts",
       "default": "./dist/index.js"
-    }
+    },
+    "./package.json": "./package.json"
   },
   "files": [
     "dist",
@@ -37,7 +38,7 @@
   },
   "devDependencies": {
     "@earendil-works/pi-ai": "^0.74.2",
-    "@harness-pi/core": "workspace:^",
+    "@harness-pi/core": "workspace:*",
     "@types/node": "^22.0.0",
     "typescript": "^5.6.0",
     "vitest": "^2.1.0"

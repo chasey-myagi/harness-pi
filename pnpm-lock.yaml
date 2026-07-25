@@ -256,7 +256,7 @@ importers:
         specifier: ^0.74.2
         version: 0.74.2(ws@8.21.0)(zod@3.25.76)
       '@harness-pi/core':
-        specifier: workspace:^
+        specifier: workspace:*
         version: link:../core
       '@types/node':
         specifier: ^22.0.0
