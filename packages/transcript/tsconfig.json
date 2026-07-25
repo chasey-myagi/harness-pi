@@ -1,0 +1,10 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "outDir": "./dist",
+    "rootDir": "./src"
+  },
+  "include": ["src/**/*"],
+  "//": "其余 4 包没有 exclude（packages/core/dist/__tests__ 就是这么来的）。本包必须 exclude：__typecheck__ 里 import @harness-pi/core（devDep），不排除会让 dist 带上跨包引用，违反 browser-safe。相应地 typecheck 脚本必须补第二段 tsconfig.typecheck.json，否则断言不被编译。",
+  "exclude": ["src/**/__typecheck__/**", "src/**/__tests__/**"]
+}

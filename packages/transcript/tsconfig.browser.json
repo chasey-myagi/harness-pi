@@ -1,0 +1,9 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "lib": ["ES2022", "DOM"],
+    "types": [],
+    "noEmit": true
+  },
+  "//": "browser 门。`types: []` 只关闭「自动包含 @types/*」，拦不住 .d.ts 里显式的 /// <reference types=\"node\" />——vite 的 dist/node/index.d.ts 就带这一行。因此 program 里只要有任何 import ... from \"vitest\" 的文件，process / Buffer 就会解析成功、这道门恒真。继承 tsconfig.json 的 exclude（__typecheck__ + __tests__）是这道门有判别力的前提；typecheck-fixtures/05-node-global-probe 就是用来证明它确实有判别力的。"
+}

@@ -1,0 +1,8 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true
+  },
+  "//": "把 build 排除掉的 __typecheck__（双向断言）与 __tests__ 重新纳入编译。这是双向断言唯一真正被 tsc 看到的地方——CI 只跑 `pnpm -r typecheck`，所以 package.json 的 typecheck 必须串联本配置。",
+  "exclude": []
+}
