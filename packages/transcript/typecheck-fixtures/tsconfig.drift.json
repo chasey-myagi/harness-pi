@@ -1,0 +1,13 @@
+{
+  "extends": "../../../tsconfig.base.json",
+  "compilerOptions": {
+    "noEmit": true
+  },
+  "//": "四个漂移反例合成一个 program。锚点是「诊断落在哪个文件上」而不是「进程退出码」——后者只要有一条 fixture 报错就满足，前者逐条钉死落点，既省 3 次 spawn 又更精确。",
+  "include": [
+    "01-mirror-missing-arm/drift.ts",
+    "02-mirror-extra-arm/drift.ts",
+    "03-mirror-missing-required-field/drift.ts",
+    "04-mirror-extra-required-field/drift.ts"
+  ]
+}
