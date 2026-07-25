@@ -46,7 +46,7 @@ packages/transcript/
       watermark.ts                       # {seq, epoch} 透传水位 + 快照信封
       __typecheck__/core-mirror.assert.ts # 4 条双向断言
     __tests__/
-      contract-drift.test.ts             # 5 个 fixture 子进程 tsc
+      contract-drift.test.ts             # 注入式变异 + fixture 子进程 tsc
       import-graph.test.ts               # runtime 图扫描 + dist 产物扫描
   typecheck-fixtures/                    # 包根，落在两个 tsconfig 的 include 之外
     01-mirror-missing-arm/                 # 期望非零退出
@@ -174,9 +174,11 @@ runtime 图混入 `import ts from "typescript"`、`dist/` 清空、断言加 `//
 
 ## Dependencies And Configuration
 
-- New dependencies: **无 runtime 依赖**。devDependencies: `@harness-pi/core`（`workspace:^`）、
+- New dependencies: **无 runtime 依赖**。devDependencies: `@harness-pi/core`（`workspace:*`，同房规）、
   `@earendil-works/pi-ai`、`@types/node`、`typescript`、`vitest`——全部与其余包版本区间一致。
-- New configuration: 新包的 4 个配置文件（3 个 tsconfig + vitest.config）；`pnpm-lock.yaml` 新增 importer 条目。
+- New configuration: 新包的 3 个配置文件（`tsconfig.json` + `tsconfig.browser.json` + `vitest.config.ts`），
+  外加 `typecheck-fixtures/` 下两个合并 project 的 tsconfig；`pnpm-lock.yaml` 新增 importer 条目；
+  根 `.gitignore` 加一行 `.mutation-tmp/`。
   **不动**根 `tsconfig.base.json`、`pnpm-workspace.yaml`（glob 已覆盖 `packages/*`）、任何 workflow 文件。
 - Why existing project choices are insufficient: 相对其余 4 包共**三处**有意偏离，逐条写进 PR 描述——
   (1) `tsconfig.json` 有 `exclude`（其余 4 包都没有，`packages/core/dist/__tests__` 就是这么来的），
@@ -190,11 +192,22 @@ runtime 图混入 `import ts from "typescript"`、`dist/` 清空、断言加 `//
 
 - Security: 无。本包不含运行时代码、不碰 IO、不解析不可信输入。
 - Compatibility: 新包不被任何现有包依赖，`pnpm -r` 拓扑序不受影响；不改动任何既有文件的行为。
-- Performance: `typecheck` 由一段变两段（多一次 browser 门 `tsc`）；`test` 起 12 次子进程 `tsc`
-  （7 个 fixture + 2 条正向对照 + 3 条注入式变异），本包测试耗时约 30s。这是本 PR 最实在的一笔成本，
-  换的是「守门人自己被守住」——CI 总时长增量在可接受范围内，若日后成为瓶颈，注入式变异那三条
-  是最先该考虑合并的（它们共用同一份 contract 副本，可改成一次复制多次变异）。
+- Performance: `typecheck` 由一段变两段（多一次 browser 门 `tsc`）。`test` 起 **9 次 `tsc` 子进程**
+  （4 次注入式变异含对照组 / 1 次主 tsconfig 正向对照 / 1 次 01-04 合并 project / 1 次 06-07 合并
+  project / 1 次 05 探针 / 1 次 browser `--listFiles`）外加 1 次 `npm pack --dry-run`。
+  **实测耗时**（本机、`packages/transcript` 内 `vitest run`、机器空闲）：3.5–4.1s，单条最慢约 0.4s，
+  `vitest.config.ts` 的 `testTimeout` 是 60s。**但这个数字对并发负载很敏感**——review 期间三个
+  reviewer agent 同时跑时，同一套测试被测到 85s、单条最慢 16s。CI 上 `pnpm -r test` 并发加载时更接近
+  后者，60s 的余量不像空闲态看上去那么宽。
+  01-04 合并成一个 project 是这轮把 spawn 从 13 降到 9 的主要来源，且判别力更强：锚点从「进程退出码」
+  换成「诊断落在哪个文件上」，逐条钉死落点，而不是「有一条报错就算过」。若日后仍成瓶颈，
+  注入式变异那 4 次是下一个合并对象。
 - Maintenance: fixture 用类型手术而非复制镜像，镜像演化时无需同步修改。
+  **一处前瞻性冲突**：`ToolExecResult.details?: unknown`（`hook.ts:43-46`）被省略的理由是「`unknown`
+  是断言盲区」，但内核那边的注释写明这个字段存在的目的正是「truncation / diff / fullOutputPath 等
+  UI / trace 需要」——也就是本包的用途。M0 省掉它是对的（没有消费者，且 `unknown` 确实不受断言保护），
+  但 #167 的投影器很可能需要它。届时的正确做法是给它一个**结构化的**镜像类型，而不是原样搬 `unknown`。
+  这条写在这里，免得 #167 重新发现一遍。
   **已知残留**：`ToolCall.arguments` 是 `Record<string, any>`，该字段不受断言保护，已在注释中标明。
 - Agent surface drift: 无。
 

@@ -5,6 +5,6 @@
     "rootDir": "./src"
   },
   "include": ["src/**/*"],
-  "//": "只 exclude __tests__（那些文件 value-import vitest 与 node:child_process，会真的进 dist）。__typecheck__ 刻意**不**排除：双向断言必须挂在每次 build 与每次 typecheck 的主路径上。它 emit 出来的 dist/contract/__typecheck__/core-mirror.assert.js 是一个 `export {}` + 4 个 null 的死文件（import type 被完全擦除，.d.ts 字面就是 `export {};`），已由 package.json 的 files 挡在 tarball 外——这点死重量换来「断言不可能被静默停编」，值。",
+  "//": "只 exclude __tests__（那些文件 value-import vitest 与 node:child_process，会真的进 dist）。__typecheck__ 刻意**不**排除：双向断言必须挂在每次 build 与每次 typecheck 的主路径上。它 emit 出来的 dist/contract/__typecheck__/core-mirror.assert.js 是注释加 10 个死变量（两条事件轨各两向 + pi-ai 三个叶子类型各两向），零 import——import type 被完全擦除，对应的 .d.ts 字面就是 `export {};`，已由 package.json 的 files 挡在 tarball 外——这点死重量换来「断言不可能被静默停编」，值。",
   "exclude": ["src/**/__tests__/**"]
 }

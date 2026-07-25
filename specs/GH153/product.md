@@ -129,4 +129,6 @@ GH-153
 ## 发布说明
 
 包 day-1 设 `"private": true`，不进 npm。GH-168 / GH-154 让 `apps/coding-agent` 或 host 依赖本包**之前**，
-必须先摘掉 `private` 并补 `LICENSE`（`README.md` 已随本 issue 落地）——否则 `pnpm -r publish` 后下游装不上。
+必须先摘掉 `private`——否则 `pnpm -r publish` 后下游装不上。`LICENSE` 与 `README.md` 已随本 issue 落地。
+tarball 内容由 `npm pack --dry-run --json` 实测钉住（断言不含 `__typecheck__` / `__tests__` /
+`typecheck-fixtures`，且含 `dist/index.d.ts`）。

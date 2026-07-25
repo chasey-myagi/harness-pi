@@ -9,9 +9,9 @@
  */
 export interface Watermark {
   /** 单调递增的 durable 序号。发号权归 #154。 */
-  seq: number;
+  readonly seq: number;
   /** 发号者的世代标识；变化意味着 `seq` 不再可比、消费者需重取快照。语义归 #154。 */
-  epoch: string;
+  readonly epoch: string;
 }
 
 /**

@@ -31,9 +31,11 @@ const _extraOptionalMirrorToCore: CoreSessionEvent = null as unknown as MirrorEx
 /* ── 盲区 3：core 新增的 arm 复用既有 discriminant，且是既有镜像 arm 的子类型 ── */
 // 这条是上表第一行必须带「且 discriminant 是新的」这个限定词的原因：union 可赋值按
 // 「可赋值给**某个**目标成员」结算，兄弟 arm 会被既有 arm 吞掉。
+// 从真实内核类型推导，不手抄形状——手抄件会在内核那个 arm 一动时静默偏离，
+// 或者因为不相关的原因变红。其余三条盲区本来就是 Omit / Extract / mapped type 推导的。
 type CoreWithSiblingArm =
   | CoreSessionEvent
-  | { type: "error"; phase: "llm" | "tool" | "hook"; message: string; hookName?: string; code: number };
+  | (Extract<CoreSessionEvent, { type: "error" }> & { code: number });
 const _siblingCoreToMirror: MirrorSessionEvent = null as unknown as CoreWithSiblingArm;
 const _siblingMirrorToCore: CoreWithSiblingArm = null as unknown as MirrorSessionEvent;
 

@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { spawnSync } from "node:child_process";
 import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { dirname, join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -105,9 +106,24 @@ function scan(file: string, kind: ts.ScriptKind = ts.ScriptKind.TS): ScanResult 
       }
     }
 
+    /** 剥掉 `(x)` / `x as T` / `x!` —— `(globalThis as any).process` 是绕过的经典写法。 */
+    const unwrap = (expr: ts.Expression): ts.Expression => {
+      let cur = expr;
+      while (
+        ts.isParenthesizedExpression(cur) ||
+        ts.isAsExpression(cur) ||
+        ts.isNonNullExpression(cur)
+      ) {
+        cur = cur.expression;
+      }
+      return cur;
+    };
+
     /** `globalThis.process` / `globalThis["process"]`：宿主对象上的属性名，仍是一次全局访问。 */
-    const isHostGlobalObject = (expr: ts.Expression): boolean =>
-      ts.isIdentifier(expr) && GLOBAL_OBJECTS.has(expr.text);
+    const isHostGlobalObject = (expr: ts.Expression): boolean => {
+      const inner = unwrap(expr);
+      return ts.isIdentifier(inner) && GLOBAL_OBJECTS.has(inner.text);
+    };
 
     if (ts.isIdentifier(node) && FORBIDDEN_GLOBALS.has(node.text)) {
       const parent = node.parent;
@@ -117,11 +133,20 @@ function scan(file: string, kind: ts.ScriptKind = ts.ScriptKind.TS): ScanResult 
         isHostGlobalObject(parent.expression);
       // `foo.process` / `{ process: 1 }` / `interface X { process: string }` 里的
       // `process` 只是同名属性，不算引用了全局——除非那个 `foo` 是宿主全局对象。
+      // 「这个标识符处在**某个声明的名字位**上吗」——结构性判据，不是 kind 清单。
+      // 早先版本枚举了 PropertyAccess / PropertyAssignment / PropertySignature /
+      // QualifiedName 四种，随手就漏了 TypeAlias / Method / EnumMember / BindingElement…
+      // 而每漏一种就是一次假红（把无辜的同名属性报成 node 全局）。
+      // 名字位的判据统一成「parent.name / parent.propertyName / QualifiedName.right 指向自己」，
+      // 覆盖所有带名字的声明，将来 TS 加新 kind 也不用跟。
+      const named = parent as ts.Node & {
+        name?: ts.Node;
+        propertyName?: ts.Node;
+      };
       const isInertPropertyName =
         !viaHostGlobal &&
-        ((ts.isPropertyAccessExpression(parent) && parent.name === node) ||
-          (ts.isPropertyAssignment(parent) && parent.name === node) ||
-          (ts.isPropertySignature(parent) && parent.name === node) ||
+        (named.name === node ||
+          named.propertyName === node ||
           (ts.isQualifiedName(parent) && parent.right === node));
       if (!isInertPropertyName) {
         globals.push({ file: rel, line: at(node), what: node.text });
@@ -214,23 +239,34 @@ describe("扫描器本身有判别力", () => {
     );
   });
 
-  it("说明符扫描：十种形态一个不漏，命中集合精确匹配", () => {
+  it("说明符扫描：八种形态一个不漏，命中集合精确匹配", () => {
+    const expected = [
+      "node:fs", //          import * as ... from
+      "node:os", //          export * from
+      "node:child_process", // import x = require(...)
+      "node:crypto", //      import("...").T 类型位置
+      "node:stream", //      import(`...`) 模板字面量
+      "node:path", //        require(...)
+      "fs/promises", //      内置子路径——正是裸名单 denylist 漏掉的那类
+      "./negative-control.js", // 相对说明符：allowlist 放行，但扫描器必须看得见
+    ];
     const found = corpusScan("specifiers.ts").specifiers.map((h) => h.what).sort();
-    expect(found).toEqual(
-      [
-        "node:fs", //          import * as ... from
-        "node:os", //          export * from
-        "node:child_process", // import x = require(...)
-        "node:crypto", //      import("...").T 类型位置
-        "node:stream", //      import(`...`) 模板字面量
-        "node:path", //        require(...)
-        "fs/promises", //      内置子路径——正是裸名单 denylist 漏掉的那类
-        "./negative-control.js", // 相对说明符：allowlist 放行，但扫描器必须看得见
-      ].sort(),
-    );
-    // allowlist 判据把上面除相对路径外的全部拦下。
+    expect(found).toEqual([...expected].sort());
+    // allowlist 判据把上面除相对路径外的全部拦下。数量从同一份清单推导，不写魔数——
+    // 往清单加标本时这条不会莫名其妙地红。
     const blocked = corpusScan("specifiers.ts").specifiers.filter((h) => !isAllowedSpecifier(h.what));
-    expect(blocked).toHaveLength(7);
+    expect(blocked).toHaveLength(expected.filter((sp) => !isAllowedSpecifier(sp)).length);
+  });
+
+  it("扩展名标本的载荷也被扫到，不是只数文件名", () => {
+    // 光断言 collectFiles 认得 .mts/.cts/.tsx，只证明「文件被收集」，不证明「内容被扫」。
+    for (const [file, spec] of [
+      ["ext-probe.mts", "node:vm"],
+      ["ext-probe.cts", "node:tls"],
+      ["ext-probe.tsx", "node:zlib"],
+    ] as const) {
+      expect(corpusScan(file).specifiers.map((h) => h.what), file).toContain(spec);
+    }
   });
 
   it("三斜线 reference 指令：types 与 path 两种都看得见", () => {
@@ -240,9 +276,11 @@ describe("扫描器本身有判别力", () => {
     ]);
   });
 
-  it("标识符扫描：裸全局、globalThis.x、globalThis[\"x\"] 三种形态都看得见", () => {
+  it("标识符扫描：裸全局、globalThis.x、globalThis[\"x\"]、经 cast / 括号包裹 都看得见", () => {
     const found = corpusScan("globals.ts").globals.map((h) => h.what).sort();
-    expect(found).toEqual(["Buffer", "Buffer", "__dirname", "__filename", "process", "process"].sort());
+    // 裸 ×2、globalThis.x ×1、globalThis["x"] ×1、(globalThis as T).x ×1、(globalThis).x ×1、
+    // __dirname、__filename
+    expect(found).toEqual(["Buffer", "Buffer", "Buffer", "__dirname", "__filename", "process", "process", "process"].sort());
   });
 
   it("负向对照：同名属性 / 字段 / 索引类型不被误报", () => {
@@ -278,7 +316,7 @@ describe("包元数据", () => {
   it("files 里列的文件都真实存在", () => {
     const missing = (pkg.files ?? [])
       .filter((f) => !f.startsWith("!") && !f.includes("*"))
-      .filter((f) => f !== "dist" && !existsSync(join(PKG_ROOT, f)));
+      .filter((f) => !existsSync(join(PKG_ROOT, f)));
     expect(missing, "package.json 的 files 列了不存在的文件").toEqual([]);
   });
 });
@@ -336,20 +374,38 @@ describe("构建产物", () => {
 
   it("产物中 0 处 __tests__ 落点", () => {
     // `__typecheck__` **会**出现在 dist，这是有意的：断言必须挂在 build 主路径上。
-    // 它 emit 出来是 `export {}` + 4 个 null 的死文件（import type 被完全擦除），
-    // 由 package.json 的 files 挡在 tarball 外——下一条测试钉住这一点。
+    // `import type` 被完全擦除，所以 `.d.ts` 字面就是 `export {};`，`.js` 是注释加 10 个
+    // 死变量（两条事件轨各两向 + pi-ai 三个叶子类型各两向）。两者都由 files 挡在 tarball 外。
     const leaked = collectDistFiles(DIST)
       .map((f) => relative(PKG_ROOT, f))
       .filter((f) => f.includes("__tests__"));
     expect(leaked).toEqual([]);
   });
 
-  it("断言产物确实是空壳，且被 files 挡在 tarball 外", () => {
+  it("断言产物确实是空壳", () => {
     const assertJs = join(DIST, "contract", "__typecheck__", "core-mirror.assert.js");
     expect(existsSync(assertJs), "断言应当随 build 一起 emit——它挂在主路径上").toBe(true);
     const declared = readFileSync(join(DIST, "contract", "__typecheck__", "core-mirror.assert.d.ts"), "utf8");
     expect(declared).not.toMatch(/import|require/);
-    const pkg = JSON.parse(readFileSync(join(PKG_ROOT, "package.json"), "utf8")) as { files?: string[] };
-    expect(pkg.files ?? []).toContain("!**/__typecheck__/**");
+  });
+
+  it("断言产物与测试确实被挡在 tarball 外（`npm pack --dry-run` 实测）", () => {
+    // 早先这条断的是 `expect(pkg.files).toContain("!**/__typecheck__/**")`——对一个 JSON
+    // 数组做字符串匹配，一个字也没验 npm 的 files 取反语义是否真的生效。真证据只有
+    // 让 npm 自己算一遍。`private: true` 不阻止 `npm pack`。
+    const r = spawnSync("npm", ["pack", "--dry-run", "--json"], {
+      cwd: PKG_ROOT,
+      encoding: "utf8",
+      maxBuffer: 32 * 1024 * 1024,
+    });
+    if (r.error) throw r.error;
+    expect(r.status, r.stderr).toBe(0);
+    const [tarball] = JSON.parse(r.stdout) as Array<{ files: Array<{ path: string }> }>;
+    const paths = (tarball?.files ?? []).map((f) => f.path);
+    expect(paths.length).toBeGreaterThan(0);
+    expect(paths.filter((f) => f.includes("__typecheck__"))).toEqual([]);
+    expect(paths.filter((f) => f.includes("__tests__"))).toEqual([]);
+    expect(paths.filter((f) => f.includes("typecheck-fixtures"))).toEqual([]);
+    expect(paths, "出口面必须在 tarball 里").toContain("dist/index.d.ts");
   });
 });

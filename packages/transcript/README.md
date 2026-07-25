@@ -29,15 +29,29 @@ tsc -p . --noEmit && tsc -p tsconfig.browser.json
 > **一处曾经写错的地方，留个记号。** 早期版本声称「不 `exclude` `__typecheck__` 的话 devDep
 > `@harness-pi/core` 会泄漏进 `dist`」，并据此加了第三个 tsconfig、三段脚本和两条守它们的测试。
 > **那句话是错的**：`import type` 会被完全擦除，实测 emit 出来的 `.d.ts` 字面就是 `export {};`。
-> 四层机械保证守着一个不存在的问题，现已全部删除。代价换成了 `dist/` 里一个
-> `export {}` 的死文件，由 `files` 的 `!**/__typecheck__/**` 挡在 tarball 外。
+> 四层机械保证守着一个不存在的问题，现已全部删除。代价换成了 `dist/` 里一个死文件
+> （`.d.ts` 字面是 `export {};`，`.js` 是注释加 10 个死变量），由 `files` 的
+> `!**/__typecheck__/**` 挡在 tarball 外——用 `npm pack --dry-run` 实测钉住，不是对 `files`
+> 数组做字符串匹配。
 
 ## 防线与守门人
 
 每条保证都配一条证明「它被绕过时会红」的测试，见 `src/__tests__/contract-drift.test.ts`
-文件头的对照表。`typecheck-fixtures/` 下 5 个 fixture 各自期望 `tsc` **非零退出**：
-01-04 是四种漂移反例（用 `Exclude` / `Omit` / 交叉类型在真实镜像上做类型手术，镜像演化时
-无需同步修改），05 是 browser 门的 node 全局探针。
+文件头的对照表。最强的一条是**注入式变异**：把 `src/contract/` 整树复制出去、在副本的镜像上
+制造真实漂移、连同**真实的**断言文件一起编译，断言非零退出且报错落在断言文件上。它证明的不是
+「断言长得对」，而是「断言此刻真的在约束镜像」——因而一并堵死 `// @ts-nocheck`、逐条
+`// @ts-ignore`、把 `CoreSessionEvent` 别名改指镜像自己这些静态检查堵不住的绕过。
+
+`typecheck-fixtures/` 下 7 个 fixture 分两类：
+
+- **期望 `tsc` 非零退出**：01-04 是四种漂移反例（用 `Exclude` / `Omit` / `Extract` 在真实镜像与
+  真实内核类型上做类型手术，镜像演化时无需同步修改），05 是 browser 门的 node 全局探针
+  （`extends` 真正的 `tsconfig.browser.json`，不是手抄副本）。
+- **期望 `tsc` 零退出**：06 是盲区台账的可执行形态（编译通过**不是**好事，是在如实记录防线边界），
+  07 验证公开类型面能从包入口拿到——源码与 `dist` 两条路径各一份。
+
+另有 `typecheck-fixtures/scanner-corpus/`：给 import 扫描器的标本语料，不被编译。测试断言扫描器
+在它上面的命中集合**精确等于**预期，并配同名属性不被误报的负向对照。
 
 **已实测的盲区台账**在 `core-mirror.assert.ts` 文件头——包括「复用既有 discriminant 的
 兄弟 arm 两个方向都抓不住」这一条，它是上表第一行必须带限定词的原因。那份清单是实测台账，
@@ -45,5 +59,5 @@ tsc -p . --noEmit && tsc -p tsconfig.browser.json
 
 ## 发布前置
 
-包 day-1 是 `private`。#168 / #154 让 `apps/coding-agent` 或 host 依赖本包**之前**，
-必须先摘掉 `private` 并补 `LICENSE`。
+包 day-1 是 `private`（npm 发布押后）。#168 / #154 让 `apps/coding-agent` 或 host 依赖本包
+**之前**，必须先摘掉 `private`。`LICENSE` 与 `README.md` 已随本 issue 落地。

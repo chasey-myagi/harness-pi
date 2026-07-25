@@ -117,6 +117,21 @@ describe("注入式变异：断言此刻真的在约束镜像", () => {
     expectExitedWithDiagnostics(r, "删深层必填字段后断言应当失败");
     expect(r.output).toContain(ASSERT_REL);
   });
+
+  it("镜像改坏 LiveEvent 的一个 arm → 断言文件报错", () => {
+    // 前两条都打在 SessionEvent / Usage 上，LiveEvent 那对断言从没挨过变异——
+    // 只有 AST 形状测试证明它「在语法上存在」，不证明它有约束力。把 MirrorLiveEvent
+    // 换成 any 曾经不会让任何一条测试变红。
+    const r = compileContractCopy((src) =>
+      src.replace(
+        '  | { type: "text_delta"; contentIndex: number; delta: string }\n',
+        '  | { type: "text_delta"; delta: string }\n',
+      ),
+    );
+    expectExitedWithDiagnostics(r, "改坏 LiveEvent arm 后断言应当失败");
+    expect(r.output).toContain(ASSERT_REL);
+    expect(r.output).toContain("LiveEvent");
+  });
 });
 
 /* ──────────────────── 正向对照 ──────────────────── */
@@ -126,70 +141,78 @@ describe("正向对照", () => {
     expectCleanCompile(runTsc(".", ["--noEmit"]), "主 tsconfig 应当编译干净");
   });
 
-  it("runtime 图在 browser 配置下编译通过", () => {
-    expectCleanCompile(runTsc("tsconfig.browser.json"), "runtime 图应当是 browser-safe 的");
-  });
+  // browser 门的「编译通过」与「program 内容」合并成一次 spawn，见下面
+  // 「browser program 含 runtime 图…」那条。
 });
 
 /* ──────────────────── fixture ──────────────────── */
 
-interface FixtureCase {
-  dir: string;
-  what: string;
-  /**
-   * `tsc` 输出里必须出现的片段。只钉错误码与类型名，不钉 TypeScript 诊断的整句措辞——
-   * typescript 是 `^5.6.0` caret 区间，某个 5.x 微调 elaboration 会让这些因无关原因假红。
-   */
-  expects: string[];
-}
-
-const FAILING_FIXTURES: FixtureCase[] = [
+/**
+ * 01-04 合成**一个** program，锚点是「诊断落在哪个文件上」而不是进程退出码。
+ * 后者只要有一条 fixture 报错就满足（靠 `expects` 里的类型名补救）；前者逐条钉死落点，
+ * 既省 3 次 spawn，判别力也更强。
+ */
+const DRIFT_ANCHORS: Array<{ file: string; what: string; types: [string, string] }> = [
   {
-    dir: "01-mirror-missing-arm",
-    what: "core 新增一个带新 discriminant 的 arm，镜像未跟上 → Core → Mirror 失败",
-    expects: ["TS2322", "'SessionEvent'", "'MirrorMissingOneArm'"],
+    file: join("01-mirror-missing-arm", "drift.ts"),
+    what: "core 新增带新 discriminant 的 arm，镜像未跟上 → Core → Mirror 失败",
+    types: ["'SessionEvent'", "'MirrorMissingOneArm'"],
   },
   {
-    dir: "02-mirror-extra-arm",
+    file: join("02-mirror-extra-arm", "drift.ts"),
     what: "镜像多出一个 core 没有的 arm → Mirror → Core 失败",
-    expects: ["TS2322", "'MirrorWithGhostArm'", "'SessionEvent'"],
+    types: ["'MirrorWithGhostArm'", "'SessionEvent'"],
   },
   {
-    dir: "03-mirror-missing-required-field",
+    file: join("03-mirror-missing-required-field", "drift.ts"),
     what: "core 闭包内新增必填字段，镜像未跟上 → Mirror → Core 失败",
-    expects: ["TS2322", "'MirrorMissingRequiredField'", "'SessionEvent'"],
+    types: ["'MirrorMissingRequiredField'", "'SessionEvent'"],
   },
   {
-    dir: "04-mirror-extra-required-field",
+    file: join("04-mirror-extra-required-field", "drift.ts"),
     what: "core 闭包内删除字段，镜像仍保留 → Core → Mirror 失败",
-    expects: ["TS2322", "'SessionEvent'", "'MirrorWithExtraRequiredField'"],
-  },
-  {
-    dir: "05-node-global-probe",
-    what: "node 全局在真正的 browser 配置下必须被拒绝",
-    expects: ["TS2591", "'process'", "'Buffer'"],
+    types: ["'SessionEvent'", "'MirrorWithExtraRequiredField'"],
   },
 ];
 
-/** 期望**零**退出的 fixture：它们记录的是「防线抓不住什么」与「出口面是通的」。 */
-const CLEAN_FIXTURES: Array<{ dir: string; what: string }> = [
-  { dir: "06-blind-spots", what: "四种已实测盲区确实抓不住（台账的可执行形态）" },
-  { dir: "07-public-surface", what: "公开类型面能从包入口拿到" },
-];
+describe("四种漂移反例", () => {
+  const run = runTsc(join("typecheck-fixtures", "tsconfig.drift.json"));
 
-describe.each(FAILING_FIXTURES)("反例 fixture $dir", ({ dir, what, expects }) => {
-  it(`${what}：tsc 必须非零退出`, () => {
-    const r = runTsc(join("typecheck-fixtures", dir));
-    expectExitedWithDiagnostics(r, dir);
-    for (const fragment of expects) {
-      expect(r.output, `期望输出含 ${JSON.stringify(fragment)}`).toContain(fragment);
+  it("整个 program 因诊断而失败", () => {
+    expectExitedWithDiagnostics(run, "四个漂移 fixture 应当报错");
+  });
+
+  it.each(DRIFT_ANCHORS)("$what", ({ file, types }) => {
+    // 只钉错误码与类型名，不钉 TS 诊断的整句措辞——typescript 是 caret 区间，
+    // 某个 5.x 微调 elaboration 会让这些因无关原因假红。
+    const line = run.output
+      .split("\n")
+      .find((l) => l.includes(file) && l.includes("error TS2322"));
+    expect(line, `期望 ${file} 上有一条 TS2322\n${run.output}`).toBeDefined();
+    for (const t of types) {
+      expect(run.output).toContain(t);
     }
   });
 });
 
-describe.each(CLEAN_FIXTURES)("正例 fixture $dir", ({ dir, what }) => {
-  it(`${what}：tsc 必须零退出`, () => {
-    expectCleanCompile(runTsc(join("typecheck-fixtures", dir)), dir);
+describe("期望零退出的 fixture", () => {
+  it("06 盲区台账 + 07 公开出口面（源码与 dist 两条路径）编译干净", () => {
+    // 06 是台账的可执行形态：它编译通过**不是**好事，是在如实记录防线的边界。
+    // 某条盲区哪天变得抓得住，这里会变红——那时该做的是更新台账，不是删掉它。
+    expectCleanCompile(
+      runTsc(join("typecheck-fixtures", "tsconfig.clean.json")),
+      "06/07 应当编译干净",
+    );
+  });
+});
+
+describe("browser 门的判别力探针", () => {
+  it("node 全局在真正的 browser 配置下必须被拒绝", () => {
+    const r = runTsc(join("typecheck-fixtures", "05-node-global-probe"));
+    expectExitedWithDiagnostics(r, "05-node-global-probe");
+    expect(r.output).toContain("TS2591");
+    expect(r.output).toContain("'process'");
+    expect(r.output).toContain("'Buffer'");
   });
 });
 
@@ -279,9 +302,10 @@ describe("browser 门真的关着", () => {
       scripts?: Record<string, string>;
     };
     const segments = (pkg.scripts?.["typecheck"] ?? "").split("&&").map((s) => s.trim());
+    // 只钉「两段、&& 串联、都是 tsc」——钉死整串会让加个 --pretty false 就无缘无故变红。
     expect(segments).toHaveLength(2);
-    expect(segments[0]).toMatch(/^tsc -p \. --noEmit$/);
-    expect(segments[1]).toMatch(/^tsc -p tsconfig\.browser\.json$/);
+    for (const seg of segments) expect(seg).toMatch(/^tsc -p /);
+    expect(segments[1]).toContain("tsconfig.browser.json");
   });
 
   it("browser program 含 runtime 图、不含 node 类型 / 测试 / 断言文件", () => {
@@ -304,22 +328,11 @@ describe("browser 门真的关着", () => {
   });
 });
 
-/* ──────────────────── 盲区台账 ──────────────────── */
-
-describe("盲区台账关键词未丢失", () => {
-  // 台账的**证据**是 fixture 06（期望零退出的可执行形态），不是这几条 `toContain`。
-  // 这里只挡「整段被删掉」，挡不住任何形式的过度声称——describe 名字如实反映这一点。
-  const source = readFileSync(ASSERT_FILE, "utf8");
-
-  it.each([
-    ["闭包内任意层级新增可选字段"],
-    ["镜像多出一个 core 没有的可选字段"],
-    ["复用既有 discriminant"],
-    ["`readonly` 修饰符漂移"],
-    ["Record<string, any>"],
-    ["且它的 discriminant 是新的"],
-    ["不是穷举证明"],
-  ])("台账仍含关键词：%s", (fragment) => {
-    expect(source).toContain(fragment);
-  });
-});
+/*
+ * 盲区台账**没有**文本断言。
+ *
+ * 台账的证据是 fixture 06（期望零退出的可执行形态）——它被删掉的话，「期望零退出的
+ * fixture」那条立刻变红。而 fixture 06 的文件头明确要求「某条盲区哪天变得抓得住就更新台账」：
+ * 给一件**要求被修改**的东西装一圈 `toContain` 绊网，只会让每次正常的措辞调整都变红，
+ * 且失败信息什么都不告诉人。
+ */
