@@ -32,7 +32,7 @@
   "scripts": {
     "prepublishOnly": "pnpm run build",
     "build": "tsc -p .",
-    "typecheck": "tsc -p . --noEmit && tsc -p tsconfig.typecheck.json && tsc -p tsconfig.browser.json",
+    "typecheck": "tsc -p . --noEmit && tsc -p tsconfig.browser.json",
     "test": "vitest run",
     "test:watch": "vitest"
   },

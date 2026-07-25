@@ -1,10 +1,18 @@
 /**
  * 镜像 ↔ 内核的**双向** assignability 断言。
  *
- * 这个目录被 `tsconfig.json` 的 `exclude` 排除（否则 devDep `@harness-pi/core` 会泄漏进
- * `dist`，违反 browser-safe），因此它**只在 `tsconfig.typecheck.json` 下被编译**。
- * `package.json` 的 `typecheck` 脚本必须串联那份配置——CI 只跑 `pnpm -r typecheck`，
- * 断言若不被编译，整条契约就是一纸空文。
+ * 这个文件**在主路径上**：`tsconfig.json` 只 `exclude` 掉 `__tests__`，所以每次
+ * `pnpm build`（`tsc -p .`）与每次 `pnpm typecheck`（`tsc -p . --noEmit`）都会编译它。
+ * 代价是 `dist/contract/__typecheck__/core-mirror.assert.js` 这个死文件，已由
+ * `package.json` 的 `files` 挡在 tarball 外。
+ *
+ * > **一条曾经写错、必须留个记号的事**：本文件早期版本（及 README、两份 spec、两个
+ * > tsconfig 注释）都声称「不 exclude `__typecheck__` 的话 devDep `@harness-pi/core`
+ * > 会泄漏进 `dist`」。**这是错的**——`import type` 会被完全擦除，实测 emit 出来的
+ * > `.d.ts` 字面就是 `export {};`，`.js` 里零 import（`tsconfig.base.json` 也没开
+ * > `verbatimModuleSyntax`）。那句假前提曾撑起一个额外的 `tsconfig.typecheck.json`、
+ * > 一段三段串联的 `typecheck` 脚本、以及两条只为守它们而存在的测试——四层机械保证
+ * > 守一个不存在的问题。现已全部删除。真正需要 `exclude` 的只有 `__tests__`。
  *
  * ## 四种能抓住的漂移
  *
@@ -47,9 +55,20 @@
  * `pnpm --filter @harness-pi/transcript typecheck` 会对着陈旧 dist 假绿。这是仓库
  * 「build 先于 typecheck/test」铁律的既有代价。
  */
+import type {
+  AssistantMessage as PiAssistantMessage,
+  ToolCall as PiToolCall,
+  Usage as PiUsage,
+} from "@earendil-works/pi-ai";
 import type { SessionEvent as CoreSessionEvent, LiveEvent as CoreLiveEvent } from "@harness-pi/core";
 
-import type { MirrorSessionEvent, MirrorLiveEvent } from "../core-mirror.js";
+import type {
+  MirrorAssistantMessage,
+  MirrorLiveEvent,
+  MirrorSessionEvent,
+  MirrorToolCall,
+  MirrorUsage,
+} from "../core-mirror.js";
 
 /* SessionEvent：两个方向 */
 const _sessionEventCoreToMirror: MirrorSessionEvent = null as unknown as CoreSessionEvent;
@@ -59,7 +78,28 @@ const _sessionEventMirrorToCore: CoreSessionEvent = null as unknown as MirrorSes
 const _liveEventCoreToMirror: MirrorLiveEvent = null as unknown as CoreLiveEvent;
 const _liveEventMirrorToCore: CoreLiveEvent = null as unknown as MirrorLiveEvent;
 
+/*
+ * pi-ai 叶子类型：三个直接双向断言。
+ *
+ * 这三条在拓扑上是冗余的——叶子类型经 `AssistantMessage` 被上面两条间接绑住了。留着是为了
+ * 把 pi-ai 的版本漂移**直接**暴露在这里，而不是让它伪装成一条 `SessionEvent` 的错。
+ * 顺带让 `@earendil-works/pi-ai` 这条 devDependency 名副其实：在此之前它从未被 import 过，
+ * 对 typecheck 零作用。
+ */
+const _assistantMessageCoreToMirror: MirrorAssistantMessage = null as unknown as PiAssistantMessage;
+const _assistantMessageMirrorToCore: PiAssistantMessage = null as unknown as MirrorAssistantMessage;
+const _usageCoreToMirror: MirrorUsage = null as unknown as PiUsage;
+const _usageMirrorToCore: PiUsage = null as unknown as MirrorUsage;
+const _toolCallCoreToMirror: MirrorToolCall = null as unknown as PiToolCall;
+const _toolCallMirrorToCore: PiToolCall = null as unknown as MirrorToolCall;
+
 void _sessionEventCoreToMirror;
 void _sessionEventMirrorToCore;
 void _liveEventCoreToMirror;
 void _liveEventMirrorToCore;
+void _assistantMessageCoreToMirror;
+void _assistantMessageMirrorToCore;
+void _usageCoreToMirror;
+void _usageMirrorToCore;
+void _toolCallCoreToMirror;
+void _toolCallMirrorToCore;

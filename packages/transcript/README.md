@@ -17,18 +17,20 @@ fine `LiveEvent`（经 `session.on()`）两条轨归一成可渲染状态，让�
    形状漂移 → 构建失败，而不是运行时的空白区域。
 3. **水位只透传**。`{seq, epoch}` 的语义、发号权、补帧协议全部归 #154；本包不自造 `seq`。
 
-## 为什么 `typecheck` 是三段
+## 为什么 `typecheck` 多一段
 
 ```
-tsc -p . --noEmit && tsc -p tsconfig.typecheck.json && tsc -p tsconfig.browser.json
+tsc -p . --noEmit && tsc -p tsconfig.browser.json
 ```
 
-其余 4 个包 build 与 typecheck 共用同一个 tsconfig。本包的 build tsconfig 必须
-`exclude` 掉 `__typecheck__`（否则 devDep `@harness-pi/core` 会泄漏进 `dist`），
-于是 `tsc -p . --noEmit` 也跳过断言目录——而 CI 只跑 `pnpm -r typecheck`。
-不串联，双向断言永不被编译。
+第一段与其余 4 包一致，双向断言就挂在里面——`tsconfig.json` 只 `exclude` 掉 `__tests__`，
+所以每次 `build` 与每次 `typecheck` 都会编译断言。第二段是 browser 门。
 
-变异验证：删掉镜像的 `continuation-check` arm 后，三段脚本 `exit=2`，单段脚本 `exit=0`。
+> **一处曾经写错的地方，留个记号。** 早期版本声称「不 `exclude` `__typecheck__` 的话 devDep
+> `@harness-pi/core` 会泄漏进 `dist`」，并据此加了第三个 tsconfig、三段脚本和两条守它们的测试。
+> **那句话是错的**：`import type` 会被完全擦除，实测 emit 出来的 `.d.ts` 字面就是 `export {};`。
+> 四层机械保证守着一个不存在的问题，现已全部删除。代价换成了 `dist/` 里一个
+> `export {}` 的死文件，由 `files` 的 `!**/__typecheck__/**` 挡在 tarball 外。
 
 ## 防线与守门人
 

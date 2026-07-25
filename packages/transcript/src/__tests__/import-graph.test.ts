@@ -105,26 +105,38 @@ function scan(file: string, kind: ts.ScriptKind = ts.ScriptKind.TS): ScanResult 
       }
     }
 
+    /** `globalThis.process` / `globalThis["process"]`：宿主对象上的属性名，仍是一次全局访问。 */
+    const isHostGlobalObject = (expr: ts.Expression): boolean =>
+      ts.isIdentifier(expr) && GLOBAL_OBJECTS.has(expr.text);
+
     if (ts.isIdentifier(node) && FORBIDDEN_GLOBALS.has(node.text)) {
       const parent = node.parent;
-      // `foo.process` 里的 `process` 是属性名，不算引用了全局……
-      let isInertPropertyName =
-        (ts.isPropertyAccessExpression(parent) && parent.name === node) ||
-        (ts.isPropertyAssignment(parent) && parent.name === node) ||
-        (ts.isPropertySignature(parent) && parent.name === node) ||
-        (ts.isQualifiedName(parent) && parent.right === node);
-      // ……但 `globalThis.process` / `window.process` 例外：那正是一次 node 全局访问。
-      if (
-        isInertPropertyName &&
+      const viaHostGlobal =
         ts.isPropertyAccessExpression(parent) &&
-        ts.isIdentifier(parent.expression) &&
-        GLOBAL_OBJECTS.has(parent.expression.text)
-      ) {
-        isInertPropertyName = false;
-      }
+        parent.name === node &&
+        isHostGlobalObject(parent.expression);
+      // `foo.process` / `{ process: 1 }` / `interface X { process: string }` 里的
+      // `process` 只是同名属性，不算引用了全局——除非那个 `foo` 是宿主全局对象。
+      const isInertPropertyName =
+        !viaHostGlobal &&
+        ((ts.isPropertyAccessExpression(parent) && parent.name === node) ||
+          (ts.isPropertyAssignment(parent) && parent.name === node) ||
+          (ts.isPropertySignature(parent) && parent.name === node) ||
+          (ts.isQualifiedName(parent) && parent.right === node));
       if (!isInertPropertyName) {
         globals.push({ file: rel, line: at(node), what: node.text });
       }
+    }
+
+    // 元素访问形式：`globalThis["process"]` 的 `"process"` 是 StringLiteral 不是
+    // Identifier，上面那条永远不触发。
+    if (
+      ts.isElementAccessExpression(node) &&
+      isHostGlobalObject(node.expression) &&
+      ts.isStringLiteral(node.argumentExpression) &&
+      FORBIDDEN_GLOBALS.has(node.argumentExpression.text)
+    ) {
+      globals.push({ file: rel, line: at(node), what: node.argumentExpression.text });
     }
 
     ts.forEachChild(node, visit);
@@ -179,19 +191,70 @@ describe("runtime 图 browser-safe", () => {
   });
 });
 
+/**
+ * 扫描器的十来条分支，对着「4 个纯类型文件、零命中」的 runtime 图全都恒真——写错了也永远
+ * 发现不了。`typecheck-fixtures/scanner-corpus/` 是给它们准备的标本，断言命中集合**精确等于**
+ * 预期集合（不是「非空」）。新增扫描分支时必须同时加标本。
+ */
 describe("扫描器本身有判别力", () => {
-  it("说明符扫描：能在断言目录里扫出 @harness-pi/core", () => {
-    const assertFile = join(SRC_ROOT, "contract", "__typecheck__", "core-mirror.assert.ts");
-    const hits = scan(assertFile).specifiers.filter((h) => !isAllowedSpecifier(h.what));
-    expect(hits.map((h) => h.what)).toContain("@harness-pi/core");
+  const CORPUS = join(PKG_ROOT, "typecheck-fixtures", "scanner-corpus");
+  const corpusScan = (name: string): ScanResult => scan(join(CORPUS, name));
+
+  it("收集器认得 .ts / .mts / .cts / .tsx", () => {
+    const names = collectFiles(CORPUS, { excludeDirs: false }).map((f) => f.split("/").pop());
+    expect(names).toEqual(
+      expect.arrayContaining([
+        "ext-probe.cts",
+        "ext-probe.mts",
+        "ext-probe.tsx",
+        "globals.ts",
+        "negative-control.ts",
+        "specifiers.ts",
+      ]),
+    );
   });
 
-  it("标识符扫描：能在 node 全局探针里扫出 process 与 Buffer", () => {
-    // 反向对照。runtime 图现在是 4 个纯类型文件、0 个标识符命中——正是最容易掩盖
-    // 「isInertPropertyName 写错到把所有命中都吞掉」这类 bug 的状态。
-    const probe = join(PKG_ROOT, "typecheck-fixtures", "05-node-global-probe", "probe.ts");
-    const found = new Set(scan(probe).globals.map((h) => h.what));
-    expect([...found].sort()).toEqual(["Buffer", "process"]);
+  it("说明符扫描：十种形态一个不漏，命中集合精确匹配", () => {
+    const found = corpusScan("specifiers.ts").specifiers.map((h) => h.what).sort();
+    expect(found).toEqual(
+      [
+        "node:fs", //          import * as ... from
+        "node:os", //          export * from
+        "node:child_process", // import x = require(...)
+        "node:crypto", //      import("...").T 类型位置
+        "node:stream", //      import(`...`) 模板字面量
+        "node:path", //        require(...)
+        "fs/promises", //      内置子路径——正是裸名单 denylist 漏掉的那类
+        "./negative-control.js", // 相对说明符：allowlist 放行，但扫描器必须看得见
+      ].sort(),
+    );
+    // allowlist 判据把上面除相对路径外的全部拦下。
+    const blocked = corpusScan("specifiers.ts").specifiers.filter((h) => !isAllowedSpecifier(h.what));
+    expect(blocked).toHaveLength(7);
+  });
+
+  it("三斜线 reference 指令：types 与 path 两种都看得见", () => {
+    expect(corpusScan("specifiers.ts").referenceDirectives.map((h) => h.what).sort()).toEqual([
+      'path="./phantom.d.ts"',
+      'types="node"',
+    ]);
+  });
+
+  it("标识符扫描：裸全局、globalThis.x、globalThis[\"x\"] 三种形态都看得见", () => {
+    const found = corpusScan("globals.ts").globals.map((h) => h.what).sort();
+    expect(found).toEqual(["Buffer", "Buffer", "__dirname", "__filename", "process", "process"].sort());
+  });
+
+  it("负向对照：同名属性 / 字段 / 索引类型不被误报", () => {
+    // 少了这条，把 isInertPropertyName 写成恒 false 也能让上一条通过。
+    expect(corpusScan("negative-control.ts").globals).toEqual([]);
+  });
+
+  it("真实断言目录里扫得出 @harness-pi/core", () => {
+    const hits = scan(join(SRC_ROOT, "contract", "__typecheck__", "core-mirror.assert.ts")).specifiers;
+    expect(hits.map((h) => h.what)).toEqual(
+      expect.arrayContaining(["@harness-pi/core", "@earendil-works/pi-ai"]),
+    );
   });
 });
 
@@ -258,7 +321,7 @@ describe("构建产物", () => {
       .filter((h) => !isAllowedSpecifier(h.what));
     expect(
       fmt(hits),
-      "devDep 从 __typecheck__ 泄漏进了 dist——检查 tsconfig.json 的 exclude",
+      "dist 产物引到了包外——检查 tsconfig.json 的 include/exclude 与 runtime 图 allowlist",
     ).toEqual([]);
   });
 
@@ -271,10 +334,22 @@ describe("构建产物", () => {
     expect(fmt(hits)).toEqual([]);
   });
 
-  it("产物中 0 处 __typecheck__ / __tests__ 落点", () => {
+  it("产物中 0 处 __tests__ 落点", () => {
+    // `__typecheck__` **会**出现在 dist，这是有意的：断言必须挂在 build 主路径上。
+    // 它 emit 出来是 `export {}` + 4 个 null 的死文件（import type 被完全擦除），
+    // 由 package.json 的 files 挡在 tarball 外——下一条测试钉住这一点。
     const leaked = collectDistFiles(DIST)
       .map((f) => relative(PKG_ROOT, f))
-      .filter((f) => f.includes("__typecheck__") || f.includes("__tests__"));
+      .filter((f) => f.includes("__tests__"));
     expect(leaked).toEqual([]);
+  });
+
+  it("断言产物确实是空壳，且被 files 挡在 tarball 外", () => {
+    const assertJs = join(DIST, "contract", "__typecheck__", "core-mirror.assert.js");
+    expect(existsSync(assertJs), "断言应当随 build 一起 emit——它挂在主路径上").toBe(true);
+    const declared = readFileSync(join(DIST, "contract", "__typecheck__", "core-mirror.assert.d.ts"), "utf8");
+    expect(declared).not.toMatch(/import|require/);
+    const pkg = JSON.parse(readFileSync(join(PKG_ROOT, "package.json"), "utf8")) as { files?: string[] };
+    expect(pkg.files ?? []).toContain("!**/__typecheck__/**");
   });
 });

@@ -13,3 +13,6 @@ dist/
 # 研究产物(放 ~/Dev/coding/reports 或本地;不入源码库,避免 git add -A 误扫)
 reports/
 .firecrawl/
+
+# @harness-pi/transcript 的注入式变异测试临时目录(每次测试自建自删;列此防中断时残留被误提交)
+.mutation-tmp/

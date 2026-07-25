@@ -1,0 +1,8 @@
+{
+  "extends": "../../../../tsconfig.base.json",
+  "compilerOptions": {
+    "noEmit": true
+  },
+  "//": "期望**零**退出：本 fixture 记录的是断言抓不住的形态。与 01-04 对称。",
+  "include": ["./blind-spots.ts"]
+}

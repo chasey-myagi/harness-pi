@@ -5,5 +5,6 @@
     "types": [],
     "noEmit": true
   },
-  "//": "browser 门。`types: []` 只关闭「自动包含 @types/*」，拦不住 .d.ts 里显式的 /// <reference types=\"node\" />——vite 的 dist/node/index.d.ts 就带这一行。因此 program 里只要有任何 import ... from \"vitest\" 的文件，process / Buffer 就会解析成功、这道门恒真。继承 tsconfig.json 的 exclude（__typecheck__ + __tests__）是这道门有判别力的前提；typecheck-fixtures/05-node-global-probe 就是用来证明它确实有判别力的。"
+  "//": "browser 门只看**将来会被打进浏览器包的那部分**，所以额外排除 __typecheck__（它 import 内核，是构建期产物）。`types: []` 只关闭「自动包含 @types/*」，拦不住 .d.ts 里显式的 /// <reference types=\"node\" />——vite 的 dist/node/index.d.ts 就带这一行，因此 exclude 掉 __tests__ 是这道门有判别力的前提，由 contract-drift.test.ts 的 --listFiles 断言钉住。",
+  "exclude": ["src/**/__tests__/**", "src/**/__typecheck__/**"]
 }

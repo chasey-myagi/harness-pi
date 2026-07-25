@@ -35,9 +35,8 @@ GH-153
 ```
 packages/transcript/
   package.json               # private:true, dependencies 为空, devDeps 挂 core/pi-ai
-  tsconfig.json              # build：exclude __typecheck__ 与 __tests__
-  tsconfig.typecheck.json    # exclude: [] —— 把断言与测试都纳入编译
-  tsconfig.browser.json      # lib ES2022+DOM, types: [], exclude 同 build
+  tsconfig.json              # build + typecheck：只 exclude __tests__（断言在主路径上）
+  tsconfig.browser.json      # lib ES2022+DOM, types: [], 额外 exclude __typecheck__
   vitest.config.ts
   src/
     index.ts
@@ -49,12 +48,15 @@ packages/transcript/
     __tests__/
       contract-drift.test.ts             # 5 个 fixture 子进程 tsc
       import-graph.test.ts               # runtime 图扫描 + dist 产物扫描
-  typecheck-fixtures/                    # 包根，落在三个 tsconfig 的 include 之外
-    01-mirror-missing-arm/
+  typecheck-fixtures/                    # 包根，落在两个 tsconfig 的 include 之外
+    01-mirror-missing-arm/                 # 期望非零退出
     02-mirror-extra-arm/
     03-mirror-missing-required-field/
     04-mirror-extra-required-field/
     05-node-global-probe/
+    06-blind-spots/                        # 期望**零**退出：盲区台账的可执行形态
+    07-public-surface/                     # 期望**零**退出：包入口出口面
+    scanner-corpus/                        # 不编译，只给 import 扫描器当标本
 ```
 
 **镜像形态：必填闭包，不是「可渲染子集」**
@@ -80,14 +82,21 @@ const _sessionEventMirrorToCore: CoreSessionEvent = null as unknown as MirrorSes
 
 `SessionEvent` 与 `LiveEvent` 各两条，共 4 条。
 
-**三段串联的 `typecheck`（相对其余 4 包的有意偏离）**
+**两段串联的 `typecheck`（相对其余 4 包的唯一脚本偏离）**
 
 ```
-tsc -p . --noEmit && tsc -p tsconfig.typecheck.json && tsc -p tsconfig.browser.json
+tsc -p . --noEmit && tsc -p tsconfig.browser.json
 ```
 
-第一段等价于其余包；第二段把 `__typecheck__` 与 `__tests__` 纳入编译（`exclude: []`），是断言真正
-被执行的地方；第三段是 browser 门。CI 只跑 `pnpm -r typecheck`，不写成串联则第二、三段永不执行。
+第一段等价于其余包，**双向断言就挂在里面**——`tsconfig.json` 只 `exclude` 掉 `__tests__`，
+断言目录留在主路径上，因此 `build` 与 `typecheck` 都会编译它。第二段是 browser 门。
+
+> **修正记录**：早期版本用的是三段，第二段 `tsconfig.typecheck.json` 存在的理由是
+> 「不 `exclude` `__typecheck__` 的话 devDep `@harness-pi/core` 会泄漏进 `dist`」。
+> 这句话**是错的**——`import type` 被完全擦除，实测 emit 出的 `.d.ts` 字面就是 `export {};`，
+> `.js` 里零 import（`tsconfig.base.json` 未开 `verbatimModuleSyntax`）。那条假前提曾撑起
+> 一个额外 tsconfig、一段额外脚本和两条只为守它们而存在的测试。现已全部删除；
+> 代价换成 `dist/` 里一个 `export {}` 的死文件，由 `files` 的 `!**/__typecheck__/**` 挡在 tarball 外。
 
 **fixture 用类型手术，不复制镜像**
 
@@ -101,6 +110,8 @@ tsc -p . --noEmit && tsc -p tsconfig.typecheck.json && tsc -p tsconfig.browser.j
 | 03 | `Omit<TurnEndArm, "toolResultsCount">` | `Mirror → Core` |
 | 04 | `TurnStartArm & {ghostField:string}` | `Core → Mirror` |
 | 05 | `process.env` + `Buffer.from()`，`extends` 真正的 `tsconfig.browser.json` | 编译失败（证明 browser 门有判别力） |
+| 06 | 四种已实测盲区各写一对双向断言 | **编译通过**——台账的可执行形态，与 01-04 对称 |
+| 07 | 从包入口 import 全部公开类型并各用一次 | **编译通过**——出口断链会让它变红 |
 
 fixture 05 **必须 `extends` 真配置**，不能手抄 `lib` / `types`。抄副本的话，把
 `tsconfig.browser.json` 的 `types` 放宽或 `exclude` 改坏时探针纹丝不动——守门人守的是它自己。
@@ -112,20 +123,23 @@ fixture 05 **必须 `extends` 真配置**，不能手抄 `lib` / `types`。抄�
 | --- | --- | --- |
 | P1 runtime 图只用相对说明符 + 无 node 全局 + 无三斜线 reference | `src/**` | `import-graph.test.ts`「runtime 图 browser-safe」+「扫描器本身有判别力」两个 describe |
 | P2 `dependencies` 为空 | `package.json` | `import-graph.test.ts`「包元数据」 |
-| P3 `dist/` 无非相对说明符 / 无 reference 指令 / 无断言与测试落点 | `tsconfig.json` 的 `exclude` | `import-graph.test.ts`「构建产物」（AST 判定，非文本包含） |
+| P3 `dist/` 无非相对说明符 / 无 reference 指令 / 无 `__tests__` 落点；断言产物是空壳且被 `files` 挡在 tarball 外 | `tsconfig.json` 的 `exclude` + `package.json` 的 `files` | `import-graph.test.ts`「构建产物」（AST 判定，非文本包含） |
 | P4 core 新增**新 discriminant** arm → 失败 | `__typecheck__/core-mirror.assert.ts` | fixture 01 |
 | P5 镜像多出 arm → 失败 | 同上 | fixture 02 |
 | P6 core 新增必填字段 → 失败 | 同上 | fixture 03 |
 | P7 core 删除字段 → 失败 | 同上 | fixture 04 |
-| P8 五条失效路径各有测试变红 | `package.json` 三段 `typecheck`、`tsconfig.typecheck.json` 的 `exclude: []` | `contract-drift.test.ts`「双向断言真的挂在 typecheck 上」（`--listFiles` + 脚本内容断言）与「断言声明齐全」（AST 解析 4 条断言） |
-| P9 四种盲区如实记录、且声明为实测台账 | `core-mirror.assert.ts` 文件头 | `contract-drift.test.ts`「断言文件如实记录盲区」 |
-| P10 browser 门有判别力 | `tsconfig.browser.json` | fixture 05（`extends` 真配置）+「browser program 不含 node 类型」的 `--listFiles` 断言 |
+| P8 断言不可被绕过 | `__typecheck__` 留在主路径 + `package.json` 的 `typecheck` | **注入式变异**（决定性）：复制 `src/contract/` → 在副本镜像上制造真实漂移 → 连同真实断言文件一起编译 → 断言非零退出且报错落在断言文件上。它一并堵死 `@ts-nocheck`、逐条 `@ts-ignore`、别名改指镜像自己。外加静态检查（无抑制指令、确实从内核 import）与脚本形态断言（`&&` 串联两段） |
+| P9 四种盲区如实记录、且声明为实测台账 | `core-mirror.assert.ts` 文件头 + fixture 06 | fixture 06（期望**零**退出，台账的可执行形态）+「盲区台账关键词未丢失」 |
+| P10 browser 门有判别力 | `tsconfig.browser.json` | fixture 05（`extends` 真配置）+ `--listFiles` 断言（正向锚点 `core-mirror.ts` 在 program 内、无 `@types/node` / `vitest` / `__tests__` / `__typecheck__`） |
 | P11 dist 缺失/半成品都失败 | — | `import-graph.test.ts`「dist/ 存在且不为空」 |
+| P12 公开出口面不断链 | `src/index.ts` / `src/contract/index.ts` 的 `export type *` | fixture 07（期望**零**退出） |
+| P13 扫描器每条分支有正向对照 | `typecheck-fixtures/scanner-corpus/` | 「扫描器本身有判别力」——命中集合**精确匹配**，外加同名属性不误报的负向对照 |
 
 **变异验证记录**（每条都实跑过：人为制造该失效 → 确认对应测试变红 → 还原）：
-掏空断言、`typecheck` 退回单段、删 `tsconfig.typecheck.json` 的 `exclude: []`、
-browser 门 `types: ["node"]`、browser 门 `exclude: []`、runtime 图混入
-`import ts from "typescript"`、`dist/` 清空——七条全部被抓。
+掏空断言、`typecheck` 退回单段、browser 门 `types: ["node"]`、browser 门 `exclude: []`、
+runtime 图混入 `import ts from "typescript"`、`dist/` 清空、断言加 `// @ts-nocheck`（静态检查与
+注入式变异各抓一次）、别名改指镜像自己、`src/index.ts` 改成 `export {}`、`typecheck` 的 `&&` 换成 `;`、
+拆掉扫描器的 `ImportEquals` 分支——十二条全部被抓。
 
 ## 数据流
 
@@ -134,6 +148,25 @@ browser 门 `types: ["node"]`、browser 门 `exclude: []`、runtime 图混入
 
 ## 备选方案
 
+- **直接转发内核类型**（`export type { SessionEvent, LiveEvent } from "@harness-pi/core"`，不建镜像）
+  —— **这是最强的一条对手，必须认真否决而不是略过**。它的诱惑力很实在：没有镜像就没有漂移，
+  于是四条盲区台账、四条双向断言、五个 fixture、`core-mirror.ts` 那张 12 行省略字段表**全部蒸发**。
+  而且它在技术上是可行的：实测 `import type { SessionEvent, LiveEvent } from "@harness-pi/core"`
+  在**本仓自己那份 `tsconfig.browser.json`**（`lib: ["ES2022","DOM"]` + `types: []`）下 `EXIT=0`，
+  core 连同 pi-ai 的类型闭包在类型层面确实是 browser-safe 的；`import type` 被完全擦除，运行时零字节。
+
+  **否决理由不是「browser 不安全」，是「这份契约要跨序列化边界」。** 本包的消费面是 #154 的
+  host↔surface 通道（WS / JSON）与 Electron 的 renderer 边界，内核类型里有三样东西过不去：
+  `RunSummary.error?: Error`（宿主类，`JSON.stringify` 后只剩 `{}`，`structuredClone` 会抛）、
+  `ToolExecResult.details?: unknown`（消费者无从解构）、`ToolExecResult.newMessages?: Message[]`
+  （把整条 `Message` union 连同 `toolResult` / `user` 分支拖进 UI 契约）。转发方案下这些字段
+  **在类型上存在但在传输后不存在**，是最难查的一类 bug；镜像方案下它们从签名里就不存在。
+
+  次要代价：转发会让 `dist/*.d.ts` 带上非相对说明符，消费者必须能解析 core 的类型，
+  等于 core 成为类型层面的 peer dependency，本 spec 的「`dependencies` 为空」不变量要重写。
+
+  **若 #167 发现镜像维护成本高于预期，这条应当被重新评估**——重估的判据是「契约是否仍需跨进程」，
+  不是「镜像烦不烦」。
 - **非对称 `Pick` 镜像**（只镜像可渲染子集，单向断言）：抓不住「core 删除字段」与「镜像多出 arm」两类漂移。
   其主张的好处（不把 `Error` / `Message[]` 拖进契约）在对称方案下同样成立——那些字段都是**可选**的，直接省略即可。
 - **运行时 schema 校验（zod / typebox）**：把编译期问题推迟到运行时，且给 browser 包引入运行时依赖。否决。
@@ -145,9 +178,9 @@ browser 门 `types: ["node"]`、browser 门 `exclude: []`、runtime 图混入
   `@earendil-works/pi-ai`、`@types/node`、`typescript`、`vitest`——全部与其余包版本区间一致。
 - New configuration: 新包的 4 个配置文件（3 个 tsconfig + vitest.config）；`pnpm-lock.yaml` 新增 importer 条目。
   **不动**根 `tsconfig.base.json`、`pnpm-workspace.yaml`（glob 已覆盖 `packages/*`）、任何 workflow 文件。
-- Why existing project choices are insufficient: 其余 4 包 build 与 typecheck 共用同一个 tsconfig 且无
-  `exclude`；本包必须 `exclude` 断言目录（否则 devDep 泄漏进 `dist`），因而必须补第二段 typecheck，
-  否则断言不被编译。这是**唯二的有意偏离**（另一处是 `tsconfig.json` 的 `exclude` 本身），理由写进 PR 描述。
+- Why existing project choices are insufficient: 相对其余 4 包共**三处**有意偏离，逐条写进 PR 描述——
+  (1) `tsconfig.json` 有 `exclude`（其余 4 包都没有，`packages/core/dist/__tests__` 就是这么来的），
+  只排除 `__tests__`；(2) `typecheck` 多一段 browser 门；(3) `exports` 多一个 `./package.json` 出口。
 - 依赖协议**沿用房规 `workspace:*`**。曾短暂改成 `workspace:^`，理由是「`*` 在 `pnpm pack` 时被替换成
   精确版本，会逼着 5 个包每次一起重发」——但本包是 `private: true`，且 `@harness-pi/core` 是它的
   **devDependency**，永远不会被 pack 或 publish，那条替换行为对它不可能发生。偏离房规而理由用不上，
@@ -157,16 +190,20 @@ browser 门 `types: ["node"]`、browser 门 `exclude: []`、runtime 图混入
 
 - Security: 无。本包不含运行时代码、不碰 IO、不解析不可信输入。
 - Compatibility: 新包不被任何现有包依赖，`pnpm -r` 拓扑序不受影响；不改动任何既有文件的行为。
-- Performance: `typecheck` 由一段变三段，本包多两次 `tsc`；`test` 多 5 次子进程 `tsc`。CI 增量为秒级。
+- Performance: `typecheck` 由一段变两段（多一次 browser 门 `tsc`）；`test` 起 12 次子进程 `tsc`
+  （7 个 fixture + 2 条正向对照 + 3 条注入式变异），本包测试耗时约 30s。这是本 PR 最实在的一笔成本，
+  换的是「守门人自己被守住」——CI 总时长增量在可接受范围内，若日后成为瓶颈，注入式变异那三条
+  是最先该考虑合并的（它们共用同一份 contract 副本，可改成一次复制多次变异）。
 - Maintenance: fixture 用类型手术而非复制镜像，镜像演化时无需同步修改。
   **已知残留**：`ToolCall.arguments` 是 `Record<string, any>`，该字段不受断言保护，已在注释中标明。
 - Agent surface drift: 无。
 
 ## 测试计划
 
-- [ ] Unit tests: `contract-drift.test.ts`（5 个 fixture 子进程 `tsc`，全部期望非零退出；外加断言文件头
-      含两种盲区说明）；`import-graph.test.ts`（runtime 图说明符/标识符扫描、`package.json` 的
-      `dependencies` 为空、`dist/` 无 core 引用）。
+- [ ] Unit tests: `contract-drift.test.ts`（注入式变异 3 条、正向对照 2 条、fixture 7 个
+      —— 01-05 期望非零退出、06-07 期望零退出、断言静态完整性 3 条、browser 门与脚本形态 2 条、
+      台账关键词 7 条）；`import-graph.test.ts`（runtime 图 allowlist 扫描、扫描器标本语料的
+      精确命中匹配 + 负向对照、包元数据、构建产物）。
 - [ ] Integration tests: 无（本包此刻无运行时行为）。
 - [ ] Manual verification: `pnpm -r build && pnpm -r typecheck && pnpm -r test` 全绿；
       `python3 checks/check_workflow.py --repo . --spec-dir specs/GH153` 通过。

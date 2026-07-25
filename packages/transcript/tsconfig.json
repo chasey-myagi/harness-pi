@@ -5,6 +5,6 @@
     "rootDir": "./src"
   },
   "include": ["src/**/*"],
-  "//": "其余 4 包没有 exclude（packages/core/dist/__tests__ 就是这么来的）。本包必须 exclude：__typecheck__ 里 import @harness-pi/core（devDep），不排除会让 dist 带上跨包引用，违反 browser-safe。相应地 typecheck 脚本必须补第二段 tsconfig.typecheck.json，否则断言不被编译。",
-  "exclude": ["src/**/__typecheck__/**", "src/**/__tests__/**"]
+  "//": "只 exclude __tests__（那些文件 value-import vitest 与 node:child_process，会真的进 dist）。__typecheck__ 刻意**不**排除：双向断言必须挂在每次 build 与每次 typecheck 的主路径上。它 emit 出来的 dist/contract/__typecheck__/core-mirror.assert.js 是一个 `export {}` + 4 个 null 的死文件（import type 被完全擦除，.d.ts 字面就是 `export {};`），已由 package.json 的 files 挡在 tarball 外——这点死重量换来「断言不可能被静默停编」，值。",
+  "exclude": ["src/**/__tests__/**"]
 }
