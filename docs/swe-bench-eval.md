@@ -199,6 +199,7 @@ class HarnessPiAdapter(BaseClawAdapter):
 
 - ✅ harnesspi adapter 落地、注册（claw-swe-bench 分支 `harnesspi-adapter`，commit 2d6c94f）。
 - ✅ 单实例 smoke：`sphinx-doc__sphinx-8721`（qwen-plus）→ **官方评估 resolved 1/1**。
-- ✅ Pilot（6 有效实例，qwen-plus）→ **3/6 resolved（50%）**；连 smoke 跨 7 实例 4/7≈57%。每实例 input token 15万–66万、**零缓存命中**。详见 [`reports/swe-bench-pilot-2026-06-17.md`](../reports/swe-bench-pilot-2026-06-17.md)。
+- ✅ Pilot（6 有效实例，qwen-plus）→ **3/6 resolved（50%）**；连 smoke 跨 7 实例 4/7≈57%。每实例 input token 15万–66万。
+  - ⚠️ pilot 当时记的「零缓存命中」**未经证实**，不应作为结论引用：`apps/coding-agent/scripts/cache-ab.ts` 文件头明写「DeepSeek 报 cached usage（qwen 不报）」，而 `apps/coding-agent/src/providers/dashscope.ts` 又为 DashScope 的隐式缓存定了 `IMPLICIT_CACHE_INPUT_MULTIPLIER = 0.2`（附阿里云文档出处）——`cacheRead = 0` 很可能只是 qwen 不上报该字段，不代表真的未命中。要判定需换用会上报 cached usage 的 provider 复跑。
 - ⬜ Lite-80 真数字（管线已通，估 ~$10–15 + 数小时；建议上 x86_64 + 固定模型对标其它 claw）。
 - 🐛 已知坑：`run_evaluation` 多实例 + HF 加载本机间歇 flake → **逐实例 eval + 本地 jsonl** 绕开（见 reports 末尾）。
