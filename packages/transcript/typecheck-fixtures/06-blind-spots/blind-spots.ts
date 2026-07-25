@@ -12,11 +12,17 @@ import type { SessionEvent as CoreSessionEvent } from "@harness-pi/core";
 
 import type { MirrorSessionEvent, MirrorUsage } from "../../src/contract/core-mirror.js";
 
-/* ── 盲区 1：**arm 内匿名对象**新增可选字段 ── */
-// 注意落点：`SessionEvent` / `LiveEvent` 各 arm 里的匿名内联对象。具名类型（Usage /
-// AssistantMessage / RunSummary / ToolExecResult 等 8 个）的顶层键集**已被 core-mirror.assert.ts
-// 的键集断言钉死**，那一层不再是盲区；arm 内匿名对象钉不住，因为 `keyof` 作用在 union 上
-// 得到的是各成员键的**交集**（实测 `keyof MirrorSessionEvent` 只有 `"type"`）。
+/* ── 盲区 1：**事件轨 arm 内**匿名对象新增可选字段 ── */
+// 落点必须写准，第五轮 review 三门同时抓过这里：能用 `Extract` / 索引访问**拎成具体类型**的
+// 层，一律已被 core-mirror.assert.ts 的键集断言钉死（具名类型顶层、`Usage["cost"]`、
+// `ToolExecResult.content` 的 text / image 两变体），**不属于盲区**。
+//
+// 真正钉不住的只有这一层：`SessionEvent` / `LiveEvent` 各 arm 里的匿名内联对象——
+// `keyof` 作用在 union 上得到的是各成员键的**交集**（实测 `keyof MirrorSessionEvent`
+// 只有 `"type"`），拎不出统一形状。这才是 `keyof` 的固有限制。
+//
+// 早先这里写的是「具名类型 8 个已钉、arm 内未钉」，那个二分把 `ToolExecResult.content`
+// 这类**具名类型内部嵌套的匿名对象**漏在缝里，且把「漏写断言」讲成了「固有限制」。
 type TurnStartArmOptional = Extract<MirrorSessionEvent, { type: "turn-start" }> & {
   hostLatencyMs?: number;
 };

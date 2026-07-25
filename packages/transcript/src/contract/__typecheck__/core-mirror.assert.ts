@@ -31,12 +31,19 @@
  * 下面说的「抓不住」指的是**双向可赋值断言**这一层。文件末尾的**键集断言**补上了其中两条的
  * 一部分，边界写在那一节的注释里——这里逐条标明现状：
  *
- * 1. **arm 内匿名对象新增可选字段** —— 两个方向都过。
- *    具名类型（8 个）的顶层键集已被键集断言钉死，那一层**不再是盲区**；
- *    但 `SessionEvent` / `LiveEvent` 各 arm 里的匿名内联对象钉不住——`keyof` 作用在 union 上
- *    得到的是各成员键的**交集**（实测 `keyof MirrorSessionEvent` 只有 `"type"`）。
- * 2. **镜像多出 core 没有的可选字段** —— 双向断言两个方向都过；具名类型那一层已由
- *    `ExtraKeys<..., never>` 钉死，arm 内匿名对象同样钉不住。
+ * 1. **新增可选字段** —— 双向可赋值两个方向都过。键集断言接管了其中一部分：
+ *    - 7 个具名类型的顶层 + `Usage["cost"]` + `ToolExecResult.content` 的两个变体：**已钉**。
+ *    - `SessionEvent` / `LiveEvent` 各 arm 里的匿名内联对象：**未钉，且钉不住**——
+ *      `keyof` 作用在 union 上得到的是各成员键的**交集**（实测 `keyof MirrorSessionEvent`
+ *      只有 `"type"`）。这一条才是真正的 `keyof` 固有限制。
+ *
+ *    > **第五轮的教训，留个记号**：早先这里写的是「未钉 = arm 内匿名对象」，把
+ *    > `ToolExecResult.content` 这类**具名类型内部嵌套的匿名对象**漏在了二分的缝里，
+ *    > 还顺手把它归到了「`keyof` 的固有限制」名下。三门 review 同时抓到：那不是限制，
+ *    > 是**漏写断言**——`Extract<...[number], {type:"image"}>` 之后 `keyof` 完全可用。
+ *    > 把漏洞讲成边界，比不写边界更坏。现已补上断言。
+ * 2. **镜像多出 core 没有的可选字段** —— 与第 1 条同款分层：已钉的那些由
+ *    `MirrorOnlyKeys<..., never>` 挡住，arm 内匿名对象仍然钉不住。
  * 3. **core 新增的 arm 复用既有 discriminant，且结构上是某个既有镜像 arm 的子类型** ——
  *    典型形态是「同 `type` 值、多几个必填字段」的兄弟 arm。实测：给 core 并上
  *    `{ type: "error"; phase: ...; message: string; code: number }` 后两个方向都 `EXIT=0`。
@@ -116,72 +123,116 @@ const _toolCallMirrorToCore: PiToolCall = null as unknown as MirrorToolCall;
  * 附带收益：它**关掉了盲区 1 与盲区 2 在这些类型顶层的那一半**——core 新增一个可选字段时
  * `Exclude<keyof Core, keyof Mirror>` 会多出一项，编译失败；双向可赋值断言对此完全无感。
  *
- * **覆盖边界（不要过度声称）**：`keyof` 只看顶层。
- *   - 已钉：下列 8 个具名类型（含 `Usage["cost"]` 这一层）。
- *   - 未钉：`SessionEvent` / `LiveEvent` 各 arm 里的**匿名内联对象**——`keyof` 作用在 union 上
- *     得到的是各成员键的**交集**，钉不住。所以「某个 arm 新增可选字段」仍是盲区，
- *     `typecheck-fixtures/06-blind-spots/` 里记的就是这一层。
+ * **覆盖边界（不要过度声称）**：`keyof` 只看顶层，所以每一层要么显式写一条断言，要么就是裸的。
+ *
+ *   - **已钉**：7 个具名类型的顶层、`Usage["cost"]`、以及 `ToolExecResult.content` 的
+ *     text / image 两个变体。
+ *   - **未钉且钉不住**：`SessionEvent` / `LiveEvent` 各 arm 里的匿名内联对象。
+ *     `keyof` 作用在 union 上得到的是各成员键的**交集**，没有 `Extract` 的抓手把某个 arm
+ *     单独拎出来钉——这一条是 `keyof` 的固有限制，`typecheck-fixtures/06-blind-spots/`
+ *     记的就是这一层。
+ *
+ * **判据（第五轮定下的）**：一个匿名内联对象是「钉不住」还是「没钉」，看**能不能用
+ * `Extract` / 索引访问把它拎成一个具体类型**。能拎出来的就必须写断言，不许算进盲区台账。
+ * `ToolExecResult.content` 的变体能拎（`Extract<...[number], {type:"image"}>`），
+ * 所以它是漏写；事件轨的 arm 拎不出统一形状，才是真限制。
  */
-type OmittedKeys<Core, Mirror> = Exclude<keyof Core, keyof Mirror>;
-type ExtraKeys<Core, Mirror> = Exclude<keyof Mirror, keyof Core>;
-/** 双向 extends：`A` 与 `B` 必须是同一个键集，多一个少一个都不行。 */
+/** core 有、镜像没有的键。 */
+type CoreOnlyKeys<Core, Mirror> = Exclude<keyof Core, keyof Mirror>;
+/** 镜像有、core 没有的键。 */
+type MirrorOnlyKeys<Core, Mirror> = Exclude<keyof Mirror, keyof Core>;
+/**
+ * 双向 extends：`A` 与 `B` 必须是同一个键集，多一个少一个都不行。
+ *
+ * **`B` 写成 `any` 会让本断言真空成立——但只在 `A` 不是 `never` 时。** 实测（别照抄「恒真」
+ * 这种笼统说法，它不对）：
+ *
+ *   - `A` 非 `never`（省略清单非空的那些 `_omit*`）：`[A] extends [any]` → 真，
+ *     `[any] extends [A]` → `any` 可赋给非 `never` 的任何类型 → 真 → 整体 `true`。
+ *     **`tsc` EXIT=0，抓不住。**
+ *   - `A` 是 `never`（全部 `_noExtra*` 与 `_omitUsage` 这类）：`[any] extends [never]` → 假
+ *     （`any` 唯一不可赋值的目标就是 `never`）→ 整体 `never` → `tsc` 报 TS2322。
+ *
+ * 也就是说这个真空通道只对一部分断言开着，但那一部分足够。所以下面每一条都不是自证的——
+ * `contract-drift.test.ts` 的「键集断言的类型实参不得被架空」那条静态检查逐条枚举它们的
+ * 实参文本，把整条通道堵死，不去分辨哪些恰好被 `tsc` 兜住了。
+ */
 type SameKeys<A, B> = [A] extends [B] ? ([B] extends [A] ? true : never) : never;
 
 /* 省略清单——与 core-mirror.ts 文件头那张表逐条对应，改一处必须两处一起改。 */
 const _omitRunSummary: SameKeys<
-  OmittedKeys<CoreRunSummary, MirrorRunSummary>,
+  CoreOnlyKeys<CoreRunSummary, MirrorRunSummary>,
   "error" | "abortReason" | "persistenceErrors"
 > = true;
 const _omitToolExecResult: SameKeys<
-  OmittedKeys<CoreToolExecResult, MirrorToolExecResult>,
+  CoreOnlyKeys<CoreToolExecResult, MirrorToolExecResult>,
   "details" | "newMessages"
 > = true;
 const _omitAssistantMessage: SameKeys<
-  OmittedKeys<PiAssistantMessage, MirrorAssistantMessage>,
+  CoreOnlyKeys<PiAssistantMessage, MirrorAssistantMessage>,
   "responseModel" | "responseId" | "diagnostics" | "errorMessage"
 > = true;
-const _omitTextContent: SameKeys<OmittedKeys<PiTextContent, MirrorTextContent>, "textSignature"> = true;
+const _omitTextContent: SameKeys<CoreOnlyKeys<PiTextContent, MirrorTextContent>, "textSignature"> = true;
 const _omitThinkingContent: SameKeys<
-  OmittedKeys<PiThinkingContent, MirrorThinkingContent>,
+  CoreOnlyKeys<PiThinkingContent, MirrorThinkingContent>,
   "thinkingSignature"
 > = true;
-const _omitToolCall: SameKeys<OmittedKeys<PiToolCall, MirrorToolCall>, "thoughtSignature"> = true;
-const _omitUsage: SameKeys<OmittedKeys<PiUsage, MirrorUsage>, never> = true;
-const _omitUsageCost: SameKeys<OmittedKeys<PiUsage["cost"], MirrorUsage["cost"]>, never> = true;
+const _omitToolCall: SameKeys<CoreOnlyKeys<PiToolCall, MirrorToolCall>, "thoughtSignature"> = true;
+const _omitUsage: SameKeys<CoreOnlyKeys<PiUsage, MirrorUsage>, never> = true;
+const _omitUsageCost: SameKeys<CoreOnlyKeys<PiUsage["cost"], MirrorUsage["cost"]>, never> = true;
 
 /* 镜像不得多出 core 没有的键——含可选，这是双向可赋值断言的另一半盲区。 */
-const _noExtraRunSummary: SameKeys<ExtraKeys<CoreRunSummary, MirrorRunSummary>, never> = true;
-const _noExtraToolExecResult: SameKeys<ExtraKeys<CoreToolExecResult, MirrorToolExecResult>, never> = true;
-const _noExtraAssistantMessage: SameKeys<ExtraKeys<PiAssistantMessage, MirrorAssistantMessage>, never> = true;
-const _noExtraTextContent: SameKeys<ExtraKeys<PiTextContent, MirrorTextContent>, never> = true;
-const _noExtraThinkingContent: SameKeys<ExtraKeys<PiThinkingContent, MirrorThinkingContent>, never> = true;
-const _noExtraToolCall: SameKeys<ExtraKeys<PiToolCall, MirrorToolCall>, never> = true;
-const _noExtraUsage: SameKeys<ExtraKeys<PiUsage, MirrorUsage>, never> = true;
-const _noExtraUsageCost: SameKeys<ExtraKeys<PiUsage["cost"], MirrorUsage["cost"]>, never> = true;
+const _noExtraRunSummary: SameKeys<MirrorOnlyKeys<CoreRunSummary, MirrorRunSummary>, never> = true;
+const _noExtraToolExecResult: SameKeys<MirrorOnlyKeys<CoreToolExecResult, MirrorToolExecResult>, never> = true;
+const _noExtraAssistantMessage: SameKeys<MirrorOnlyKeys<PiAssistantMessage, MirrorAssistantMessage>, never> = true;
+const _noExtraTextContent: SameKeys<MirrorOnlyKeys<PiTextContent, MirrorTextContent>, never> = true;
+const _noExtraThinkingContent: SameKeys<MirrorOnlyKeys<PiThinkingContent, MirrorThinkingContent>, never> = true;
+const _noExtraToolCall: SameKeys<MirrorOnlyKeys<PiToolCall, MirrorToolCall>, never> = true;
+const _noExtraUsage: SameKeys<MirrorOnlyKeys<PiUsage, MirrorUsage>, never> = true;
+const _noExtraUsageCost: SameKeys<MirrorOnlyKeys<PiUsage["cost"], MirrorUsage["cost"]>, never> = true;
 
-void _sessionEventCoreToMirror;
-void _sessionEventMirrorToCore;
-void _liveEventCoreToMirror;
-void _liveEventMirrorToCore;
-void _omitRunSummary;
-void _omitToolExecResult;
-void _omitAssistantMessage;
-void _omitTextContent;
-void _omitThinkingContent;
-void _omitToolCall;
-void _omitUsage;
-void _omitUsageCost;
-void _noExtraRunSummary;
-void _noExtraToolExecResult;
-void _noExtraAssistantMessage;
-void _noExtraTextContent;
-void _noExtraThinkingContent;
-void _noExtraToolCall;
-void _noExtraUsage;
-void _noExtraUsageCost;
-void _assistantMessageCoreToMirror;
-void _assistantMessageMirrorToCore;
-void _usageCoreToMirror;
-void _usageMirrorToCore;
-void _toolCallCoreToMirror;
-void _toolCallMirrorToCore;
+/*
+ * `ToolExecResult.content` 的两个变体——**具名类型内部嵌套的匿名内联对象**。
+ *
+ * 第五轮 review 三门同时抓到的洞：早先版本把「未钉」的范围写成「事件轨各 arm 里的匿名内联
+ * 对象」，于是这一类掉进了缝里。实测：给 core 侧 image 变体加 `altText?: string`，
+ * 双向可赋值两向通过、`keyof CoreToolExecResult` 顶层键集分毫不变、经 `tool-end` arm
+ * 传播后仍两向通过 —— `EXIT=0`，四条台账无一覆盖。
+ *
+ * 而且当时给的理由（「`keyof` 作用在 union 上得到交集」）在这里**根本不适用**：
+ * `Extract<...[number], { type: "image" }>` 之后 `keyof` 完全可用。那不是 `keyof` 的
+ * 固有限制，是**纯粹漏写了断言**。把漏洞讲成边界，正是这个包反复声明要避免的假绿。
+ *
+ * 所以这里选择**补上断言**而不是补一条台账。
+ */
+type CoreToolContent = CoreToolExecResult["content"][number];
+type MirrorToolContent = MirrorToolExecResult["content"][number];
+type CoreToolContentText = Extract<CoreToolContent, { type: "text" }>;
+type MirrorToolContentText = Extract<MirrorToolContent, { type: "text" }>;
+type CoreToolContentImage = Extract<CoreToolContent, { type: "image" }>;
+type MirrorToolContentImage = Extract<MirrorToolContent, { type: "image" }>;
+
+const _omitToolContentText: SameKeys<
+  CoreOnlyKeys<CoreToolContentText, MirrorToolContentText>,
+  never
+> = true;
+const _noExtraToolContentText: SameKeys<
+  MirrorOnlyKeys<CoreToolContentText, MirrorToolContentText>,
+  never
+> = true;
+const _omitToolContentImage: SameKeys<
+  CoreOnlyKeys<CoreToolContentImage, MirrorToolContentImage>,
+  never
+> = true;
+const _noExtraToolContentImage: SameKeys<
+  MirrorOnlyKeys<CoreToolContentImage, MirrorToolContentImage>,
+  never
+> = true;
+
+/*
+ * **这里刻意没有一排 `void _x;`。** 早先版本有 26 行，纯仪式：本仓没有 eslint / biome，
+ * `tsconfig.base.json` 也没开 `noUnusedLocals`（`07-public-surface/surface.ts` 的注释
+ * 早就写着这一点），删光后 `tsc` 照样 EXIT=0。在一个整个论点是「手维护的清单必须由机器
+ * 钉住」的包里，摆一份零强制、必须跟着声明手工同步的 no-op 清单是自己打自己脸——
+ * 而且它们还全部 emit 进 dist 那个死文件。第五轮 review 指出，照办。
+ */

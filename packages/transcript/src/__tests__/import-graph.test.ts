@@ -87,6 +87,37 @@ interface ScanResult {
   referenceDirectives: Hit[];
 }
 
+/** `import(`node:fs`)` 用的是 NoSubstitutionTemplateLiteral，`isStringLiteral` 对它为假。 */
+function literalText(node: ts.Node): string | undefined {
+  return ts.isStringLiteral(node) || ts.isNoSubstitutionTemplateLiteral(node) ? node.text : undefined;
+}
+
+/** 剥掉 `(x)` / `x as T` / `x!` —— `(globalThis as any).process` 是绕过的经典写法。 */
+function unwrap(expr: ts.Expression): ts.Expression {
+  let cur = expr;
+  while (
+    ts.isParenthesizedExpression(cur) ||
+    ts.isAsExpression(cur) ||
+    ts.isNonNullExpression(cur)
+  ) {
+    cur = cur.expression;
+  }
+  return cur;
+}
+
+/**
+ * `globalThis.process` / `globalThis["process"]`：宿主对象上的属性名，仍是一次全局访问。
+ *
+ * **覆盖边界**：只认字面量 `globalThis` / `global` / `window` / `self`。
+ * 别名形态 `const g = globalThis as any; g.process` **不在覆盖内**——`g` 不在名单里，
+ * 需要类型信息或数据流分析才认得出，而本扫描器刻意只用单文件 AST。这是静态分析的固有
+ * 边界，如实记在这里，不假装堵住了。
+ */
+function isHostGlobalObject(expr: ts.Expression): boolean {
+  const inner = unwrap(expr);
+  return ts.isIdentifier(inner) && GLOBAL_OBJECTS.has(inner.text);
+}
+
 function scan(file: string, kind: ts.ScriptKind = ts.ScriptKind.TS): ScanResult {
   const text = readFileSync(file, "utf8");
   const sf = ts.createSourceFile(file, text, ts.ScriptTarget.ES2022, true, kind);
@@ -100,10 +131,6 @@ function scan(file: string, kind: ts.ScriptKind = ts.ScriptKind.TS): ScanResult 
   const noteSpecifier = (node: ts.Node, spec: string): void => {
     specifiers.push({ file: rel, line: at(node), what: spec });
   };
-
-  /** `import(`node:fs`)` 用的是 NoSubstitutionTemplateLiteral，`isStringLiteral` 对它为假。 */
-  const literalText = (node: ts.Node): string | undefined =>
-    ts.isStringLiteral(node) || ts.isNoSubstitutionTemplateLiteral(node) ? node.text : undefined;
 
   const visit = (node: ts.Node): void => {
     if (
@@ -132,25 +159,6 @@ function scan(file: string, kind: ts.ScriptKind = ts.ScriptKind.TS): ScanResult 
         if (spec !== undefined) noteSpecifier(node, spec);
       }
     }
-
-    /** 剥掉 `(x)` / `x as T` / `x!` —— `(globalThis as any).process` 是绕过的经典写法。 */
-    const unwrap = (expr: ts.Expression): ts.Expression => {
-      let cur = expr;
-      while (
-        ts.isParenthesizedExpression(cur) ||
-        ts.isAsExpression(cur) ||
-        ts.isNonNullExpression(cur)
-      ) {
-        cur = cur.expression;
-      }
-      return cur;
-    };
-
-    /** `globalThis.process` / `globalThis["process"]`：宿主对象上的属性名，仍是一次全局访问。 */
-    const isHostGlobalObject = (expr: ts.Expression): boolean => {
-      const inner = unwrap(expr);
-      return ts.isIdentifier(inner) && GLOBAL_OBJECTS.has(inner.text);
-    };
 
     if (ts.isIdentifier(node) && FORBIDDEN_GLOBALS.has(node.text)) {
       const parent = node.parent;
@@ -195,13 +203,14 @@ function scan(file: string, kind: ts.ScriptKind = ts.ScriptKind.TS): ScanResult 
 
     // 元素访问形式：`globalThis["process"]` 的 `"process"` 是 StringLiteral 不是
     // Identifier，上面那条永远不触发。
-    if (
-      ts.isElementAccessExpression(node) &&
-      isHostGlobalObject(node.expression) &&
-      ts.isStringLiteral(node.argumentExpression) &&
-      FORBIDDEN_GLOBALS.has(node.argumentExpression.text)
-    ) {
-      globals.push({ file: rel, line: at(node), what: node.argumentExpression.text });
+    if (ts.isElementAccessExpression(node) && isHostGlobalObject(node.expression)) {
+      // 复用 literalText：早先这里只认 `ts.isStringLiteral`，于是 ``globalThis[`process`]``
+      // （NoSubstitutionTemplateLiteral）零命中。讽刺的是 `literalText` 正是为同一个 TS 坑
+      // 写的（注释里点名 ``import(`node:fs`)``），只是没复用到这里。第五轮 review 抓到。
+      const key = literalText(node.argumentExpression);
+      if (key !== undefined && FORBIDDEN_GLOBALS.has(key)) {
+        globals.push({ file: rel, line: at(node), what: key });
+      }
     }
 
     ts.forEachChild(node, visit);
@@ -316,17 +325,28 @@ describe("扫描器本身有判别力", () => {
     ]);
   });
 
-  it("标识符扫描：裸全局 / globalThis.x / globalThis[\"x\"] / cast / 括号 / 简写属性 / 宿主全局解构 七种形态", () => {
+  it("标识符扫描：每种形态一个具名标本，命中集合精确匹配", () => {
+    // 具名形态表而不是一排重复字符串——加标本时看得见自己在加哪一条分支，
+    // 这条断言变红时也说得出是哪个形态丢了。（本包规矩：列表而不是计数。）
+    const FORMS: Array<[形态: string, 命中: string[]]> = [
+      ["裸标识符", ["process", "Buffer"]],
+      ["globalThis.x", ["process"]],
+      ['globalThis["x"]', ["Buffer"]],
+      ["__dirname / __filename", ["__dirname", "__filename"]],
+      ["(globalThis as T).x —— cast 绕过", ["process"]],
+      ["(globalThis).x —— 括号绕过", ["Buffer"]],
+      ["{ process, Buffer } —— 简写属性是值引用", ["process", "Buffer"]],
+      ["const { x } = globalThis as T —— 宿主全局解构", ["process", "Buffer"]],
+      // ↓ 第五轮 review 补：以下四条此前零标本，退化实现也能全绿
+      ["const { a: { x } } = globalThis —— 嵌套 binding pattern", ["process"]],
+      ["const { a: [{ x }] } = globalThis —— ArrayBindingPattern 出口", ["Buffer"]],
+      ["function f({ x } = globalThis) —— Parameter 出口", ["process"]],
+      ["globalThis!.x —— unwrap 的 NonNullExpression 分支", ["Buffer"]],
+      ["globalThis[`x`] —— 元素访问的模板字面量形态", ["process"]],
+    ];
+    const expected = FORMS.flatMap(([, hits]) => hits).sort();
     const found = corpusScan("globals.ts").globals.map((h) => h.what).sort();
-    // 裸 ×2、globalThis.x ×1、globalThis["x"] ×1、(globalThis as T).x ×1、(globalThis).x ×1、
-    // 简写属性 ×2、从 cast 后的宿主全局解构 ×2、__dirname、__filename
-    expect(found).toEqual(
-      [
-        "Buffer", "Buffer", "Buffer", "Buffer", "Buffer",
-        "process", "process", "process", "process", "process",
-        "__dirname", "__filename",
-      ].sort(),
-    );
+    expect(found).toEqual(expected);
   });
 
   it("负向对照：同名属性 / 方法 / 成员 / 从普通对象解构 都不被误报", () => {
@@ -423,7 +443,7 @@ describe("构建产物", () => {
   it("产物中 0 处 __tests__ 落点", () => {
     // `__typecheck__` **会**出现在 dist，这是有意的：断言必须挂在 build 主路径上。
     // `import type` 被完全擦除，所以 `.d.ts` 字面就是 `export {};`，`.js` 是注释加 10 个
-    // 死变量（两条事件轨各两向 + pi-ai 三个叶子类型各两向）。两者都由 files 挡在 tarball 外。
+    // 死变量（每条断言一个）。两者都由 files 挡在 tarball 外。
     const leaked = collectDistFiles(DIST)
       .map((f) => relative(PKG_ROOT, f))
       .filter((f) => f.includes("__tests__"));

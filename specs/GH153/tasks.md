@@ -15,7 +15,7 @@ GH-153
 - [ ] `SP153-T2` 两个 tsconfig：`tsconfig.json`（只 `exclude` `__tests__`，断言留在主路径上）与 `tsconfig.browser.json`（`types: []` + 额外 `exclude` `__typecheck__`）。Owner: agent. Done when: 两份配置各自可独立 `tsc -p` 运行。Verify: `pnpm --filter @harness-pi/transcript typecheck`.
 - [ ] `SP153-T3` 必填闭包镜像 `src/contract/core-mirror.ts`，文件头带 12 项省略字段清单。Owner: agent. Done when: `SessionEvent` 8 arm 与 `LiveEvent` 6 arm 及其类型闭包全部镜像完成。Verify: `pnpm --filter @harness-pi/transcript exec tsc -p . --noEmit`.
 - [ ] `SP153-T4` 透传水位类型 `src/contract/watermark.ts`（`{seq, epoch}` + 快照信封）。Owner: agent. Done when: 类型存在且注释写明语义与发号权归 GH-154、本包不自造 seq。Verify: `grep -q 'GH-154\|#154' packages/transcript/src/contract/watermark.ts`.
-- [ ] `SP153-T5` 断言文件 `src/contract/__typecheck__/core-mirror.assert.ts` 两层：(a) 双向可赋值——两条事件轨各两向、外加 pi-ai 三个叶子类型各两向；(b) 键集钉死——每个具名类型的 `OmittedKeys` 精确等于省略清单、`ExtraKeys` 等于 `never`。文件头写明四种盲区、声明为实测台账，并写明键集层的覆盖边界（只到具名类型顶层）。Owner: agent. Done when: 断言随 `tsc -p .` 一起被编译且通过。Verify: `pnpm --filter @harness-pi/transcript test -- "断言的静态完整性"`.
+- [ ] `SP153-T5` 断言文件 `src/contract/__typecheck__/core-mirror.assert.ts` 两层：(a) 双向可赋值——两条事件轨各两向、外加 pi-ai 三个叶子类型各两向；(b) 键集钉死——凡能用 `Extract` / 索引访问拎成具体类型的层，`CoreOnlyKeys` 精确等于省略清单、`MirrorOnlyKeys` 等于 `never`（当前含 7 个具名类型顶层、`Usage["cost"]`、`ToolExecResult.content` 两变体）。文件头写明四种盲区、声明为实测台账，并写明键集层的覆盖边界与「拎得出来就必须写断言」的判据。Owner: agent. Done when: 断言随 `tsc -p .` 一起被编译且通过。Verify: `pnpm --filter @harness-pi/transcript test -- "断言的静态完整性"`.
 - [ ] `SP153-T6` `typecheck` 脚本两段 `&&` 串联，并在 PR 描述中记录相对其余 4 包的三处有意偏离。Owner: agent. Done when: 脚本依次跑完两个 tsconfig 且以 `&&` 串联。Verify: `pnpm --filter @harness-pi/transcript test -- "typecheck 脚本以 && 串联两段"`.
 - [ ] `SP153-T7` 七个 `typecheck-fixtures/`：01-05 期望非零退出（四种漂移 + node 全局探针），06-07 期望零退出（盲区台账 / 公开出口面）。fixture 05 必须 `extends` 真正的 `tsconfig.browser.json`。Owner: agent. Done when: 七个 fixture 各自退出码符合预期。Verify: `pnpm --filter @harness-pi/transcript test -- fixture`.
 - [ ] `SP153-T8` `typecheck-fixtures/scanner-corpus/` 标本语料：说明符各形态（静态 / `export *` / `import=require` / `import()` 类型位 / 模板字面量 / `require()` / 内置子路径 / 相对）、两种三斜线指令、全局访问各形态（裸 / `globalThis.x` / `globalThis["x"]` / cast / 括号 / 简写属性 / 宿主全局解构）、同名属性的负向对照、`.mts`/`.cts`/`.tsx` 扩展名。Owner: agent. Done when: 扫描器命中集合与预期**精确相等**，且负向对照不被误报。Verify: `pnpm --filter @harness-pi/transcript test -- "扫描器本身有判别力"`.
@@ -56,13 +56,17 @@ Not run, with reason: 真 Postgres 集成测试未在本地跑（需 `POSTGRES_T
 
 ## Handoff Notes
 
-- 本 issue 的 AC 经三轮修订。**R1**：删除「镜像带上 GH-140 工具危险度元数据」（该三字段全仓零读取点、
+- 本 issue 的 AC 经多轮修订（逐条依据见 issue 正文「AC 修订记录」，此处只记最关键的三条）。**R1**：删除「镜像带上 GH-140 工具危险度元数据」（该三字段全仓零读取点、
   不挂在任何事件上，镜像它只会产出永远 `undefined` 的字段）。**R6**：「不 `exclude` `__typecheck__` 的话
   devDep 会泄漏进 `dist`」是假的——`import type` 被完全擦除，实测 emit 出的 `.d.ts` 字面就是 `export {};`。
   据此建立的第三个 tsconfig、三段脚本与两条守它们的测试全部删除。**R7**：「四种漂移都抓得住」是过度声称，
-  盲区台账从 2 条扩到 4 条并落成可执行 fixture。逐条依据见 issue 正文「AC 修订记录」。
+  盲区台账从 2 条扩到 4 条并落成可执行 fixture。**R8**（第五轮，三门同时抓到）：键集层的覆盖边界
+  把 `ToolExecResult.content` 这类**具名类型内部嵌套的匿名对象**漏在缝里，还把「漏写断言」讲成
+  「`keyof` 的固有限制」——实测 `Extract<...[number], {type:"image"}>` 之后 `keyof` 完全可用。
+  据此定下判据：**能用 `Extract` / 索引访问拎成具体类型的层，必须写断言，不许算进盲区台账**。
+  逐条依据见 issue 正文「AC 修订记录」。
 - 注入式变异测试会在包根创建 `.mutation-tmp/`（已进 `.gitignore`，`afterAll` 清理）。它比任何静态检查都强：
   静态检查挡的是「断言长得不对」，注入式变异证明的是「断言此刻真的在约束镜像」。
 - `dist/` 无跨包引用这条检查依赖 `build` 先于 `test`（仓库铁律）。`dist/` 缺失或半成品时测试**主动失败**，
   不静默跳过；**陈旧** dist 不在覆盖范围内，注释已如实声明。
-- 后置提醒：GH-168 / GH-154 让 `apps/coding-agent` 或 host 依赖本包**之前**，必须先摘掉 `private` 并补 `LICENSE`。
+- 后置提醒：GH-168 / GH-154 让 `apps/coding-agent` 或 host 依赖本包**之前**，必须先摘掉 `private`。（`LICENSE` 已随本 issue 落地，不必再补。）

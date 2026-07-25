@@ -89,29 +89,39 @@ const _sessionEventMirrorToCore: CoreSessionEvent = null as unknown as MirrorSes
 同一个包不该有两套标准。所以每个具名类型的顶层键集也写成断言：
 
 ```ts
-type OmittedKeys<Core, Mirror> = Exclude<keyof Core, keyof Mirror>;
-type ExtraKeys<Core, Mirror> = Exclude<keyof Mirror, keyof Core>;
+type CoreOnlyKeys<Core, Mirror> = Exclude<keyof Core, keyof Mirror>;
+type MirrorOnlyKeys<Core, Mirror> = Exclude<keyof Mirror, keyof Core>;
 /** 双向 extends：多一个少一个都不行 */
 type SameKeys<A, B> = [A] extends [B] ? ([B] extends [A] ? true : never) : never;
 
 const _omitToolExecResult: SameKeys<
-  OmittedKeys<CoreToolExecResult, MirrorToolExecResult>,
+  CoreOnlyKeys<CoreToolExecResult, MirrorToolExecResult>,
   "details" | "newMessages"
 > = true;
 ```
 
-它**关掉了盲区 1 与盲区 2 在具名类型顶层的那一半**：core 新增可选字段、或镜像多出可选字段，
+它**关掉了盲区 1 与盲区 2 在已写断言那些层的那一半**：core 新增可选字段、或镜像多出可选字段，
 双向可赋值断言对此**完全无感**（实测两个方向都 `EXIT=0`），键集断言会让 `Exclude` 多出一项、
 编译失败。
 
-**覆盖边界（不许过度声称）**：`keyof` 只看顶层，且作用在 union 上得到的是各成员键的**交集**
-（实测 `keyof MirrorSessionEvent` 只有 `"type"`）。所以：
+`SameKeys<A, B>` 有一个真空失效通道：`B` 写成 `any` 会让它恒真（`[X] extends [any]`）。
+所以断言本身也要被守——`contract-drift.test.ts` 的「键集断言的类型实参不得被架空」逐条枚举
+每条断言的两个类型实参文本（零 spawn 的 AST 静态检查）。
 
-| | 已钉 | 未钉 |
-| --- | --- | --- |
-| 8 个具名类型的顶层键集（含 `Usage["cost"]` 那一层） | ✅ | |
-| `SessionEvent` / `LiveEvent` 各 arm 里的**匿名内联对象** | | ❌ 仍是盲区，fixture 06 记的就是这一层 |
-| `readonly` 修饰符漂移 | | ❌ `keyof` 看不见修饰符 |
+**覆盖边界（不许过度声称）**：`keyof` 只看顶层，所以**每一层要么显式写一条断言，要么就是裸的**。
+
+| | 状态 |
+| --- | --- |
+| 7 个具名类型的顶层键集 + `Usage["cost"]` + `ToolExecResult.content` 的 text / image 两变体 | ✅ 已钉 |
+| `SessionEvent` / `LiveEvent` 各 arm 里的匿名内联对象 | ❌ **钉不住**——`keyof` 作用在 union 上得到各成员键的交集（实测 `keyof MirrorSessionEvent` 只有 `"type"`），没有 `Extract` 抓手。fixture 06 记的就是这一层 |
+| `readonly` 修饰符漂移 | ❌ **钉不住**——`keyof` 看不见修饰符 |
+
+> **第五轮的教训**：早先这张表把「未钉」写成「各 arm 里的匿名内联对象」，
+> 于是 `ToolExecResult.content` 这类**具名类型内部嵌套的匿名对象**掉进了二分的缝里，
+> 还被顺手归到「`keyof` 的固有限制」名下。三门 review 同时实测证伪：那不是限制，是**漏写**——
+> `Extract<CoreToolExecResult["content"][number], {type:"image"}>` 之后 `keyof` 完全可用。
+> **判据（据此定下）**：一个匿名内联对象是「钉不住」还是「没钉」，看能不能用 `Extract` /
+> 索引访问把它拎成具体类型。能拎出来的必须写断言，不许算进盲区台账。
 
 **两段串联的 `typecheck`（相对其余 4 包的唯一脚本偏离）**
 
@@ -236,16 +246,17 @@ fixture 05 **必须 `extends` 真配置**，不能手抄 `lib` / `types`。抄�
 
 - Security: 无。本包不含运行时代码、不碰 IO、不解析不可信输入。
 - Compatibility: 新包不被任何现有包依赖，`pnpm -r` 拓扑序不受影响；不改动任何既有文件的行为。
-- Performance: `typecheck` 由一段变两段（多一次 browser 门 `tsc`）。`test` 起 **9 次 `tsc` 子进程**
-  （4 次注入式变异含对照组 / 1 次主 tsconfig 正向对照 / 1 次 01-04 合并 project / 1 次 06-07 合并
-  project / 1 次 05 探针 / 1 次 browser `--listFiles`）外加 1 次 `npm pack --dry-run`。
+- Performance: `typecheck` 由一段变两段（多一次 browser 门 `tsc`）。`test` 每条注入式变异起一次
+  `tsc` 子进程，另有每个 fixture project 一次（01-04 合并成一个、06-07 合并成一个、05 探针独立）、
+  主 tsconfig 正向对照一次、browser `--listFiles` 一次，外加 1 次 `npm pack --dry-run`。
+  **刻意不写总数**：这个数字每加一条变异就漂一次，前两轮 review 各抓到一次、第五轮又抓到一次。
   **实测耗时**（本机、`packages/transcript` 内 `vitest run`、机器空闲）：3.5–4.1s，单条最慢约 0.4s，
   `vitest.config.ts` 的 `testTimeout` 是 60s。**但这个数字对并发负载很敏感**——review 期间三个
   reviewer agent 同时跑时，同一套测试被测到 85s、单条最慢 16s。CI 上 `pnpm -r test` 并发加载时更接近
   后者，60s 的余量不像空闲态看上去那么宽。
-  01-04 合并成一个 project 是这轮把 spawn 从 13 降到 9 的主要来源，且判别力更强：锚点从「进程退出码」
-  换成「诊断落在哪个文件上」，逐条钉死落点，而不是「有一条报错就算过」。若日后仍成瓶颈，
-  注入式变异那 4 次是下一个合并对象。
+  01-04 合并成一个 project 显著压低了 spawn 数，且判别力更强：锚点从「进程退出码」换成
+  「诊断落在哪个文件上」，逐条钉死落点，而不是「有一条报错就算过」。若日后仍成瓶颈，
+  注入式变异那一族是下一个合并对象。
 - Maintenance: fixture 用类型手术而非复制镜像，镜像演化时无需同步修改。
   **一处前瞻性冲突**：`ToolExecResult.details?: unknown`（`hook.ts:43-46`）被省略的理由是「`unknown`
   是断言盲区」，但内核那边的注释写明这个字段存在的目的正是「truncation / diff / fullOutputPath 等

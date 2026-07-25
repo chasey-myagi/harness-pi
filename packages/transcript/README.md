@@ -31,7 +31,7 @@ tsc -p . --noEmit && tsc -p tsconfig.browser.json
 > `@harness-pi/core` 会泄漏进 `dist`」，并据此加了第三个 tsconfig、三段脚本和两条守它们的测试。
 > **那句话是错的**：`import type` 会被完全擦除，实测 emit 出来的 `.d.ts` 字面就是 `export {};`。
 > 四层机械保证守着一个不存在的问题，现已全部删除。代价换成了 `dist/` 里一个死文件
-> （`.d.ts` 字面是 `export {};`，`.js` 是注释加 10 个死变量），由 `files` 的
+> （`.d.ts` 字面是 `export {};`，`.js` 是注释加一批死变量，每条断言一个），由 `files` 的
 > `!**/__typecheck__/**` 挡在 tarball 外——用 `npm pack --dry-run` 实测钉住，不是对 `files`
 > 数组做字符串匹配。
 
@@ -57,9 +57,15 @@ tsc -p . --noEmit && tsc -p tsconfig.browser.json
 **为什么要第二层（键集断言）**：双向可赋值断言对**可选**字段完全无感——core 新增一个可选字段、
 或镜像多出一个，两个方向都过（实测 `EXIT=0`、零诊断）。而 `core-mirror.ts` 文件头那张「被省略的
 可选字段」表原本是**手维护清单**，与本包「手维护的清单必须由机器钉住」的整个论点自相矛盾。
-键集断言把那张表写成了类型。**它只到具名类型顶层**：`keyof` 作用在 union 上得到的是各成员键的
-交集（`keyof MirrorSessionEvent` 实测只有 `"type"`），所以 arm 内的匿名内联对象钉不住，
-`readonly` 修饰符也钉不住。
+键集断言把那张表写成了类型。
+
+**覆盖边界的判据**：一个类型只要能用 `Extract` / 索引访问**拎成具体类型**，就必须写键集断言，
+不许算进盲区台账。据此已钉：7 个具名类型的顶层、`Usage["cost"]`、`ToolExecResult.content` 的
+text / image 两变体。真正钉不住的只有事件轨各 arm 里的匿名内联对象（`keyof` 作用在 union 上
+得到各成员键的交集，`keyof MirrorSessionEvent` 实测只有 `"type"`），以及 `readonly` 修饰符。
+
+> 第五轮 review 三门同时抓到：早先这里写「只到具名类型顶层」，把 `ToolExecResult.content`
+> 漏在缝里，还把漏写讲成了 `keyof` 的固有限制。把漏洞讲成边界，比不写边界更坏。
 
 **已实测的盲区台账**在 `core-mirror.assert.ts` 文件头——包括「复用既有 discriminant 的
 兄弟 arm 两个方向都抓不住」这一条，它是上表第一行必须带限定词的原因。那份清单是实测台账，

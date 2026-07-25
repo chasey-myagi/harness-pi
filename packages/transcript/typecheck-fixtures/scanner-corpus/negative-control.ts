@@ -21,3 +21,10 @@ export const { process: renamed } = assigned;
 const { process: fromPlainRenamed } = assigned;
 const { Buffer: fromPlainShorthand } = assigned;
 export { fromPlainRenamed, fromPlainShorthand };
+
+// ── 与 globals.ts 新增标本一一对应的负向对照：源对象是**普通对象**，必须不被误报 ──
+declare const plainNested: { nested: { process: string }; list: Array<{ Buffer: number }> };
+const { nested: { process: plainFromNested } } = plainNested;
+const { list: [{ Buffer: plainFromArrayElement }] } = plainNested;
+export function plainFromParam({ process: p } = assigned): unknown { return p; }
+export { plainFromNested, plainFromArrayElement };

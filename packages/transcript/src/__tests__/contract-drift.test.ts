@@ -38,11 +38,25 @@ interface TscRun {
   output: string;
 }
 
+/**
+ * tsc 挂死的兜底**必须靠 `spawnSync` 自己的 `timeout`**，vitest 的超时接不住它。
+ *
+ * 第五轮 review 实测证伪了原先的说法：`spawnSync` 是同步的，事件循环被它占住，
+ * 任何 vitest 超时（`testTimeout` / `hookTimeout`）都无法打断——用 `--hookTimeout=1`
+ * 跑整个文件仍然全部通过。所以真正的兜底只有这一个参数。
+ *
+ * 超时值给得比 `testTimeout` 小：这样挂死会表现为「这条测试失败并说明是 tsc 超时」，
+ * 而不是 vitest 报一句无信息量的整体超时。超时被杀时 `status` 是 `null`，
+ * `expectExitedWithDiagnostics` 会把它判成失败而不是「漂移被抓住」。
+ */
+const TSC_TIMEOUT_MS = 45_000;
+
 function runTsc(project: string, extraArgs: string[] = []): TscRun {
   const r = spawnSync(TSC, ["-p", project, ...extraArgs], {
     cwd: PKG_ROOT,
     encoding: "utf8",
     maxBuffer: 32 * 1024 * 1024, // --listFiles 会吐出几千行
+    timeout: TSC_TIMEOUT_MS,
   });
   if (r.error) throw r.error;
   return { status: r.status, output: `${r.stdout ?? ""}${r.stderr ?? ""}` };
@@ -147,6 +161,35 @@ describe("注入式变异：断言此刻真的在约束镜像", () => {
       "Type 'true' is not assignable to type 'never'",
     );
   });
+
+  it("镜像**多出**一个可选字段 → 键集断言报错（覆盖 MirrorOnlyKeys 那一半）", () => {
+    // 上一条打的是 `CoreOnlyKeys` 半边。`MirrorOnlyKeys` 那 12 条此前**零变异覆盖**，
+    // 全靠推理——第五轮 review 抓到。这条补上：给镜像加一个 core 没有的可选字段。
+    const r = compileContractCopy((src) =>
+      src.replace("  isError?: boolean;\n", "  isError?: boolean;\n  ghostExtra?: string;\n"),
+    );
+    expectExitedWithDiagnostics(r, "镜像多出可选字段后键集断言应当失败");
+    expect(r.output).toContain(ASSERT_REL);
+    expect(r.output, "必须是键集断言报的错").toContain(
+      "Type 'true' is not assignable to type 'never'",
+    );
+  });
+
+  it("`ToolExecResult.content` 变体新增可选字段 → 键集断言报错", () => {
+    // 第五轮 review 三门同时抓到的洞：具名类型**内部嵌套**的匿名内联对象，此前
+    // 双向断言与键集断言都抓不住（实测 EXIT=0），而文档把它归进了「keyof 的固有限制」。
+    // 它其实完全钉得住（`Extract<...[number], {type:"image"}>` 之后 keyof 可用），
+    // 所以补的是断言而不是台账。这条守着那 4 条新断言。
+    const r = compileContractCopy((src) =>
+      src.replace(
+        '| { type: "image"; data: string; mimeType: string }',
+        '| { type: "image"; data: string; mimeType: string; altText?: string }',
+      ),
+    );
+    expectExitedWithDiagnostics(r, "content 变体多出可选字段后键集断言应当失败");
+    expect(r.output).toContain(ASSERT_REL);
+    expect(r.output).toContain("Type 'true' is not assignable to type 'never'");
+  });
 });
 
 /* ──────────────────── 正向对照 ──────────────────── */
@@ -195,8 +238,9 @@ const DRIFT_ANCHORS: Array<{ file: string; what: string; types: [string, string]
 ];
 
 describe("四种漂移反例", () => {
-  // 惰性求值：写在 describe 体里会在**收集阶段**执行，那次 spawn 落在任何 per-test
-  // timeout 之外——tsc 挂死会表现为整个文件无限期卡住，而不是一条超时失败。
+  // 惰性求值：写在 describe 体里会在**收集阶段**执行，那时失败归属不清（报成收集错误
+  // 而不是某条测试失败）。挂死的兜底不在这里，在 `runTsc` 的 `spawnSync timeout`——
+  // 早先这段注释宣称挪进 beforeAll 能让挂死变成超时失败，第五轮 review 实测证伪了。
   let run: TscRun;
   beforeAll(() => {
     run = runTsc(join("typecheck-fixtures", "tsconfig.drift.json"));
@@ -315,6 +359,59 @@ describe("断言的静态完整性", () => {
         "MirrorLiveEvent → CoreLiveEvent",
       ]),
     );
+  });
+
+  it("键集断言的类型实参不得被架空（`SameKeys<非never, any>` 真空成立）", () => {
+    // `SameKeys<A, B>` 是 `[A] extends [B] ? ([B] extends [A] ? true : never) : never`。
+    // 把 `B` 写成 `any`，在 **`A` 不是 `never`** 时会让它真空成立——实测 `_omitToolExecResult`
+    // （`A` = `"details" | "newMessages"`）改成 `any` 后 `tsc` **EXIT=0**，完全抓不住。
+    // （`A` 是 `never` 的那些恰好会被 `tsc` 兜住，因为 `any` 唯一不可赋值的目标就是 `never`；
+    // 但那是巧合，不是保证，所以这里把整条通道堵死，不去分辨。）
+    //
+    // 注入式变异只打得中被变异的那一条，剩下的会静默失效——这是第三/四轮给
+    // `MirrorLiveEvent` 修过的同一个洞上移了一层。
+    //
+    // 这条零 spawn：只做 AST 静态检查，逐条枚举每个键集断言的两个类型实参文本。
+    const sf = ts.createSourceFile(ASSERT_FILE, source, ts.ScriptTarget.ES2022, true, ts.ScriptKind.TS);
+    const keySetAssertions: Array<{ name: string; args: string[] }> = [];
+    const visit = (node: ts.Node): void => {
+      if (
+        ts.isVariableDeclaration(node) &&
+        ts.isIdentifier(node.name) &&
+        (node.name.text.startsWith("_omit") || node.name.text.startsWith("_noExtra")) &&
+        node.type &&
+        ts.isTypeReferenceNode(node.type) &&
+        node.type.typeName.getText(sf) === "SameKeys"
+      ) {
+        keySetAssertions.push({
+          name: node.name.text,
+          args: (node.type.typeArguments ?? []).map((a) => a.getText(sf)),
+        });
+      }
+      ts.forEachChild(node, visit);
+    };
+    visit(sf);
+
+    // 数量不写死（本包规矩：数不清就别数），但必须两边都覆盖到，且非空。
+    expect(keySetAssertions.length, "一条键集断言都没找到——AST 判据可能写错了").toBeGreaterThan(0);
+    expect(keySetAssertions.some((a) => a.name.startsWith("_omit"))).toBe(true);
+    expect(keySetAssertions.some((a) => a.name.startsWith("_noExtra"))).toBe(true);
+
+    for (const a of keySetAssertions) {
+      expect(a.args, `${a.name} 必须有两个类型实参`).toHaveLength(2);
+      const [lhs, rhs] = a.args as [string, string];
+      // 第一个实参必须真的是键集运算，不是随便写个 never 凑数。
+      expect(lhs, `${a.name} 的第一个实参必须是 CoreOnlyKeys / MirrorOnlyKeys`).toMatch(
+        /^(CoreOnlyKeys|MirrorOnlyKeys)</,
+      );
+      // 两个实参都不许出现 any——那会让整条断言真空成立。
+      for (const [pos, arg] of [["第一", lhs], ["第二", rhs]] as const) {
+        expect(
+          /\bany\b/.test(arg),
+          `${a.name} 的${pos}个实参含 any，会让 SameKeys 真空成立：${arg}`,
+        ).toBe(false);
+      }
+    }
   });
 });
 
