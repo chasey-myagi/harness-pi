@@ -65,8 +65,8 @@ Not run, with reason: 真 Postgres 集成测试未在本地跑（需 `POSTGRES_T
   「`keyof` 的固有限制」——实测 `Extract<...[number], {type:"image"}>` 之后 `keyof` 完全可用。
   据此定下判据：**能用 `Extract` / 索引访问拎成具体类型的层，必须写断言，不许算进盲区台账**。
   **R9**（第六轮，三门又一次同时抓到）：**同一个失败模式上移了一层**——判据 R8 是对的，
-  但同一轮的文字转身宣称事件轨 arm「拎不出统一形状」，而 fixture 03/04/06 自己就在用
-  `Extract<MirrorSessionEvent, {type:"turn-start"}>`。盲区台账因此从 4 条缩到 2 条
+  但同一轮的文字转身宣称事件轨 arm「拎不出统一形状」，而 `typecheck-fixtures/` 下的反例
+  自己就在用同款 `Extract` 拎单个 arm。盲区台账因此从 4 条缩到 2 条
   （只剩兄弟 arm 与 `readonly`），arm 层用 `ArmKeyDrift` 机器枚举钉死。
   **据此补一条纪律（不变量 15）：声称某处钉不住之前，先真的试着把它拎出来钉一遍。**
   逐条依据见 issue 正文「AC 修订记录」。

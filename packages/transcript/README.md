@@ -67,7 +67,7 @@ text / image 两变体，以及**事件轨的每一个 arm**——最后这层�
 
 > **同一个失败模式连续栽了两轮，记在这里。** 第五轮：写「只到具名类型顶层」，
 > 把 `ToolExecResult.content` 漏在缝里。第六轮：判据改对了，却转身宣称事件轨 arm
-> 「拎不出统一形状」——而 fixture 03/04/06 自己就在用 `Extract<MirrorSessionEvent, {type:"turn-start"}>`。
+> 「拎不出统一形状」——而 `typecheck-fixtures/` 下的反例自己就在用同款 `Extract` 拎单个 arm。
 > 两次都是三门 review 同时实测证伪。
 > **教训不是「再仔细一点」，是：声称某处钉不住之前，先真的试着把它拎出来钉一遍。**
 

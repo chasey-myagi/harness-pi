@@ -337,7 +337,7 @@ describe("扫描器本身有判别力", () => {
       ["(globalThis).x —— 括号绕过", ["Buffer"]],
       ["{ process, Buffer } —— 简写属性是值引用", ["process", "Buffer"]],
       ["const { x } = globalThis as T —— 宿主全局解构", ["process", "Buffer"]],
-      // ↓ 第五轮 review 补：以下四条此前零标本，退化实现也能全绿
+      // ↓ 第五轮 review 补：以下几条此前零标本，退化实现也能全绿（不写条数）
       ["const { a: { x } } = globalThis —— 嵌套 binding pattern", ["process"]],
       ["const { a: [{ x }] } = globalThis —— ArrayBindingPattern 出口", ["Buffer"]],
       ["function f({ x } = globalThis) —— Parameter 出口", ["process"]],

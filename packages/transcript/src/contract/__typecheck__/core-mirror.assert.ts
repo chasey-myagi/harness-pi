@@ -49,8 +49,9 @@
  *   这类具名类型内部嵌套的匿名对象漏在二分的缝里。三门 review 同时实测证伪。
  *   补断言后定下判据：**能用 `Extract` / 索引访问拎成具体类型的层，必须写断言。**
  * - **第六轮**：判据是对的，但同一轮的文字转身宣称事件轨 arm「拎不出统一形状」——
- *   而 `typecheck-fixtures/03`、`04`、`06` 四处**自己就在用**
- *   `Extract<MirrorSessionEvent, {type:"turn-start"}>`。三门 review 又一次同时抓到。
+ *   而 `typecheck-fixtures/` 下的反例自己就在用同款 `Extract<MirrorSessionEvent, {type:...}>`
+ *   把单个 arm 拎出来做类型手术（04 用 `turn-start`、03 用 `turn-end`、06 用 `error`）。
+ *   三门 review 又一次同时抓到。
  *   现已用 `ArmKeyDrift` 这条 mapped type 机器枚举全部 arm 钉死。
  *
  * 教训不是「再仔细一点」，而是：**声称某处「钉不住」之前，先试着把它拎出来钉一遍。**
@@ -126,8 +127,11 @@ const _toolCallMirrorToCore: PiToolCall = null as unknown as MirrorToolCall;
  * 论点是「手维护的清单必须由机器钉住」，同一个包不该有两套标准。
  *
  * 这几条把每个具名类型的**顶层键集**钉死：镜像省了哪些、多了哪些，都写成类型。
- * 附带收益：它**关掉了盲区 1 与盲区 2 在这些类型顶层的那一半**——core 新增一个可选字段时
+ * 附带收益：它抓得住「新增可选字段」与「镜像多出可选字段」——core 新增一个可选字段时
  * `Exclude<keyof Core, keyof Mirror>` 会多出一项，编译失败；双向可赋值断言对此完全无感。
+ *
+ * > **别写成「关掉了盲区 N」**：台账缩编后编号会变，而这句话曾经在缩编后指着
+ * > 兄弟 arm 与 `readonly` 说「已关掉」——那两条键集断言一点都碰不到。引编号必漂，引形态不漂。
  *
  * **判据（第五轮定下、第六轮补上执行）**：一个匿名内联对象是「钉不住」还是「没钉」，
  * 看**能不能用 `Extract` / 索引访问把它拎成一个具体类型**。能拎出来的就必须写断言，
@@ -254,8 +258,9 @@ const _noExtraToolContentImage: SameKeys<
  * 然后同一轮的文字转身宣称事件轨 arm「拎不出统一形状，这是 `keyof` 的固有限制」。
  * **那是假的**：两条 union 都以 `type` 字面量判别，
  * `Extract<CoreSessionEvent, { type: "turn-start" }>` 就是抓手——
- * 而 `typecheck-fixtures/03`、`04`、`06` 四处**自己就在用这个写法**，
- * 相隔几行自相矛盾。实测：给 core 的 turn-start arm 加 `hostLatencyMs?: number`，
+ * 而 `typecheck-fixtures/` 下的反例自己就在用同款写法把单个 arm 拎出来（04 `turn-start` /
+ * 03 `turn-end` / 06 `error`），06 更是相隔几行自相矛盾。实测：给 core 的 turn-start arm
+ * 加 `hostLatencyMs?: number`，
  * 双向可赋值两向 `EXIT=0`，逐 arm 键集立刻报 TS2322。
  *
  * 修法不是手写 14 条断言——那又是一份手维护清单。用 mapped type 让 TypeScript

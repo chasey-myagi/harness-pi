@@ -149,7 +149,7 @@ describe("注入式变异：断言此刻真的在约束镜像", () => {
 
   it("镜像删掉一个**可选**字段 → 键集断言报错（双向断言看不见这种）", () => {
     // 这条专门证明键集断言的增量价值：`isError?: boolean` 是可选字段，删掉它之后
-    // 双向可赋值断言两个方向都仍然通过（这正是盲区 1）；只有
+    // 双向可赋值断言两个方向都仍然通过（它对可选字段完全无感）；只有
     // `CoreOnlyKeys<CoreToolExecResult, MirrorToolExecResult>` 会多出一项而失败。
     const r = compileContractCopy((src) => src.replace("  isError?: boolean;\n", ""));
     expectExitedWithDiagnostics(r, "删可选字段后键集断言应当失败");
@@ -208,6 +208,25 @@ describe("注入式变异：断言此刻真的在约束镜像", () => {
     // 而不是 boolean 的原因。只断言「报错了」的话，随便哪条断言塌掉都能让这条假通过。
     expect(r.output, "诊断必须点名漂移的 arm，否则定位不了").toContain(
       `Type '"turn-start"' is not assignable to type 'never'`,
+    );
+  });
+
+  it("LiveEvent 某个 arm 新增可选字段 → `_armDriftLiveEvent` 报错并点名", () => {
+    // 上一条只打 SessionEvent 的 turn-start，于是 `_armDriftLiveEvent` **自己零覆盖**——
+    // 第七轮 review 实测：把那一行删掉，LiveEvent arm 加可选字段 EXIT=0，44 条测试全绿。
+    // 这是「断言存在但不被检查」（product.md 不变量 8 明令禁止）的第三次复现：
+    // 第三/四轮是 `MirrorLiveEvent` 换 any，第五轮是 `MirrorOnlyKeys` 半边零变异，这次是它。
+    // 两条事件轨各配一条对称的变异，别再只打一条。
+    const r = compileContractCopy((src) =>
+      src.replace(
+        '  | { type: "message_update"; message: MirrorAssistantMessage }',
+        '  | { type: "message_update"; message: MirrorAssistantMessage; hostLatencyMs?: number }',
+      ),
+    );
+    expectExitedWithDiagnostics(r, "LiveEvent arm 新增可选字段后 arm 层断言应当失败");
+    expect(r.output).toContain(ASSERT_REL);
+    expect(r.output, "诊断必须点名漂移的 LiveEvent arm").toContain(
+      `Type '"message_update"' is not assignable to type 'never'`,
     );
   });
 });
@@ -319,6 +338,31 @@ it("fixture 05 继承真正的 tsconfig.browser.json，而不是手抄一份副�
 
 /* ──────────────────── 断言不可被绕过（廉价路径） ──────────────────── */
 
+/** 从断言文件的 AST 收集键集断言（名字 + 两个类型实参文本）。走 AST，不碰注释。 */
+function collectKeySetAssertions(): Array<{ name: string; args: string[] }> {
+  const src = readFileSync(ASSERT_FILE, "utf8");
+  const sf = ts.createSourceFile(ASSERT_FILE, src, ts.ScriptTarget.ES2022, true, ts.ScriptKind.TS);
+  const out: Array<{ name: string; args: string[] }> = [];
+  const visit = (node: ts.Node): void => {
+    if (
+      ts.isVariableDeclaration(node) &&
+      ts.isIdentifier(node.name) &&
+      (node.name.text.startsWith("_omit") || node.name.text.startsWith("_noExtra")) &&
+      node.type &&
+      ts.isTypeReferenceNode(node.type) &&
+      node.type.typeName.getText(sf) === "SameKeys"
+    ) {
+      out.push({
+        name: node.name.text,
+        args: (node.type.typeArguments ?? []).map((a) => a.getText(sf)),
+      });
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(sf);
+  return out;
+}
+
 describe("断言的静态完整性", () => {
   const source = readFileSync(ASSERT_FILE, "utf8");
 
@@ -392,25 +436,7 @@ describe("断言的静态完整性", () => {
     // `MirrorLiveEvent` 修过的同一个洞上移了一层。
     //
     // 这条零 spawn：只做 AST 静态检查，逐条枚举每个键集断言的两个类型实参文本。
-    const sf = ts.createSourceFile(ASSERT_FILE, source, ts.ScriptTarget.ES2022, true, ts.ScriptKind.TS);
-    const keySetAssertions: Array<{ name: string; args: string[] }> = [];
-    const visit = (node: ts.Node): void => {
-      if (
-        ts.isVariableDeclaration(node) &&
-        ts.isIdentifier(node.name) &&
-        (node.name.text.startsWith("_omit") || node.name.text.startsWith("_noExtra")) &&
-        node.type &&
-        ts.isTypeReferenceNode(node.type) &&
-        node.type.typeName.getText(sf) === "SameKeys"
-      ) {
-        keySetAssertions.push({
-          name: node.name.text,
-          args: (node.type.typeArguments ?? []).map((a) => a.getText(sf)),
-        });
-      }
-      ts.forEachChild(node, visit);
-    };
-    visit(sf);
+    const keySetAssertions = collectKeySetAssertions();
 
     // 数量不写死（本包规矩：数不清就别数），但必须两边都覆盖到，且非空。
     expect(keySetAssertions.length, "一条键集断言都没找到——AST 判据可能写错了").toBeGreaterThan(0);
@@ -463,13 +489,19 @@ describe("断言的静态完整性", () => {
     });
     expect(exportedInterfaces.length, "一个导出的 interface 都没找到——AST 判据可能写错了").toBeGreaterThan(0);
 
-    const assertText = source;
+    // **判据必须走 AST，不能对源文本做正则**：`source` 含注释，而注释里就写着
+    // 「`_noExtra*` 与 `_omitUsage` 这类」——第七轮 review 实测：删掉 `_omitUsage`
+    // 的**声明**后这条检查仍然通过，因为注释里的同名字符串把它兜住了。
+    // 那让 product.md 的 AC「删掉任意一条键集断言 → 完整性检查变红」变成一句假话。
+    // （我自己验过一次，但挑的是 `_noExtraRunSummary`——那个名字恰好没出现在注释里，
+    // 所以碰巧通过了。验证挑样本本身也会骗人。）
+    const declaredNames = new Set(collectKeySetAssertions().map((a) => a.name));
     const missing: string[] = [];
     for (const name of exportedInterfaces) {
       // `MirrorToolExecResult` → `_omitToolExecResult` / `_noExtraToolExecResult`
       const bare = name.replace(/^Mirror/, "");
       for (const prefix of ["_omit", "_noExtra"]) {
-        if (!new RegExp(`\\b${prefix}${bare}\\b`).test(assertText)) {
+        if (!declaredNames.has(`${prefix}${bare}`)) {
           missing.push(`${prefix}${bare}（对应 ${name}）`);
         }
       }

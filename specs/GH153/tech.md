@@ -100,7 +100,9 @@ const _omitToolExecResult: SameKeys<
 > = true;
 ```
 
-它**关掉了盲区 1 与盲区 2 在已写断言那些层的那一半**：core 新增可选字段、或镜像多出可选字段，
+它抓得住「新增可选字段」与「镜像多出可选字段」（**别写成「关掉了盲区 N」**——台账缩编后编号会变，
+而这句话曾经在缩编后指着兄弟 arm 与 `readonly` 说「已关掉」，那两条键集断言一点都碰不到）：
+core 新增可选字段、或镜像多出可选字段，
 双向可赋值断言对此**完全无感**（实测两个方向都 `EXIT=0`），键集断言会让 `Exclude` 多出一项、
 编译失败。
 
@@ -124,8 +126,8 @@ const _omitToolExecResult: SameKeys<
 > 还被归到「`keyof` 的固有限制」名下。三门 review 同时实测证伪。
 > **判据据此定下**：能用 `Extract` / 索引访问拎成具体类型的层，必须写断言。
 > **第六轮**：判据是对的，但同一轮的文字转身宣称事件轨 arm「拎不出统一形状」——
-> 而 fixture 03/04/06 自己就在用 `Extract<MirrorSessionEvent, {type:"turn-start"}>`。
-> 三门 review 又一次同时抓到。
+> 而 `typecheck-fixtures/` 下的反例自己就在用同款 `Extract` 拎单个 arm
+> （04 `turn-start` / 03 `turn-end` / 06 `error`）。三门 review 又一次同时抓到。
 > **教训不是「再仔细一点」，是：声称某处钉不住之前，先真的试着把它拎出来钉一遍。**
 > 拎得动就是漏写，拎不动才是限制——上面那两条 ❌ 都做过这个动作。
 
@@ -217,7 +219,7 @@ fixture 05 **必须 `extends` 真配置**，不能手抄 `lib` / `types`。抄�
 
 - **直接转发内核类型**（`export type { SessionEvent, LiveEvent } from "@harness-pi/core"`，不建镜像）
   —— **这是最强的一条对手，必须认真否决而不是略过**。它的诱惑力很实在：没有镜像就没有漂移，
-  于是四条盲区台账、四条双向断言、五个 fixture、`core-mirror.ts` 那张 12 行省略字段表**全部蒸发**。
+  于是盲区台账、双向断言、漂移反例 fixture、`core-mirror.ts` 那张省略字段表**全部蒸发**。
   而且它在技术上是可行的：实测 `import type { SessionEvent, LiveEvent } from "@harness-pi/core"`
   在**本仓自己那份 `tsconfig.browser.json`**（`lib: ["ES2022","DOM"]` + `types: []`）下 `EXIT=0`，
   core 连同 pi-ai 的类型闭包在类型层面确实是 browser-safe 的；`import type` 被完全擦除，运行时零字节。

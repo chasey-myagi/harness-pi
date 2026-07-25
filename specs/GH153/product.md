@@ -102,13 +102,14 @@ GH-153
     它关掉的正是不变量 9 的（1）（2）在这些层上的那一半。
 
     **哪些层必须写**（判据，不是清单）：一个类型只要能用 `Extract` / 索引访问**拎成具体类型**，
-    就必须给它写键集断言，不许算进盲区台账。据此当前已钉：7 个具名类型的顶层、
-    `Usage["cost"]`、以及 `ToolExecResult.content` 的 text / image 两个变体。
+    就必须给它写键集断言，不许算进盲区台账。当前已钉的层：具名类型顶层、`Usage["cost"]`、
+    `ToolExecResult.content` 的两个变体、以及两条事件轨的**每一个 arm**
+    （后者用 `ArmKeyDrift` mapped type 机器枚举，不手写清单）。
 
-    **覆盖边界必须如实写明，不许升格成「盲区已解决」，也不许把漏写讲成限制**：
-    `SessionEvent` / `LiveEvent` 各 arm 里的匿名内联对象**拎不出统一形状**（`keyof` 作用在
-    union 上得到各成员键的交集，实测 `keyof MirrorSessionEvent` 只有 `"type"`），这才是真限制；
-    `keyof` 看不见 `readonly`，不变量 9 的（4）分毫未动。
+    **这份「已钉清单」是已知不完整的**——它被连续三轮 review 各证伪一次，见不变量 15。
+    因此本 spec **不再声称任何覆盖边界是完备的**：断言逐条列在
+    `core-mirror.assert.ts` 里，盲区台账逐条列在它的文件头，两份都只是**已实测事实的记录**，
+    不构成「未列出的形态一定抓得住」或「未钉的层一定钉不住」的推论。
 
     这一层必须有独立的变异验证，且**两个半边各一条**：镜像**删掉**一个可选字段（打
     `CoreOnlyKeys` 半边）、镜像**多出**一个可选字段（打 `MirrorOnlyKeys` 半边），
@@ -125,8 +126,8 @@ GH-153
     - **第五轮**：把 `ToolExecResult.content` 这类具名类型内部嵌套的匿名对象，
       漏在「具名类型顶层 vs arm 内」的二分缝里，并归因为「`keyof` 的固有限制」。
     - **第六轮**：判据已经写对了，却转身宣称事件轨 arm「拎不出统一形状」——
-      而 `typecheck-fixtures/03`、`04`、`06` 四处**自己就在用**
-      `Extract<MirrorSessionEvent, {type:"turn-start"}>`。
+      而 `typecheck-fixtures/` 下的反例自己就在用同款 `Extract` 把单个 arm 拎出来
+      （04 用 `turn-start`、03 用 `turn-end`、06 用 `error`）。
 
     事件轨 arm 现由 `ArmKeyDrift` 这条 mapped type **机器枚举**钉死（不手写 14 条），
     诊断直接点名漂移的 arm。
