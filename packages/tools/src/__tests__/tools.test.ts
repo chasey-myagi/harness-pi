@@ -13,6 +13,9 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { AgentSession, type HarnessTool } from "@harness-pi/core";
 import { createFakeModel } from "@harness-pi/core/testing";
 import {
+  allTools,
+  bashTool,
+  createAllTools,
   createBashTool,
   createCodingTools,
   createEditTool,
@@ -22,10 +25,30 @@ import {
   createReadOnlyTools,
   createReadTool,
   createWriteTool,
+  editTool,
+  findTool,
+  grepTool,
+  lsTool,
   readTool,
+  toolNames,
+  type ToolName,
+  writeTool,
 } from "../index.js";
 
 let dir = "";
+
+const TOOL_DANGER_METADATA = {
+  read: { isReadOnly: true, isDestructive: false, isOpenWorld: false },
+  bash: { isReadOnly: false, isDestructive: true, isOpenWorld: true },
+  edit: { isReadOnly: false, isDestructive: true, isOpenWorld: false },
+  write: { isReadOnly: false, isDestructive: true, isOpenWorld: false },
+  grep: { isReadOnly: true, isDestructive: false, isOpenWorld: false },
+  find: { isReadOnly: true, isDestructive: false, isOpenWorld: false },
+  ls: { isReadOnly: true, isDestructive: false, isOpenWorld: false },
+} satisfies Record<
+  ToolName,
+  Pick<HarnessTool, "isReadOnly" | "isDestructive" | "isOpenWorld">
+>;
 
 beforeEach(async () => {
   dir = await mkdtemp(path.join(tmpdir(), "harness-pi-tools-"));
@@ -47,6 +70,43 @@ function text(result: Awaited<ReturnType<HarnessTool["execute"]>>): string {
   if (first?.type !== "text") throw new Error("expected text result");
   return first.text;
 }
+
+function dangerMetadata(tool: HarnessTool) {
+  return {
+    isReadOnly: tool.isReadOnly,
+    isDestructive: tool.isDestructive,
+    isOpenWorld: tool.isOpenWorld,
+  };
+}
+
+describe("tool danger metadata", () => {
+  for (const name of toolNames) {
+    it(`declares exact danger metadata for ${name}`, () => {
+      expect(dangerMetadata(createAllTools(dir)[name])).toEqual(
+        TOOL_DANGER_METADATA[name],
+      );
+    });
+  }
+
+  it("exposes danger metadata on exported tool objects", () => {
+    const individualExports = {
+      read: readTool,
+      bash: bashTool,
+      edit: editTool,
+      write: writeTool,
+      grep: grepTool,
+      find: findTool,
+      ls: lsTool,
+    } satisfies Record<ToolName, HarnessTool>;
+
+    for (const name of toolNames) {
+      expect(dangerMetadata(individualExports[name])).toEqual(
+        TOOL_DANGER_METADATA[name],
+      );
+      expect(dangerMetadata(allTools[name])).toEqual(TOOL_DANGER_METADATA[name]);
+    }
+  });
+});
 
 describe("read tool", () => {
   it("reads text files with cwd-relative paths and offset/limit", async () => {

@@ -31,13 +31,29 @@
 ## 哲学
 
 1. **Kernel 极简**。`@harness-pi/core` 只做两件事：跑 pi-ai 的 LLM-tool 循环 + 派发 hook。无 metric、无 watchdog、无 pool、无 compaction 策略——内核只 fire `onContextOverflow` / `onContinuationCheck` / `onAfterFlush` 等观测点，策略全在插件/控制器。
-2. **一切皆 hook**。watchdog、metrics、trim/auto/micro-compaction、tool output buffer、log、empty-run guard、lease decision、permission gate、token/cost/tool-stats、turn-end guard、deferred-tools/skills——全部是 hook 实例，全部在 `@harness-pi/plugins` 里（20 个 `Hook` 工厂 + `toolSearch`/`skills` 工具工厂，详见 [docs/05-plugins](docs/05-plugins.md)）。
+2. **一切皆 hook**。watchdog、metrics、trim/auto/micro-compaction、tool output buffer、log、empty-run guard、lease decision、permission gate、token/cost/tool-stats、turn-end guard、deferred-tools/skills——全部是 hook 实例，全部在 `@harness-pi/plugins` 里（具体导出计数以 [docs/05-plugins](docs/05-plugins.md) 和 `packages/plugins/src/index.ts` 为准）。
 3. **基础 coding tools 是一等包**。服务端 agent 也需要 read/grep/bash 这类工具；它们不该由每个消费者重写。
 4. **Plugin ≠ Controller ≠ Adapter**。
    - Plugin：钩 loop 事件（装饰器形态）
    - Controller：orchestrate 一/多个 session（work-pool、lifecycle-restart、fork-session、parallel/pipeline、sub-agent-tool/registry、compact-restart/resume、gap-explorer，详见 [docs/06-controllers](docs/06-controllers.md)）
    - Adapter：plugin 的 I/O 后端（metric sink、log sink、session store）
 5. **不强加 DB**、**不强加 frontend**、**不强加 metric kinds**。Sink 走接口 + peerDep；自定义 metric kind 用 TS module augmentation。
+
+## harness-pi 与 Loop Engineering
+
+"Loop Engineering"——把 agent 跑成**带护栏的循环**（"harness 的上一层"）——正在成为共识。Claude Code / Codex 把 `/loop`、`/goal` 这类循环做成**不透明的内置命令**；harness-pi 的定位是互补的另一端：**不卖某一条 loop 命令，卖装那台循环的可编程零件**。一条生产级 loop 需要的护栏，在 harness-pi 里几乎都已是 first-class hook / controller（且方向正是后端服务 / 批处理 agent，不是终端 UX）：
+
+| Loop 需要的护栏 | harness-pi 现成件（均已 ship + 测试覆盖） |
+|---|---|
+| 停止条件 / 验收闸门 | `turnEndGuard`（模型想停时跑 check，不过则回灌原因强制续跑） |
+| 生成者 / 验证者分离（maker-verifier） | `subAgentTool` / `routedSubAgentTool`——把验证放进**回合之外的独立 sub-agent**（不同指令、只回 PASS/FAIL），符合"别批改自己的作业" |
+| 硬保险丝（预算 / 无进展 / 熔断） | `tokenBudget` / `repeatedCallGuard` / `emptyRunGuard` / `watchdog` |
+| 上下文经济（cache 友好） | `autoCompaction` + **封存投影**（v0.5.0）+ `prefixShape` 前缀诊断 |
+| 知识固化（skills） | `skills` / `deferredTools`（O1/O2 渐进暴露） |
+| 外置状态 / 可恢复 | `SessionStore`（append-only）+ `compaction_boundary` |
+| 并行 / 扇出编排 | controllers：`parallel` / `pipeline` / `workPool` / `forkSession` |
+
+> Claude Code 给你一个不透明的 `/goal`；harness-pi 给你**装那台摇柄的零件**。用上表的现成 hook 可以从零件拼出一条 maker-verifier loop（生成者干活 → 独立 reviewer 回合外判 PASS/FAIL → 预算 / 无进展做硬保险丝），不依赖任何内置命令——可运行示例见 [`examples/05-maker-verifier-loop`](examples/05-maker-verifier-loop)。
 
 ## 当前状态
 
@@ -67,7 +83,7 @@ pnpm --filter @harness-pi/coding-agent start -- --cwd . --model dashscope:qwen-p
 - 默认 log 目录是 `.harness-pi/logs`；`--metrics-file path.ndjson` 可写 metrics。
 - 默认对 session log 里的高危 tool args 脱敏（`write` 内容、`edit` 文本、`bash` 命令仅记长度，不落原文，避免密钥/源码静默写进 `.harness-pi/logs`）；`--log-args full` 记原始 args（仅本地调试）；`--log-args none` 完全不记 args；`--no-log` 关闭整个 session log。
 - **`.harness-pi/` 落盘与 gitignore**：session log 已默认脱敏（见上），但 **resume 存储**（`.harness-pi/sessions/*.jsonl`，TUI / `--resume` 用）为了能正确**重放续跑**保存**完整原文**消息历史（含 `write` 内容、`bash` 命令等），**不脱敏**。启动时若检测到当前仓库未把 `.harness-pi/` 加入 `.gitignore`，会打印一条告警——请务必把 `.harness-pi/` 加入 `.gitignore`，以免敏感内容被误提交。
-- **安全边界**：`bash` 是 host shell，不是 sandbox。full mode 只应在你明确允许修改的 workspace 里运行。
+- **安全边界**：`bash` 是 host shell，不是 sandbox。full mode 只应在你明确允许修改的 workspace 里运行。`bash` tool 的 `BashOperations.exec`（`packages/tools`）是**唯一安全咽喉点**——把 OS 级沙箱接进来的唯一接缝。默认 `defaultExec` 仅供 trusted 环境；**生产 / headless / 跑在不可信输入上时，必须经 `operations.exec` 注入沙箱化 exec**（`permissionGate` 的字符串审批是筛子不是墙，只降噪不设边界）。设计见 [docs/14 §3.3](docs/14-production-coding-agent-architecture.md)。
 
 ## Layout
 
@@ -83,7 +99,9 @@ harness-pi/
 ├── examples/
 │   ├── 01-bare-kernel/
 │   ├── 02-with-plugins/
-│   └── 03-tools/
+│   ├── 03-tools/
+│   ├── 04-batch-pipeline/
+│   └── 05-maker-verifier-loop/  # maker-verifier loop assembled from hooks
 └── README.md
 ```
 

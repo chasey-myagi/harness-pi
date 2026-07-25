@@ -9,6 +9,7 @@ import {
   Type,
   createUserMessage,
   type HarnessTool,
+  type LlmOptions,
   type Message,
 } from "@harness-pi/core";
 import { createFakeModel } from "@harness-pi/core/testing";
@@ -201,6 +202,44 @@ describe("Phase 3: forkSession controller", () => {
     expect(hasHangingToolCall).toBe(false);
     // 但 user 历史保留
     expect((received ?? []).some((m) => m.role === "user")).toBe(true);
+    expect(result.summary.reason).toBe("done");
+    parentFake.teardown();
+    childFake.teardown();
+  });
+
+  it("forkSession passes cache-safe llmOptions through to the factory", async () => {
+    const llmOptions: LlmOptions = {
+      sessionId: "parent-cache-session",
+      cacheRetention: "long",
+      providerExtras: { cacheNamespace: "fork" },
+    };
+    const parentFake = createFakeModel();
+    const parent = new AgentSession({
+      model: parentFake,
+      tools: [],
+      initialMessages: [createUserMessage("hi")],
+      llmOptions,
+    });
+
+    let received: LlmOptions | undefined;
+    const childFake = createFakeModel([
+      { content: [{ type: "text", text: "child done" }] },
+    ]);
+    const result = await forkSession(
+      parent,
+      (init, cacheParams) => {
+        received = cacheParams.llmOptions;
+        return new AgentSession({
+          model: childFake,
+          tools: [],
+          initialMessages: init,
+          llmOptions: cacheParams.llmOptions,
+        });
+      },
+      { prompt: "child prompt" },
+    );
+
+    expect(received).toEqual(llmOptions);
     expect(result.summary.reason).toBe("done");
     parentFake.teardown();
     childFake.teardown();

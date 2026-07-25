@@ -1,0 +1,24 @@
+{
+  "name": "@harness-pi-example/05-maker-verifier-loop",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Reference example: a maker-verifier loop assembled from existing hooks (turnEndGuard gate + independent reviewer AgentSession + tokenBudget/repeatedCallGuard fuses). Shows #111 'Loop Engineering substrate' — build the loop from parts, no bespoke /goal command. Doubles as a cross-package integration test.",
+  "type": "module",
+  "scripts": {
+    "start": "tsx src/index.ts",
+    "typecheck": "tsc -p . --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "dependencies": {
+    "@harness-pi/core": "workspace:*",
+    "@harness-pi/plugins": "workspace:*",
+    "@earendil-works/pi-ai": "^0.74.2"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "tsx": "^4.0.0",
+    "typescript": "^5.6.0",
+    "vitest": "^2.1.0"
+  }
+}

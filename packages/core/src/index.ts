@@ -24,6 +24,7 @@ export type {
   ErrorInput,
   // ─── Phase 1: state typing / structured log / config view ───
   HookStateRegistry,
+  StateSlot,
   TypedStateMap,
   HookLogger,
   LogLevel,
@@ -31,6 +32,7 @@ export type {
   // ─── Live boundary（autoCompaction → カーネル連携）───
   ActiveBoundary,
 } from "./hook.js";
+export { defineSlot } from "./hook.js";
 
 // ─────────── Dispatcher (advanced; plugin authors usually don't need) ───────────
 export {
@@ -78,7 +80,7 @@ export type {
 } from "./session.js";
 
 // ─────────── LLM seam（自定义 Model 构造 + typed llmOptions，收口 pi-ai 公共面） ───────────
-export { makeOpenAICompatibleModel, resolveLlmOptions } from "./llm-model.js";
+export { completeText, makeOpenAICompatibleModel, resolveLlmOptions } from "./llm-model.js";
 export type { OpenAICompatibleModelSpec, LlmOptions } from "./llm-model.js";
 
 // ─────────── HookContextImpl 实例类型（plugin / controller 偶尔需要） ───────────
@@ -103,3 +105,9 @@ export type {
 } from "@earendil-works/pi-ai";
 export { Type } from "@earendil-works/pi-ai";
 export type { Static, TSchema } from "@earendil-works/pi-ai";
+export {
+  calculateCost,
+  getEnvApiKey,
+  getModels,
+  getProviders,
+} from "@earendil-works/pi-ai";

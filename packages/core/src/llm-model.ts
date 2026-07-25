@@ -12,11 +12,15 @@
  *       `{apikey}` 这类 typo 在编译期失败；真·provider 私有键走具名 `providerExtras` 逃生口。
  */
 
-import type {
-  Model,
-  StreamOptions,
-  ProviderStreamOptions,
-  OpenAICompletionsCompat,
+import {
+  complete,
+  type Api,
+  type AssistantMessage,
+  type Message,
+  type Model,
+  type StreamOptions,
+  type ProviderStreamOptions,
+  type OpenAICompletionsCompat,
 } from "@earendil-works/pi-ai";
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -61,6 +65,46 @@ export function resolveLlmOptions(
   if (!opts) return {};
   const { providerExtras, ...rest } = opts;
   return { ...rest, ...providerExtras };
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// #132 — out-of-band text completion seam
+// ─────────────────────────────────────────────────────────────────────────────
+
+function assistantText(message: AssistantMessage): string {
+  return message.content
+    .filter(
+      (b): b is Extract<AssistantMessage["content"][number], { type: "text" }> =>
+        b.type === "text",
+    )
+    .map((b) => b.text)
+    .join("");
+}
+
+/**
+ * 一次性、无工具的带外文本补全。用于 compaction/summarize 这类不经过 AgentSession 的 LLM 调用。
+ *
+ * pi-ai 的 `complete()` 在 provider error / length / abort 时通常 resolve 一条非 stop assistant；
+ * 对文本 helper 来说这些都不是可用结果，转成 throw，避免调用方把空文本当成功缓存。
+ */
+export async function completeText<TApi extends Api>(
+  model: Model<TApi>,
+  messages: Message[],
+  llmOptions?: LlmOptions,
+): Promise<string> {
+  const result = await complete(
+    model,
+    { messages, tools: [] },
+    resolveLlmOptions(llmOptions),
+  );
+  const text = assistantText(result);
+  if (result.stopReason !== "stop" || text.length === 0) {
+    throw new Error(
+      `completeText failed (stopReason=${result.stopReason})` +
+        (result.errorMessage ? `: ${result.errorMessage}` : ""),
+    );
+  }
+  return text;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

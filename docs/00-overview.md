@@ -79,11 +79,12 @@ LOC 预算是压力线，不是 KPI。`session.ts` 已经是完整实现；新�
 
 ### 5.3 Plugin 自带电池
 
-`@harness-pi/plugins` 提供"production agent 几乎一定需要"的 12 个标准 plugin：
+`@harness-pi/plugins` 提供"production agent 几乎一定需要"的 plugin 标准库，分两档交付：
 
-watchdog · trim-history · empty-run-guard · tool-output-buffer · session-log · metrics · system-reminder · batch-counter · lease-decision · cost-tracker · token-budget · repeated-call-guard
+- 核心 12：watchdog · trim-history · empty-run-guard · tool-output-buffer · session-log · metrics · system-reminder · batch-counter · lease-decision · cost-tracker · token-budget · repeated-call-guard
+- 高级 / 后续新增：tool-stats · compact-summarize · auto-compaction · microcompact · summary-template · post-compact-file-reread · turn-end-guard · permission-gate · deferred-tools/tool-search/skills · prefix-shape 等
 
-每个 plugin 都以 hook 实现为主，尽量保持小而独立，通过 `ctx.state` 和显式 helper 协作。详见 [05-plugins.md](05-plugins.md)。
+具体导出计数以 [05-plugins.md](05-plugins.md) 和 `packages/plugins/src/index.ts` 为准。每个 plugin 都以 hook 实现为主，尽量保持小而独立，通过 `ctx.state` 和显式 helper 协作。
 
 ### 5.4 Controller 解决高阶模式
 
@@ -128,11 +129,11 @@ Hot path 上的 plugin **只允许同步操作或 push-to-queue**。需要持久
 | Frontend / dashboard | 独立 repo，将来再说 |
 | pi-coding-agent 的 extension API 兼容 | 方向完全不同（终端 UX vs 服务端运行时） |
 | pi-coding-agent runtime dependency | 基础 tools 自己实现；兼容靠测试，不靠偷运行时代码 |
-| MCP 集成 | Mario 不做，我们也不做；要用 plugin 自己接 |
-| 多 agent orchestration | 单 agent 内核先做扎实，多 agent 是 Controller 层 |
+| MCP 集成进 core | 不进 core；作为 adapter / tool pack / app capability opt-in，coding-agent roadmap 将其列为 P1 |
+| 多 agent orchestration 进 core | 单 agent 内核先做扎实；多 agent 是 Controller / app 层，不污染 core |
 | 替 pi-ai 做任何事 | Provider 接入、OAuth、cross-provider handoff——pi-ai 已经做了 |
 | 内置 RAG / vector store | 那是 langchain/llamaindex 的事，不是 harness |
-| 内置 compaction 策略 | 用户用 `transformMessagesBeforeLlm` 自己做 |
+| 内置 compaction 策略进 core | 不进 core；`@harness-pi/plugins` 已提供 `compactSummarize` / `autoCompaction`，由 app 显式装配 |
 
 ## 7. 项目状态
 
@@ -140,8 +141,8 @@ Hot path 上的 plugin **只允许同步操作或 push-to-queue**。需要持久
 |---|---|
 | 0 设计签字 | 已完成到可实现状态，文档仍需随代码同步 |
 | 1 Kernel 跑通 | 已实现：`AgentSession`、dispatcher、tool executor、core tests |
-| 2 标准库 plugin | 已实现：watchdog / trim / guard / buffer / log / metrics / budget 等 |
-| 3 Controller 层 | 已实现第一版：lifecycle-restart / work-pool / lease-queue |
+| 2 标准库 plugin | 已实现：核心 12 + compaction / permission / deferred tools / skills / prefix diagnostics 等高级 plugin |
+| 3 Controller 层 | 已实现第一版：lifecycle-restart / work-pool / lease-queue / compact restart/resume / fork / orchestrate / sub-agent registry 等；`sideQuestion` 仍未落地 |
 | 4 第一方 tools | 已实现：`@harness-pi/tools` 七个基础 tools |
 | 5 第三方 agent 反向验证 | 未完成 |
 | 6 bidding-agent 反向消费 | 不建议现在全量替换；先 spike |
@@ -149,7 +150,7 @@ Hot path 上的 plugin **只允许同步操作或 push-to-queue**。需要持久
 
 详见 [roadmap](roadmap.md)。
 
-当前风险：核心机制已实现并有测试覆盖（`message_update` 渐进式 streaming、auto-compaction、PG metrics sink、`ctx.state` slot API 均已落地），但**尚无外部 production 用户**——真 LLM provider 的 streaming/error/overflow smoke、`bidding-agent` 真实迁移 spike 都还没做（成熟度三层详见 [README](../README.md)「当前状态」）。
+当前风险：核心机制已实现并有测试覆盖（`message_update` 渐进式 streaming、auto-compaction、PG metrics sink、`TypedStateMap` + `HookStateRegistry` 均已落地），但**尚无外部 production 用户**。真实 provider smoke 已覆盖 streaming / error 提级 / budget-bound continuation；reactive overflow 仍主要靠确定性测试覆盖，`bidding-agent` 真实迁移 spike 还没做。`ctx.state` 更强 slot API / 跨 plugin key 约束仍是 hardening 议题，而不是已落地事实（成熟度三层详见 [README](../README.md)「当前状态」）。
 
 ## 8. 下一步
 
@@ -159,6 +160,7 @@ Hot path 上的 plugin **只允许同步操作或 push-to-queue**。需要持久
 2. 关心 hook 接口 → 跳 [03-hook-system](03-hook-system.md)
 3. 关心 plugin 怎么写 → 跳 [05-plugins](05-plugins.md)
 4. 关心怎么并行跑 → 跳 [06-controllers](06-controllers.md)
+5. 关心 coding-agent 产品化差距 → 跳 [11-coding-agent-product-roadmap](11-coding-agent-product-roadmap.md)
 
 如果你是来 review 设计：
 

@@ -41,7 +41,6 @@ function fakeCtx(messages: Message[], opts: { pending?: number } = {}): HookCont
       get size() {
         return map.size;
       },
-      clear: () => map.clear(),
     },
     log: { debug() {}, info() {}, warn() {}, error() {} },
   } as unknown as HookContext;

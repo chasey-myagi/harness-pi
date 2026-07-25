@@ -18,16 +18,19 @@ import { renderRunReport, renderSessionEvent } from "./output.js";
 import {
   detectDefaultModel,
   envVarForProvider,
+  formatConfigDiagnostics,
   formatModelList,
   formatProviderList,
   loadDotEnv,
+  resolveAgentFeatures,
+  type AgentFeatures,
 } from "./config.js";
 import { toolNames, type ToolName } from "@harness-pi/tools";
 import { JsonlSessionStore } from "@harness-pi/adapters";
 import { ProcessTerminal } from "@earendil-works/pi-tui";
 import { createTuiApp } from "./tui/app.js";
 
-interface CliArgs {
+export interface CliArgs {
   cwd: string;
   model?: string | undefined;
   readOnly: boolean;
@@ -198,6 +201,15 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
     }
   }
 
+  const featureResolution = resolveAgentFeatures({
+    cwd: args.cwd,
+    cli: featureOverridesFromCliArgs(args),
+  });
+  for (const line of formatConfigDiagnostics(featureResolution.diagnostics)) {
+    process.stderr.write(`⚠️  ${line}\n`);
+  }
+  const features = featureResolution.features;
+
   const spec = resolveModelSpecOrDetect(args.model);
   let runtime: ReturnType<typeof resolveModelRuntime>;
   try {
@@ -205,60 +217,34 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
   } catch (err) {
     throw augmentKeyError(err, spec);
   }
-  const createOptions: Parameters<typeof createCodingAgent>[0] = {
-    cwd: args.cwd,
-    model: runtime.model,
-    readOnly: args.readOnly,
-    disabledTools: args.disabledTools,
-  };
-  if (args.noProjectInstructions) createOptions.noProjectInstructions = true;
-  if (args.trimHistory) createOptions.trimHistory = args.trimHistory;
-  if (runtime.llmOptions !== undefined) {
-    createOptions.llmOptions = runtime.llmOptions;
-  }
-  if (args.logDir !== undefined) createOptions.logDir = args.logDir;
-  if (args.noLog === true) createOptions.log = false;
-  if (args.logArgs !== undefined) createOptions.logArgs = args.logArgs;
-  if (args.metricsFile !== undefined) {
-    createOptions.metricsFile = args.metricsFile;
-  }
-  // TUI 模式默认开 tool 审批门（bash/write/edit 需确认）；--yolo 关闭。one-shot/readline 无弹窗、不挂门。
-  if (args.tui && !args.yolo) {
-    createOptions.permission = {};
-  }
-  // TUI 模式挂上 compaction hook：默认 {}（阈值=哨兵,不自动触发,但 /compact 可手动启用）；
-  // --compact 则设一个自动阈值（长对话超阈自动把早期消息压成摘要）。one-shot/readline 不挂。
-  if (args.tui) {
-    createOptions.compaction = args.compact
-      ? { maxMessages: 60, keepRecent: 8 }
-      : {};
-  }
 
-  // TUI 会话默认落盘到 .harness-pi/sessions/<id>.jsonl（崩溃后可 --resume 续跑）。
-  // resume：从给定 id 回放历史重建 session；新 TUI：随机 id 起新会话。one-shot/readline 不落盘。
+  // AgentFeatures decides whether capability wiring is present; mode only decides rendering/UX.
+  let sessionId: string | undefined = args.resume;
+  if (sessionId === undefined && features.persistence) {
+    sessionId = randomUUID();
+  }
+  const agentOptions = createOptions(args, runtime, features, sessionId);
+
+  // resume：从给定 id 回放历史重建 session；其余持久化会话使用 AgentFeatures 生成的新 id。
   let agent: CodingAgent;
-  let sessionId: string | undefined;
   if (args.resume !== undefined) {
-    sessionId = args.resume;
     // 提前挡 typo:resume 一个从没落过盘的 id 会静默开一个空会话（store 文件不存在→历史为空），
     // 用户还会在退出时看到误导的"Session saved"。不存在就直接报错。
-    if (!existsSync(sessionFilePath(args.cwd, sessionId))) {
+    if (!existsSync(sessionFilePath(args.cwd, args.resume))) {
       throw new Error(
-        `No saved session "${sessionId}" at ${sessionFilePath(args.cwd, sessionId)}`,
+        `No saved session "${args.resume}" at ${sessionFilePath(args.cwd, args.resume)}`,
       );
     }
+    const persistence = agentOptions.persistence;
+    if (!persistence) {
+      throw new Error("--resume requires persistence to be enabled");
+    }
     agent = await resumeCodingAgent({
-      ...createOptions,
-      persistence: persistenceFor(args.cwd, sessionId),
-      strictPersistence: true, // resume = 崩溃恢复路径，默认 strict：落盘不全则 reason→error + 显式告警
+      ...agentOptions,
+      persistence,
     });
   } else {
-    if (args.tui) {
-      sessionId = randomUUID();
-      createOptions.persistence = persistenceFor(args.cwd, sessionId);
-      createOptions.strictPersistence = true; // TUI 默认落盘 → 默认 strict（同 resume 理由）
-    }
-    agent = createCodingAgent(createOptions);
+    agent = createCodingAgent(agentOptions);
   }
 
   // #22 守卫：启动期就把 .harness-pi 未被 gitignore 的风险打到 stderr（早于任何落盘，且 TUI 路径
@@ -392,12 +378,12 @@ export function parseArgs(argv: string[]): CliArgs {
     }
     if (arg === "--compact") {
       out.compact = true;
-      out.tui = true; // compaction 是 TUI 特性。
+      out.tui = true; // CLI flag also opens the TUI so users can see /compact state.
       continue;
     }
     if (arg === "--resume") {
       out.resume = requireValue(argv, ++i, "--resume");
-      out.tui = true; // resume 是 TUI 崩溃续跑特性,隐含进 TUI。
+      out.tui = true; // resume keeps the existing TUI recovery UX.
       continue;
     }
     if (arg === "--disable") {
@@ -432,6 +418,59 @@ export function parseArgs(argv: string[]): CliArgs {
 
   if (task.length > 0) out.task = task.join(" ");
   return out;
+}
+
+export function featureOverridesFromCliArgs(args: CliArgs): Partial<AgentFeatures> {
+  const features: Partial<AgentFeatures> = {};
+  if (args.yolo) features.permission = "off";
+  if (args.compact) features.compaction = "auto";
+  if (args.resume !== undefined) {
+    features.persistence = true;
+    features.strictPersistence = true;
+  }
+  if (args.noLog === true) features.sessionLog = false;
+  if (args.metricsFile !== undefined) features.metrics = true;
+  return features;
+}
+
+export function createOptions(
+  args: CliArgs,
+  runtime: ReturnType<typeof resolveModelRuntime>,
+  features: AgentFeatures,
+  sessionId: string | undefined,
+): Parameters<typeof createCodingAgent>[0] {
+  const options: Parameters<typeof createCodingAgent>[0] = {
+    cwd: args.cwd,
+    model: runtime.model,
+    readOnly: args.readOnly,
+    disabledTools: args.disabledTools,
+  };
+  if (args.noProjectInstructions) options.noProjectInstructions = true;
+  if (args.trimHistory) options.trimHistory = args.trimHistory;
+  if (runtime.llmOptions !== undefined) {
+    options.llmOptions = runtime.llmOptions;
+  }
+  if (args.logDir !== undefined) options.logDir = args.logDir;
+  if (!features.sessionLog) options.log = false;
+  if (args.logArgs !== undefined) options.logArgs = args.logArgs;
+  if (features.metrics && args.metricsFile !== undefined) {
+    options.metricsFile = args.metricsFile;
+  }
+  if (features.permission === "ask") {
+    options.permission = {};
+  }
+  if (features.compaction === "summarize") {
+    options.compaction = {};
+  } else if (features.compaction === "auto") {
+    options.compaction = { maxMessages: 60, keepRecent: 8 };
+  }
+  if (features.strictPersistence) {
+    options.strictPersistence = true;
+  }
+  if (sessionId !== undefined && (features.persistence || args.resume !== undefined)) {
+    options.persistence = persistenceFor(args.cwd, sessionId);
+  }
+  return options;
 }
 
 export function parseDisabledTools(value: string): ToolName[] {
@@ -582,8 +621,8 @@ Options:
                            cache and is usually a net loss on caching providers. Use only on
                            non-caching providers or very long sessions.
   --resume <id>            Resume a saved TUI session (.harness-pi/sessions/<id>.jsonl).
-  --yolo                   (TUI) skip tool-approval prompts — allow bash/write/edit unattended.
-  --compact                (TUI) auto-summarize early messages when the conversation grows long.
+  --yolo                   Disable tool-approval prompts — allow bash/write/edit unattended.
+  --compact                Auto-summarize early messages when the conversation grows long.
   --disable <a,b>          Disable named first-party tools (read,bash,edit,write,grep,find,ls).
   --env-file <path>        Load env vars from a .env file (./.env is auto-loaded too).
   --log-dir <path>         Session log directory. Defaults to .harness-pi/logs.

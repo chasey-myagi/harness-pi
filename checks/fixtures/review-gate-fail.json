@@ -1,0 +1,26 @@
+{
+  "conditions": {
+    "architecture_or_abstraction_changed": true,
+    "implementation_changed": true,
+    "test_plan_requires_new_tests": false,
+    "tests_added_or_modified": true
+  },
+  "head_sha": "e36d97517d8d0b27faca1abe5e5c63f9f88684d9",
+  "linked_issue": 716,
+  "pr": 718,
+  "stages": {
+    "code_review": {
+      "artifact": "checks/fixtures/review-gate/code-review.md",
+      "status": "FAIL"
+    },
+    "linus_review": {
+      "artifact": "checks/fixtures/review-gate/linus-review.md",
+      "blocking_findings": 1,
+      "rating": "Close, but no cigar."
+    },
+    "test_review": {
+      "artifact": "checks/fixtures/review-gate/test-review.md",
+      "status": "PASS"
+    }
+  }
+}
