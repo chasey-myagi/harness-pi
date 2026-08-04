@@ -32,7 +32,11 @@
 
 ## 路线图
 
-[roadmap](roadmap.md) —— v0.1 readiness 剩余 scope、production 风险和后续 hardening 计划。
+[roadmap](roadmap.md) —— 分阶段路线：当前阶段已落地清单、production 风险和后续 hardening 计划。
+
+## 评测
+
+[swe-bench-eval](swe-bench-eval.md) —— claw-swe-bench 集成手册：官方评估器复现步骤、pilot 真数字（7 实例 4 resolved）与「怎么诚实读结果」。
 
 ## 项目状态
 
@@ -40,6 +44,7 @@
 - ✅ 标准库 plugins 和 controllers 已在库层实现，仍未经过外部 production 验证
 - ✅ `@harness-pi/tools` 提供 read / bash / edit / write / grep / find / ls 第一方基础 tools
 - ✅ 离线 examples 已覆盖 bare kernel、plugins、tools、batch pipeline、maker-verifier loop
+- ✅ SWE-bench pilot（官方评估器、隐藏测试）：跨 7 实例 4 resolved（qwen-plus）——规模与 caveat 见 [swe-bench-eval](swe-bench-eval.md)
 - ⚠️ 暂不建议现在全量替换 `bidding-agent`；streaming `message_update`、auto-compaction 和 Postgres metrics sink 已落地，不再是迁移前置项，剩余风险是外部 production-like spike、`bidding-agent` 最小迁移 spike 和真实规模验证——内核级风险预测（R1–R5）与 spike 必压的 7 条验证清单见 [13-architecture-deep-dive-verdicts](13-architecture-deep-dive-verdicts.md)
 - ⚠️ `apps/coding-agent` 的产品化能力面仍是设计 / 待实现：MCP、web、todo/plan、background bash、apply_patch/multi-edit、git/checkpoint、LSP、检索/记忆、sub-agent 管理面等见 [11-coding-agent-product-roadmap](11-coding-agent-product-roadmap.md)
 
