@@ -1,13 +1,15 @@
 /**
- * Hook protocol —— harness-pi 的核心扩展面。
+ * Hook protocol —— session 上的拦截 / 观察 / 变换面。
  *
- * 四种形态（按 method 前缀 / 返回 envelope 区分）：
- *   - Event       (on*)        并行；返回 HookResult 中只 additionalContext/systemMessage 等"输出型"字段生效
- *   - Decision    (onPreToolUse/onUserPromptSubmit) 顺序短路；首个 decision/updatedInput/continue=false 拿决策权
- *   - Transform   (transform*) 顺序 pipe；前者输出 = 后者输入
- *   - Around      (wrap*)      洋葱嵌套；早注册在外层
+ * 四种形态（按 method 前缀与返回 envelope 区分）：
+ *   - Event     (`on*`)       并行。返回值只认 additionalContext / systemMessage 等输出型字段。
+ *   - Decision  (`onPreToolUse` / `onUserPromptSubmit`) 顺序短路。
+ *     首个 `decision` / `updatedInput` / `continue === false` 拿决策权。
+ *   - Transform (`transform*`) 顺序 pipe；前者输出是后者输入。
+ *   - Around    (`wrap*`)      洋葱嵌套；早注册在外层。
  *
- * 详细执行模型 / 合并规则 / 性能契约见 docs/03-hook-system.md。
+ * `onContinuationCheck` 是 Event，与 `onSessionEnd` 分开：前者可多次、只在
+ * `reason === "done"` 时问要不要再跑；后者每个 `run()` 恰好一次。
  */
 
 import type {
