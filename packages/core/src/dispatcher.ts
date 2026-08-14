@@ -1,21 +1,17 @@
 /**
- * HookDispatcher —— 按 hook 形态走不同执行策略：
- *   - Event       并行 Promise.all + merge
- *   - Decision    顺序 await + short-circuit (first decisive wins)
- *                 关键：additionalContext / systemMessage 不算决断，会被聚合；
- *                 只有 decision / updatedInput / continue=false 才短路。
- *                 hook throw/timeout 默认 fail-open，failClosed=true 时视为 deny。
- *   - Pipe        顺序 await + 链式 transform
- *   - Around      reduceRight 构造嵌套链
+ * HookDispatcher —— 按 hook 形态派发：
+ *   - Event     并行 `Promise.all`，再 merge
+ *   - Decision  顺序短路：只有 `decision` / `updatedInput` / `continue === false`
+ *               拿权。`additionalContext` / `systemMessage` 只累积、不短路。
+ *               throw / timeout 默认 fail-open；`failClosed` 视为 deny。
+ *   - Pipe      顺序链式 transform
+ *   - Around    `reduceRight` 洋葱；无 per-hook timeout（协作式 abort）
  *
- * Per-hook timeout（默认按类型）+ try/catch + 上报 failureSink。
+ * 每条 hook（Around 除外）有按形态分的默认 timeout，失败进 `failureSink`。
  *
- * **聚合粒度差异**（注意 sink/dashboard 一致性）：
- *   - Event 路径：`MergedHookResult.systemMessages` 是 `string[]`，kernel 在 `_flushSystemMessages`
- *     里逐条 emit 给 consoleSink —— N 条 systemMessage = N 次 sink call。
- *   - Decision 路径：`HookResult.systemMessage` / `additionalContext` 是单数字段，dispatcher
- *     已把多 hook 累积值 `join("\n")` 成一条 —— N 条 systemMessage = 1 次 sink call。
- *   - 如果 dashboard 按 sink call 计数，两路径会差一截；按字节数 / 行数计就一致。
+ * Event 的 `systemMessages` 是 `string[]`（kernel 逐条打 consoleSink）。
+ * Decision 把多条 `systemMessage` / `additionalContext` `join("\n")` 成一条。
+ * 按 sink 调用次数计数会看到两条路径不一致；按字节 / 行数则一致。
  */
 
 import type { Tool, ToolCall } from "@earendil-works/pi-ai";

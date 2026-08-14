@@ -50,6 +50,10 @@ merge, or replace human final review.
 - Imports and dependencies match project conventions.
 - No new dependency was added silently.
 - No dead flexibility or one-implementation abstraction was introduced.
+- File / module headers match the implementation. A header that names an
+  obsolete API or control-flow (`complete()`, `onSessionEnd continue`) is
+  an Important finding and fails `/code-review` until it describes current
+  behavior. See `docs/AGENT_CODING_RULES.md` § Comment As Contract.
 
 ### Correctness
 

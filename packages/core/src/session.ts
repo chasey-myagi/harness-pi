@@ -1,15 +1,15 @@
 /**
- * AgentSession —— harness-pi 的 kernel。
+ * AgentSession —— harness-pi 的 kernel：LLM–tool 循环、hook 派发、run/continue/abort。
  *
- * 实现要点：
- *   - pi-ai complete() 跑 LLM；按 4 阶段派发 hook
- *   - tool 执行按 isConcurrencySafe 分组：safe 批 Promise.all，unsafe 批顺序
- *   - onSessionEnd continue=true 触发同 session 续跑（maxContinuations 兜底）
- *   - tool.execute throw → isError ToolExecResult 回灌
- *   - hook throw / timeout → dispatcher fail-open（decision hook failClosed=true 时 fail-closed）
- *   - Abort：**单 AbortController**；caller signal forward 进来，hook 调 ctx.abort 也 forward
- *
- * 详见 docs/02-kernel.md。
+ * 调用方可依赖：
+ *   - LLM I/O 走 pi-ai `stream()`。
+ *   - 连续 `isConcurrencySafe` 的 tool 并行；unsafe 调用是屏障。
+ *   - 自然结束（`reason === "done"`）后 `onContinuationCheck` 可在同一次
+ *     `run()` 里再开一轮 turn loop，受 `maxContinuations` 封顶。
+ *     `onSessionEnd` 每次 `run()` / `continue()` 恰好一次。
+ *   - `tool.execute` throw → `isError` tool result，循环继续。
+ *   - hook throw / timeout 默认 fail-open；`failClosed` 的 decision 视为 deny。
+ *   - 单个 AbortController：caller `signal` 与 `ctx.abort` 共用。
  */
 
 import {
