@@ -39,6 +39,22 @@ Avoid:
 Duplication is cheaper than the wrong abstraction until a second real use case
 exists.
 
+## Comment As Contract
+
+Module and export comments state what callers may rely on now.
+
+- Write behavior, failure, timing, ownership, and invariants.
+- Do not narrate control flow, tests, review history, or milestone names
+  (`Phase 3`, `Gate-1`, `PR #N`, `docs/09 §3.1`).
+- Do not use obsolete verbs or APIs (`complete()` when the code calls
+  `stream()`; `onSessionEnd continue` when continuation is
+  `onContinuationCheck`).
+- Rationale and rejected alternatives belong in an Agent Note (`#186`),
+  not in the source header. Link the note if one exists.
+
+A file header that contradicts the implementation is a defect. Treat it
+like a stale `docs/` contract (`#182`).
+
 ## Keep Diffs Surgical
 
 Every changed line should tie back to the selected route and task.
