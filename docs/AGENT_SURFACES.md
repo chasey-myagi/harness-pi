@@ -14,6 +14,7 @@ Surface files are adapters into the same repo contract.
 | Generic CLI agent | `AGENTS.md` + `AGENT_USAGE.md` | Explicit loading path for agents without native instruction discovery. |
 | Skills | `skills/*/SKILL.md` | Execution guides for specific routes. |
 | Hooks | `.claude/hooks`, `.codex/config.toml`, CI jobs | Enforcement or guardrails, not workflow authority. |
+| GitHub UI | `.github/ISSUE_TEMPLATE/`, `.github/pull_request_template.md` | Public issue/PR body. Same contract as `templates/`; shorter so humans fill it. |
 
 ## Authority Order
 
