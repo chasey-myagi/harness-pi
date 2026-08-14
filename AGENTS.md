@@ -23,6 +23,8 @@ Before changing code, read:
 10. `checks/review_gate.py` when running review-gate evidence
 11. `skills/harness-pi-workflow/SKILL.md`
 
+GitHub Issue / PR 用 `.github/ISSUE_TEMPLATE/` 与 `.github/pull_request_template.md`。`templates/` 是同一合同的完整字段，给 agent 路由用。
+
 `CLAUDE.md` remains the repository-specific architecture guide. The workflow
 files decide whether a route may proceed; `CLAUDE.md` decides how code should
 fit the harness-pi architecture.

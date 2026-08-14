@@ -1,3 +1,5 @@
+<!-- GitHub 默认 PR 正文：.github/pull_request_template.md。本文件是完整 Pilot 门禁，implement / review_pr 路由必填。 -->
+
 # Summary
 
 Describe the change in 1-3 sentences.

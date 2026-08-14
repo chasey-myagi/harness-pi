@@ -1,3 +1,5 @@
+<!-- GitHub 开票表单：.github/ISSUE_TEMPLATE/bug.md。本文件是完整字段，给 agent / 规格包用。 -->
+
 # Bug Report
 
 ## Summary
