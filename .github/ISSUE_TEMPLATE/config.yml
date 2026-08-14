@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: 仓库冻结说明
+    url: https://github.com/chasey-myagi/harness-pi/issues/178
+    about: 新功能不排期。要动手先在 #178 下声明。尚未承诺落地的想法请用 Design 模板。
