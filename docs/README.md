@@ -21,6 +21,7 @@
 | 12 | [agent-loop-development-workflow](12-agent-loop-development-workflow.md) | 如何用 surface-neutral maker-verifier loop 来开发 harness-pi 本身 | 设计 agent-driven 开发流程的人 |
 | 13 | [architecture-deep-dive-verdicts](13-architecture-deep-dive-verdicts.md) | L1/L2 六议题架构深挖裁决：三工作包、不做清单、迁移 spike 7 条验证清单（完整论证见 [对比报告 HTML](harness-pi-vs-pi-mono-hooks.html)） | 决定下一阶段内核投入的人 |
 | 14 | [production-coding-agent-architecture](14-production-coding-agent-architecture.md) | 生产级 coding-agent 架构：headless 硬化、装配地基、安全纵深（沙箱/信任门）、交付形态（RPC 第四态）——回答"凭什么敢让它无人值守改代码"（能力面见 11） | 把 coding-agent 推向生产的人 |
+| 15 | [donor-manifest](15-donor-manifest.md) | 搬什么到 [sage](https://github.com/chasey-myagi/sage)：按文件 / 概念两列，每条注明形态（整体搬 / 搬骨架 / 搬概念 / 不搬）与理由 | 从本仓取材的人 |
 
 ## Agent workflow
 
@@ -32,7 +33,7 @@
 
 ## 路线图
 
-[roadmap](roadmap.md) —— 分阶段路线：当前阶段已落地清单、production 风险和后续 hardening 计划。
+[roadmap](roadmap.md) —— 本仓不排期；保留议题（A–D 工作包）与「本仓不做什么」。
 
 ## 评测
 
@@ -40,13 +41,16 @@
 
 ## 项目状态
 
+**[#207](https://github.com/chasey-myagi/harness-pi/issues/207) 拍板 D：本仓是参考实现 / 取材源（donor），不进依赖树，不再排期实现型工作。** 新内核在 [chasey-myagi/sage](https://github.com/chasey-myagi/sage) 重写。取材清单见 [15-donor-manifest](15-donor-manifest.md)。
+
+已有代码的事实（照常可跑、照常取材）：
+
 - ✅ Core kernel、hook dispatcher、message transform / around / event hooks、streaming `message_update`、steering、auto-compaction 机制已实现
-- ✅ 标准库 plugins 和 controllers 已在库层实现，仍未经过外部 production 验证
+- ✅ 标准库 plugins 和 controllers 已在库层实现，未经过外部 production 验证
 - ✅ `@harness-pi/tools` 提供 read / bash / edit / write / grep / find / ls 第一方基础 tools
 - ✅ 离线 examples 已覆盖 bare kernel、plugins、tools、batch pipeline、maker-verifier loop
 - ✅ SWE-bench pilot（官方评估器、隐藏测试）：跨 7 实例 4 resolved（qwen-plus）——规模与 caveat 见 [swe-bench-eval](swe-bench-eval.md)
-- ⚠️ 暂不建议现在全量替换 `bidding-agent`；streaming `message_update`、auto-compaction 和 Postgres metrics sink 已落地，不再是迁移前置项，剩余风险是外部 production-like spike、`bidding-agent` 最小迁移 spike 和真实规模验证——内核级风险预测（R1–R5）与 spike 必压的 7 条验证清单见 [13-architecture-deep-dive-verdicts](13-architecture-deep-dive-verdicts.md)
-- ⚠️ `apps/coding-agent` 的产品化能力面仍是设计 / 待实现：MCP、web、todo/plan、background bash、apply_patch/multi-edit、git/checkpoint、LSP、检索/记忆、sub-agent 管理面等见 [11-coding-agent-product-roadmap](11-coding-agent-product-roadmap.md)
+- ⛔ `bidding-agent` 迁移 spike、外部 production-like spike、`apps/coding-agent` 的产品化能力面（MCP、web、todo/plan、background bash、git/checkpoint、LSP 等）**本仓不做**；相关论证留作设计输入，见 [13-architecture-deep-dive-verdicts](13-architecture-deep-dive-verdicts.md) 与 [11-coding-agent-product-roadmap](11-coding-agent-product-roadmap.md)
 
 ## 文档维护原则
 

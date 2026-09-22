@@ -1,12 +1,18 @@
 # 00 · Overview
 
 > 项目定位、目标用户、跟 pi-mono 的关系、设计哲学。
+>
+> **状态（[#207](https://github.com/chasey-myagi/harness-pi/issues/207) 拍板 D）**：本仓是**参考实现 / 取材源（donor）**，不进任何下游的依赖树。下面描述的是它**被建成什么形状、为什么这么建**——取材时要看懂的就是这些。搬什么、按什么形态搬见 [15-donor-manifest](15-donor-manifest.md)。
 
 ## 1. 一句话定位
 
-**harness-pi 是给后端 / 服务端 / headless agent 的运行时基础设施**，建立在 [`@earendil-works/pi-ai`](https://github.com/badlogic/pi-mono/tree/main/packages/ai) 之上，提供 hook 系统、生命周期管理、metrics、Context 注入、基础 coding tools、并行编排等"驾驭 agent 所必需的东西"——而把 agent 内核保持最小。
+**harness-pi 是一套给后端 / 服务端 / headless agent 的运行时基础设施的参考实现**，建立在 [`@earendil-works/pi-ai`](https://github.com/badlogic/pi-mono/tree/main/packages/ai) 之上，提供 hook 系统、生命周期管理、metrics、Context 注入、基础 coding tools、并行编排等"驾驭 agent 所必需的东西"——而把 agent 内核保持最小。
 
-## 2. 谁该用 harness-pi
+它**不作为依赖被消费**：要用它解决的问题，按 MIT 把设计和代码搬走（见 [15-donor-manifest](15-donor-manifest.md)），而不是 `pnpm add`。
+
+## 2. 它是为哪些场景建的
+
+下面这些是塑造了本仓设计取舍的场景。**读它们是为了判断某条设计值不值得搬**，不是在推荐把本仓当依赖装进你的服务。
 
 - 把 agent 部署成 **后端 HTTP / WebSocket 服务**
 - 跑 **批处理 / scheduled worker** 处理大量任务
@@ -18,7 +24,7 @@
 
 典型场景：bidding-agent 这种"上传文件 → agent 处理 → 用户审核"流程；研究助手；PR review agent；客服路由 agent；多租户 SaaS agent 后台。
 
-## 3. 谁不该用 harness-pi
+## 3. 哪些问题不该来这里找答案
 
 - 想要 **终端交互式编码 agent**——用 [pi-coding-agent](https://github.com/badlogic/pi-mono/tree/main/packages/coding-agent) 现成的，那个跟 IDE/Shell 集成、有 `/login`、`/resume`、skill / extension / theme 系统。
 - 已经全栈用 **LangChain / LangGraph / LlamaIndex**——他们覆盖了 RAG / chain / graph 等更高层抽象，本项目不重复。
@@ -137,20 +143,21 @@ Hot path 上的 plugin **只允许同步操作或 push-to-queue**。需要持久
 
 ## 7. 项目状态
 
-| Phase | 状态 |
+**[#207](https://github.com/chasey-myagi/harness-pi/issues/207) 拍板 D。** 本仓是**参考实现 / 取材源（donor）**，不进任何下游的依赖树，不再排期实现型工作——只做卫生与取材文档。新内核在 [chasey-myagi/sage](https://github.com/chasey-myagi/sage) 重写：内核只有 Log 与 View seam 两个原语，provider 适配自写，不再依赖 `@earendil-works/pi-ai`。
+
+**从这里搬什么、按什么形态搬，见 [15-donor-manifest](15-donor-manifest.md)。** 路线收口见 [roadmap](roadmap.md)。
+
+已有代码的事实（照常可跑、照常取材）：
+
+| 部分 | 状态 |
 |---|---|
-| 0 设计签字 | 已完成到可实现状态，文档仍需随代码同步 |
-| 1 Kernel 跑通 | 已实现：`AgentSession`、dispatcher、tool executor、core tests |
-| 2 标准库 plugin | 已实现：核心 12 + compaction / permission / deferred tools / skills / prefix diagnostics 等高级 plugin |
-| 3 Controller 层 | 已实现第一版：lifecycle-restart / work-pool / lease-queue / compact restart/resume / fork / orchestrate / sub-agent registry 等；`sideQuestion` 仍未落地 |
-| 4 第一方 tools | 已实现：`@harness-pi/tools` 七个基础 tools |
-| 5 第三方 agent 反向验证 | 未完成 |
-| 6 bidding-agent 反向消费 | 不建议现在全量替换；先 spike |
-| 7 公开 / 冻结 v0.1 | 未完成 |
+| Kernel | 已实现：`AgentSession`、dispatcher、tool executor、core tests |
+| 标准库 plugin | 已实现：核心 12 + compaction / permission / deferred tools / skills / prefix diagnostics 等高级 plugin |
+| Controller 层 | 已实现第一版：lifecycle-restart / work-pool / lease-queue / compact restart/resume / fork / orchestrate / sub-agent registry 等；`sideQuestion` 未落地，且**不会在本仓落地** |
+| 第一方 tools | 已实现：`@harness-pi/tools` 七个基础 tools |
+| 外部 production 验证 | **没有，也不会有。** 本仓无外部 production 用户，`bidding-agent` 迁移 spike 与真实规模验证一并不做 |
 
-详见 [roadmap](roadmap.md)。
-
-当前风险：核心机制已实现并有测试覆盖（`message_update` 渐进式 streaming、auto-compaction、PG metrics sink、`TypedStateMap` + `HookStateRegistry` 均已落地），但**尚无外部 production 用户**。真实 provider smoke 已覆盖 streaming / error 提级 / budget-bound continuation；reactive overflow 仍主要靠确定性测试覆盖，`bidding-agent` 真实迁移 spike 还没做。`ctx.state` 更强 slot API / 跨 plugin key 约束仍是 hardening 议题，而不是已落地事实（成熟度三层详见 [README](../README.md)「当前状态」）。
+已知未收敛的议题（`ctx.state` 的跨 plugin 约束、持久化演进、reactive overflow 只靠确定性测试覆盖）留作设计输入，不在本仓修——它们在 Log + View seam 下的形状不同，属于 sage 的重新设计范围。
 
 ## 8. 下一步
 
