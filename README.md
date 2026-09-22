@@ -6,12 +6,13 @@
 [![CI](https://github.com/chasey-myagi/harness-pi/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/chasey-myagi/harness-pi/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
+> **[#207](https://github.com/chasey-myagi/harness-pi/issues/207) 拍板 D：本仓是参考实现 / 取材源（donor），不进依赖树，不再开发新功能。** 新内核在 [chasey-myagi/sage](https://github.com/chasey-myagi/sage) 重写。要搬什么、按什么形态搬，见 [docs/15-donor-manifest](docs/15-donor-manifest.md)。详见[当前状态](#当前状态)。
+
 ```bash
+# 代码照常可跑；npm 上的四个包（core / plugins / tools / adapters）停在 0.5.0，不再发新版
 pnpm add @harness-pi/core @harness-pi/plugins @harness-pi/tools
 # 可选：@harness-pi/adapters（NDJSON / Postgres / OTel 等 sink 后端）
 ```
-
-npm 已发布 0.5.0（core / plugins / tools / adapters 四包）；`main` 为 0.6.0 发布候选，详见[当前状态](#当前状态)。
 
 ## 定位
 
@@ -99,13 +100,19 @@ const summary = await session.run("call echo for me");
 
 ## 当前状态
 
-`main` 当前是 **0.6.0 发布候选**（[#169](https://github.com/chasey-myagi/harness-pi/pull/169)，49 commits 的 hardening wave：#127 resume 悬空 toolCall 修复、#128 cache-safe 投影一致性、#131 branded Slot API、#132 L1 seam `completeText`、#133 LeaseQueue 指数退避、#140 工具危险度元数据、#141 AgentFeatures 声明式装配、#142 bash exec 咽喉点契约等）；npm 已发布 **0.5.0**，0.6.0 正式 bump + 发包在途。0.5.0 的旗舰能力是 **cache-aware 封存投影**——`compaction_boundary` 是 live 投影一等公民，上下文投影前缀字节稳定、对 provider prompt-cache 友好（prefix 稳定性回归门 + 真 provider cache A/B 脚本验证）。
+**[#207](https://github.com/chasey-myagi/harness-pi/issues/207) 拍板 D（2026-09-22）：harness-pi 是参考实现 / 取材源（donor），不进任何下游的依赖树，不再开发新功能。**
 
-判断成熟度时区分三个层级，别把它们混为一谈：
+理由两条：它自己站在第三方 `@earendil-works/pi-ai`（13309 行手写代码，本仓只用到其中 13 个运行时符号、2 个 provider）之上，说不清 loop 里发生了什么，这是结构性的；而新设计要改的是内核原语——模型这一 turn 看到的 view 要从「三条 transform pipe 改写出来的副作用」变成「从 append-only Log 投影出来的一等对象」——改造的代价高于重写。
 
-1. **机制已实现**（代码 + 测试通过）：core loop、hook dispatcher、streaming `message_update` / thinking parity、完整 auto-compaction、22 plugin 工厂、14 controller 构件、NDJSON/Postgres/OTel sink——CI 挂真 Postgres service 跑 adapters 的 18 个集成测试。
-2. **provider 已验证**：真实 provider（DashScope/Qwen）smoke——streaming、error 提级、budget-bound continuation（小预算下跨 autoCompaction 续跑）已验证（`pnpm --filter @harness-pi/coding-agent run smoke:provider`，key 经 env 注入不落盘，任一 ✗ 则非零退出）；SWE-bench 官方评估 pilot 见上节。reactive overflow（>窗口强行触发）在容忍型 1M 窗口 provider 上测不了，由确定性测试 `context-overflow.test.ts` 覆盖——已知限制（#82）。
-3. **生产迁移已验证**：用一个真实生产业务 agent（内部代号 `bidding-agent`，文档沿用此名）完成迁移 spike。**尚未完成**——这是当前与「生产替代品」之间的唯一差距：缺的是真实规模验证，不是机制。
+新内核在 **[chasey-myagi/sage](https://github.com/chasey-myagi/sage)** 重写：内核只有 **Log** 与 **View seam** 两个原语，provider 适配自写。**从这里搬什么、按什么形态搬（整体搬 / 搬骨架 / 搬概念 / 不搬），见 [docs/15-donor-manifest](docs/15-donor-manifest.md)。**
+
+代码本身照常可跑、照常取材。判断成熟度时区分三个层级，别把它们混为一谈：
+
+1. **机制已实现**（代码 + 测试通过）：core loop、hook dispatcher、streaming `message_update` / thinking parity、完整 auto-compaction、22 plugin 工厂、14 controller 构件、NDJSON/Postgres/OTel sink——CI 挂真 Postgres service 跑 adapters 的 18 个集成测试。0.5.0 的旗舰能力是 **cache-aware 封存投影**——`compaction_boundary` 是 live 投影一等公民，上下文投影前缀字节稳定、对 provider prompt-cache 友好。
+2. **provider 已验证**：真实 provider（DashScope/Qwen）smoke——streaming、error 提级、budget-bound continuation（小预算下跨 autoCompaction 续跑）已验证（`pnpm --filter @harness-pi/coding-agent run smoke:provider`，key 经 env 注入不落盘，任一 ✗ 则非零退出）；SWE-bench 官方评估 pilot 见上节。reactive overflow（>窗口强行触发）在容忍型 1M 窗口 provider 上测不了，由确定性测试 `context-overflow.test.ts` 覆盖——已知限制。
+3. **生产迁移已验证**：**没有，也不会有。** 用真实生产业务 agent（内部代号 `bidding-agent`）完成迁移 spike 这件事本仓不做。它一直是「机制已实现」与「生产替代品」之间的唯一差距，现在这个差距由 sage 来填。
+
+npm 上的四个包停在 **0.5.0**，不再发新版；`main` 是 0.6.0 发布候选（[#169](https://github.com/chasey-myagi/harness-pi/pull/169)，49 commits 的 hardening wave），不再正式 bump。路线收口见 [docs/roadmap.md](docs/roadmap.md)。
 
 ## Dogfood Agents
 
@@ -139,7 +146,7 @@ harness-pi/
 │   ├── tools/        # @harness-pi/tools —— read / bash / edit / write / grep / find / ls
 │   ├── adapters/     # @harness-pi/adapters —— NDJSON / Postgres / OTel 等 sink
 │   └── transcript/   # @harness-pi/transcript —— 内核事件契约镜像（孵化中）
-├── docs/             # 00–14 编号文档 + SWE-bench 评测手册（docs/README.md 为索引）
+├── docs/             # 00–15 编号文档 + SWE-bench 评测手册（docs/README.md 为索引）
 ├── examples/         # 01-bare-kernel … 05-maker-verifier-loop（离线可跑）
 └── README.md
 ```
